@@ -26,13 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: jiro4989/setup-nim-action@v2
+      # Тулчейн из ГОТОВОГО бинаря + кэш (issue #42): setup-nim-action
+      # на macOS собирает Nim из исходников (~5 мин), потому что его
+      # install_nim.sh берёт предсобранный tarball только для Linux+x86_64.
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
         with:
-          # Точная версия, а не '2.2.x': ветка 'x' заставляет action дёргать
-          # GitHub API (refs/tags) без токена -> 401 -> падение jq в action.
-          # С точной версией action просто качает релиз с nim-lang.org.
+          # Точная версия, а не '2.2.x'/'stable': предсобранный бинарь
+          # качается по имени файла, и ветка 'x' его не адресует.
           nim-version: '2.2.12'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Показать версию Nim
         run: nim --version
@@ -50,10 +52,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: jiro4989/setup-nim-action@v2
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
         with:
           nim-version: '2.2.12'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: nimble buildRelease
         run: nimble buildRelease
@@ -75,10 +77,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: jiro4989/setup-nim-action@v2
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
         with:
           nim-version: '2.2.12'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Debug — guard включён и ловит нарушения
         run: |
@@ -129,10 +131,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: jiro4989/setup-nim-action@v2
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
         with:
           nim-version: '2.2.12'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: nimble miniaudioSmoke
         run: nimble miniaudioSmoke
@@ -263,10 +265,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: jiro4989/setup-nim-action@v2
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
         with:
           nim-version: '2.2.12'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Сборка и прогон под TSan
         run: |
@@ -301,10 +303,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: jiro4989/setup-nim-action@v2
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
         with:
           nim-version: '2.2.12'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: nimble ubsan
         run: nimble ubsan
@@ -324,10 +326,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: jiro4989/setup-nim-action@v2
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
         with:
           nim-version: '2.2.12'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: nimble asan
         run: nimble asan
@@ -348,10 +350,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: jiro4989/setup-nim-action@v2
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
         with:
           nim-version: '2.2.12'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: nimble clapMock
         run: nimble clapMock
