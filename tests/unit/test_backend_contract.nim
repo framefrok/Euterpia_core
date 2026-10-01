@@ -13,6 +13,7 @@
 import std/[unittest, atomics]
 import audio_backend_api
 import audio_engine
+import ipc_bus
 
 const
   FakeBlockSize = 128
@@ -25,6 +26,8 @@ type
     running: bool
     render: AudioRenderProc
     engineCtx: pointer
+    ## Приёмник xrun'ов, как у реальных адаптеров (issue #4).
+    reportStatus: AudioStatusProc
     outChannels: int32
     xruns: Atomic[uint64]
     pumpedBlocks: Atomic[uint64]
@@ -67,6 +70,7 @@ proc fakeOpen(
 
   fb.render = render
   fb.engineCtx = engineCtx
+  fb.reportStatus = cfg.reportStatus
   fb.outChannels = cfg.outputChannels
   fb.opened = true
   abeOk
@@ -97,6 +101,7 @@ proc fakeClose(api: ptr AudioBackendApi) {.cdecl, raises: [], gcsafe.} =
   fb.running = false
   fb.render = nil
   fb.engineCtx = nil
+  fb.reportStatus = nil
 
 proc fakeIsRunning(api: ptr AudioBackendApi): bool
     {.cdecl, raises: [], gcsafe.} =
@@ -194,6 +199,10 @@ proc fakePump(
 
   if statusFlags != 0'u64:
     discard fb.xruns.fetchAdd(1'u64, moRelaxed)
+    # Как реальные адаптеры: сообщаем движку ДО render, чтобы xrun попал
+    # именно в метрику этого блока (issue #4).
+    if not fb.reportStatus.isNil:
+      fb.reportStatus(fb.engineCtx, uint32(statusFlags))
 
   discard fb.pumpedBlocks.fetchAdd(1'u64, moRelaxed)
   fb.render(fb.engineCtx, nil, buf, frames, 0, fb.outChannels)
@@ -384,6 +393,138 @@ suite "audio_backend_api + AudioEngine":
     check fakePumped(api) == 2'u64
 
     check engine.postStop()
+
+    backendClose(api)
+    fakeDestroy(api)
+    destroyAudioEngine(engine)
+
+
+# ---------------------------------------------------------------------------
+# Xruns доходят до EngineMetric (issue #4)
+# ---------------------------------------------------------------------------
+
+const
+  ## paOutputUnderflow в терминах PortAudio. Обязан совпадать с битом
+  ## AudioStreamFlag.asfOutputUnderflow — на этом стоит контракт
+  ## cfg.reportStatus.
+  FakeOutputUnderflowFlag = 0x00000004'u32
+
+proc engineReportStatus(engineCtx: pointer; statusFlags: uint32)
+    {.cdecl, raises: [].} =
+  ## Хост передаёт сюда `engine.noteStatus` — адаптер о AudioEngine не знает.
+  noteStatus(cast[ptr AudioEngine](engineCtx), statusFlags)
+
+suite "audio_backend_api + AudioEngine: xruns (#4)":
+  test "контракт: статус-флаг PortAudio совпадает с битом AudioStreamFlag":
+    check FakeOutputUnderflowFlag == statusFlagMask(asfOutputUnderflow)
+    check 0x00000002'u32 == statusFlagMask(asfInputOverflow)
+    check 0x00000008'u32 == statusFlagMask(asfOutputOverflow)
+
+  test "xrun драйвера доходит до EngineMetric ровно один раз за блок":
+    let engine = createAudioEngine(
+      sampleRate = 48000.0f,
+      blockSize = int32(FakeBlockSize)
+    )
+    check engine != nil
+
+    let api = fakeCreate()
+    var cfg = fakeConfig()
+    cfg.reportStatus = engineReportStatus
+    check backendOpen(api, cfg, engineRender, cast[pointer](engine)) == abeOk
+    check backendStart(api) == abeOk
+
+    var buf: array[FakeBlockSize * FakeOutChannels, float32]
+    let p = cast[ptr UncheckedArray[float32]](addr buf[0])
+    var m: EngineMetric
+
+    # Чистый блок: ни xrun'ов, ни статус-флагов.
+    fakePump(api, p, int32(FakeBlockSize))
+    check engine.pollMetrics(m)
+    check m.xruns == 0'u32
+    check m.driverStatusFlags == 0'u64
+    check engine.xrunCount() == 0'u32
+    check engine.driverStatusFlags() == 0'u64
+
+    # output-underflow: ровно один xrun за блок.
+    fakePump(api, p, int32(FakeBlockSize), statusFlags = uint64(FakeOutputUnderflowFlag))
+    check engine.pollMetrics(m)
+    check m.xruns == 1'u32
+    check m.driverStatusFlags == uint64(FakeOutputUnderflowFlag)
+    check engine.xrunCount() == 1'u32
+    check engine.driverStatusFlags() == uint64(FakeOutputUnderflowFlag)
+
+    # Метрика — ДЕЛЬТА за блок, тотал — монотонный.
+    fakePump(api, p, int32(FakeBlockSize))
+    check engine.pollMetrics(m)
+    check m.xruns == 0'u32
+    check engine.xrunCount() == 1'u32
+    # «Какие xrun'ы наблюдались» накапливается: это не дельта.
+    check m.driverStatusFlags == uint64(FakeOutputUnderflowFlag)
+
+    # Второй xrun -> дельта снова 1, тотал 2.
+    fakePump(api, p, int32(FakeBlockSize), statusFlags = uint64(FakeOutputUnderflowFlag))
+    check engine.pollMetrics(m)
+    check m.xruns == 1'u32
+    check engine.xrunCount() == 2'u32
+
+    backendClose(api)
+    fakeDestroy(api)
+    destroyAudioEngine(engine)
+
+  test "входной статус (noteInputStatus) тоже виден в общей метрике":
+    let engine = createAudioEngine(
+      sampleRate = 48000.0f,
+      blockSize = int32(FakeBlockSize)
+    )
+    check engine != nil
+    defer: destroyAudioEngine(engine)
+
+    # Как это делает адаптер входного тракта: отдельный счётчик входа + тотал.
+    let flags = statusFlagMask(asfInputOverflow)
+    engine.noteInputStatus(flags)
+    check engine.inputXrunCount() == 1'u32
+    check engine.xrunCount() == 1'u32
+
+    var m: EngineMetric
+    let api = fakeCreate()
+    check backendOpen(api, fakeConfig(), engineRender, cast[pointer](engine)) == abeOk
+    check backendStart(api) == abeOk
+    var buf: array[FakeBlockSize * FakeOutChannels, float32]
+    let p = cast[ptr UncheckedArray[float32]](addr buf[0])
+    fakePump(api, p, int32(FakeBlockSize))
+    check engine.pollMetrics(m)
+    check m.xruns == 1'u32
+    check m.inputXruns == 1'u32
+    check m.driverStatusFlags == uint64(flags)
+    backendClose(api)
+    fakeDestroy(api)
+
+  test "чистый прогон 10 000 блоков: xrun'ов нет":
+    let engine = createAudioEngine(
+      sampleRate = 48000.0f,
+      blockSize = int32(FakeBlockSize)
+    )
+    check engine != nil
+
+    let api = fakeCreate()
+    var cfg = fakeConfig()
+    cfg.reportStatus = engineReportStatus
+    check backendOpen(api, cfg, engineRender, cast[pointer](engine)) == abeOk
+    check backendStart(api) == abeOk
+
+    var buf: array[FakeBlockSize * FakeOutChannels, float32]
+    let p = cast[ptr UncheckedArray[float32]](addr buf[0])
+    var m: EngineMetric
+
+    for i in 0 ..< 10_000:
+      fakePump(api, p, int32(FakeBlockSize))
+      # Метрик-очередь ограничена: дренируем каждый блок.
+      while engine.pollMetrics(m):
+        check m.xruns == 0'u32
+
+    check engine.xrunCount() == 0'u32
+    check engine.driverStatusFlags() == 0'u64
+    check backendXrunCount(api) == 0'u64
 
     backendClose(api)
     fakeDestroy(api)

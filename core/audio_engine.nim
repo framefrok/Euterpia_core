@@ -96,6 +96,19 @@ type
     inputStatusFlags: Atomic[uint32]
     inputXruns: Atomic[uint32]
 
+    # Диагностика xrun'ов любого направления (issue #4).
+    #
+    # Адаптер сообщает статус через cfg.reportStatus -> engine.noteStatus:
+    #   driverStatusFlags — накопленный битмаск «какие xrun'ы были»
+    #                       (ординалы AudioStreamFlag, см. statusFlagMask);
+    #   pendingXruns      — сколько xrun'ов накопилось С прошлого блока;
+    #                       renderBlock забирает его как дельту (exchange 0);
+    #   totalXruns        — монотонный счётчик за всё время жизни движка.
+    # Все три — только атомики: в audio-потоке нет локов и аллокаций.
+    driverStatusFlags: Atomic[uint64]
+    pendingXruns: Atomic[uint32]
+    totalXruns: Atomic[uint32]
+
     # Опциональная маршрутизация входа: input -> TrackInputRouting -> AudioRecorder.
     # Движок владеет только указателем; временем жизни рекордера владеет хост.
     recorder: ptr AudioRecorder
@@ -316,6 +329,9 @@ proc createAudioEngine*(
   result.inputDeviceChannels = 0
   result.inputStatusFlags.store(0'u32, moRelaxed)
   result.inputXruns.store(0'u32, moRelaxed)
+  result.driverStatusFlags.store(0'u64, moRelaxed)
+  result.pendingXruns.store(0'u32, moRelaxed)
+  result.totalXruns.store(0'u32, moRelaxed)
   result.recorder = nil
 
   initSharedPool(result.sharedPool)
@@ -731,18 +747,51 @@ proc setInputChannels*(engine: ptr AudioEngine; channels: int32) =
     elif channels > int32(MaxInputChannels): int32(MaxInputChannels)
     else: channels
 
+proc noteXrunInternal(engine: ptr AudioEngine; statusFlags: uint32) {.inline.} =
+  ## Общий хвост обоих приёмников статуса (issue #4): накопленный битмаск
+  ## «какие xrun'ы были», дельта текущего блока и монотонный тотал.
+  discard engine.driverStatusFlags.fetchOr(uint64(statusFlags), moRelaxed)
+  discard engine.pendingXruns.fetchAdd(1'u32, moRelaxed)
+  discard engine.totalXruns.fetchAdd(1'u32, moRelaxed)
+
+proc noteStatus*(engine: ptr AudioEngine; statusFlags: uint32) {.cdecl.} =
+  ## Realtime-safe: адаптер сообщает xrun любого направления (issue #4).
+  ##
+  ## Один вызов = один xrun. `statusFlags` — битмаск по ординалам
+  ## `AudioStreamFlag` (см. `statusFlagMask` в audio_backend_api).
+  ## Только атомарные операции: логирование и аллокации запрещены.
+  if engine == nil or statusFlags == 0'u32:
+    return
+  noteXrunInternal(engine, statusFlags)
+
 proc noteInputStatus*(engine: ptr AudioEngine; statusFlags: uint32) {.cdecl.} =
-  ## Realtime-safe: адаптер сообщает статус драйвера (paInputOverflow и др.).
-  ## Только атомарные операции — логирование запрещено.
+  ## Как `noteStatus`, но дополнительно ведёт отдельный счётчик ВХОДНЫХ
+  ## xrun'ов (issue #3): драйвер сообщает входные overflow/underflow.
   if engine == nil or statusFlags == 0'u32:
     return
   discard engine.inputStatusFlags.fetchAdd(statusFlags, moRelaxed)
   discard engine.inputXruns.fetchAdd(1'u32, moRelaxed)
+  noteXrunInternal(engine, statusFlags)
 
 proc inputXrunCount*(engine: ptr AudioEngine): uint32 =
   if engine == nil:
     return 0
   engine.inputXruns.load(moRelaxed)
+
+proc xrunCount*(engine: ptr AudioEngine): uint32 =
+  ## Монотонный счётчик xrun'ов любого направления за время жизни движка.
+  ## Control-path (issue #4).
+  if engine == nil:
+    return 0
+  engine.totalXruns.load(moRelaxed)
+
+proc driverStatusFlags*(engine: ptr AudioEngine): uint64 =
+  ## Какие именно xrun'ы наблюдались: битмаск по ординалам `AudioStreamFlag`.
+  ## Позволяет UI/CLI отличить input-overflow от output-underflow, не зная
+  ## нативных констант драйвера. Control-path (issue #4).
+  if engine == nil:
+    return 0'u64
+  engine.driverStatusFlags.load(moRelaxed)
 
 proc attachRecorder*(engine: ptr AudioEngine; rec: ptr AudioRecorder) =
   ## Маршрутизация входного тракта в рекордер (issue #3).
@@ -824,7 +873,6 @@ proc renderBlockInternal(
   metric.rmsL = 0.0f
   metric.rmsR = 0.0f
   metric.cpuLoad = 0.0f
-  metric.xruns = 0
   metric.sampleRate = float64(engine.transport.sampleRate)
   metric.bufferSize = uint32(engine.blockSize)
 
@@ -843,6 +891,12 @@ proc renderBlockInternal(
   computeStereoMetrics(driverOut, frames, metric)
   computeInputMetrics(engine.inputBuffer, frames, metric)
   metric.inputXruns = engine.inputXruns.load(moRelaxed)
+
+  # Xrun'ы (issue #4). Адаптер сообщил их через cfg.reportStatus ДО вызова
+  # render, поэтому exchange здесь забирает ровно этот блок и обнуляет
+  # накопитель. Это только атомики: RT-путь чист.
+  metric.xruns = engine.pendingXruns.exchange(0'u32, moRelaxed)
+  metric.driverStatusFlags = engine.driverStatusFlags.load(moRelaxed)
 
   if not engine.fromAudioMetrics.push(metric):
     inc engine.droppedMetrics

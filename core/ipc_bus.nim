@@ -86,6 +86,10 @@ type
     ## Счётчик входных xrun'ов (paInputOverflow/paInputUnderflow), суммируется
     ## адаптером через engine.noteInputStatus (#4).
     inputXruns*: uint32
+    ## Сырые статус-флаги драйвера (битмаск по ординалам AudioStreamFlag):
+    ## позволяет control-plane отличить input-overflow от output-underflow.
+    ## `xruns` — сколько было за блок, а это — «какие именно» (#4).
+    driverStatusFlags*: uint64
 
   # Multi-Producer Single-Consumer queue: путь UI/control -> Audio,
   # отправителей может быть несколько. Обёртка над MpscRingBuffer
