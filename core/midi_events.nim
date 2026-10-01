@@ -37,13 +37,25 @@ proc midiToEvent*(
   let channel = msg.status and 0x0F'u8
 
   # Абсолютное время MIDI (секунды) -> относительное смещение в кадрах блока.
+  #
+  # Приведение float -> int клампится ДО конверсии (issue #77): приведение
+  # вне диапазона — это UB по стандарту C (компилятор вправе им
+  # воспользоваться), а клампы после него работали бы уже с испорченным
+  # числом. Драйвер вполне может отдать таймстамп из другого источника
+  # времени, и разница выйдет в миллионы секунд.
   let timeDiffSec = msg.timestamp - currentHostTimeSec
-  var frameOffset = int32(timeDiffSec * sampleRate)
+  let rawFrame = timeDiffSec * sampleRate
+  let maxFrame = float64(signal_types.MaxBlockSize - 1)
 
-  if frameOffset < 0:
+  var frameOffset: int32
+  if rawFrame != rawFrame:              # NaN не равен сам себе
     frameOffset = 0
-  if frameOffset >= signal_types.MaxBlockSize:
-    frameOffset = signal_types.MaxBlockSize - 1
+  elif rawFrame <= 0.0:
+    frameOffset = 0
+  elif rawFrame >= maxFrame:
+    frameOffset = int32(maxFrame)
+  else:
+    frameOffset = int32(rawFrame)
 
   ev.frameOffset = uint32(frameOffset)
   ev.subFrame = 0.0f

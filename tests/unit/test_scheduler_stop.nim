@@ -91,3 +91,41 @@ suite "dsp_scheduler: остановка не вешает рендер (issue #
     check sched.abortedBlocks() == 0'u64
     deinitScheduler(sched)
     check sched.inRenderCount() == 0'i32
+
+suite "dsp_scheduler: построение расписания (#78)":
+  test "цепочка ресурсов даёт уровни, а не цикл":
+    let descs = buildDescs(4)
+    var sched: DspScheduler
+    # initScheduler возвращает false, только если расписание невозможно
+    # (второй писатель того же ресурса, цикл, OOM).
+    check initScheduler(sched, descs, workerCount = 2)
+    var ctx = NodeProcessContext(sampleRate: 48000.0f, blockSize: 64)
+    sched.renderBlock(addr ctx)
+    check sched.abortedBlocks() == 0'u64
+    deinitScheduler(sched)
+
+  test "два писателя одного ресурса -> расписание отвергается":
+    # Задача 1 и задача 2 пишут в ОДИН и тот же аудиоресурс.
+    var descs: seq[TaskDesc] = @[]
+    for i in 0 ..< 2:
+      var task: DspTask
+      task.process = noopTask
+      task.nodeId = int32(i)
+      var desc = TaskDesc(task: task)
+      desc.writes.add audioResource(0, 0)
+      descs.add desc
+
+    var sched: DspScheduler
+    check not initScheduler(sched, descs, workerCount = 1)
+
+  test "тот же ресурс, записанный одной задачей дважды — не ошибка":
+    var task: DspTask
+    task.process = noopTask
+    var desc = TaskDesc(task: task)
+    desc.writes.add audioResource(1, 0)
+    desc.writes.add audioResource(1, 0)
+    var descs = @[desc]
+
+    var sched: DspScheduler
+    check initScheduler(sched, descs, workerCount = 1)
+    deinitScheduler(sched)

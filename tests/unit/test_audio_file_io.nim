@@ -122,3 +122,56 @@ suite "audio_file_io: диспетчер форматов и ошибки":
     check abs(gi.duration - 0.1) < 1e-9     # 4800 сэмплов при 48 кГц
     dec.close()
 
+suite "audio_file_io: оборванная запись (#76)":
+  test "незакрытый WAV читается как пустой, а не как «4 ГБ»":
+    let path = getTempDir() / "euterpia_afio_unclosed.wav"
+    var enc = openEncoder(path, info(16, 1, false))
+    # Пишем БОЛЬШЕ буфера потока: тогда заголовок с плейсхолдерами реально
+    # попадает на диск (у FileStream буферизованная запись, и без close()
+    # маленький файл остаётся пустым).
+    var buf = newSeq[float32](10_000)
+    enc.writeFrames(cast[ptr UncheckedArray[float32]](addr buf[0]), 10_000)
+    # НЕ вызываем enc.close(): эмулируем падение процесса между open и close.
+
+    defer: removeFile(path)
+
+    # Заголовок: RIFF-размер — смещение 4, размер data-чанка — смещение 40.
+    let raw = readFile(path)
+    check raw.len > 44
+    check raw[0 .. 3] == "RIFF"
+    check raw[36 .. 39] == "data"
+
+    var riffSize: uint32
+    var dataSize: uint32
+    copyMem(addr riffSize, unsafeAddr raw[4], 4)
+    copyMem(addr dataSize, unsafeAddr raw[40], 4)
+    # Плейсхолдеры нулевые: до close() настоящих размеров в файле нет.
+    # Раньше здесь стояло 0xFFFFFFFF, и файл «claim’ил» ~4 ГБ.
+    check riffSize == 0'u32
+    check dataSize == 0'u32
+
+    # И такой файл реально читается как пустой (не падает, не аллоцирует
+    # гигабайты). До этого правки `addr samples[0]` на пустом seq давал
+    # IndexDefect в debug-сборке.
+    let (samples, gotInfo) = loadAudioFile(path)
+    check gotInfo.numFrames == 0
+    check samples.len == 0
+
+  test "закрытый файл: размеры корректны (регрессия обычного пути)":
+    let path = getTempDir() / "euterpia_afio_closed.wav"
+    let src = sineSeq(128, 1, 500.0f)
+    writeWav(path, info(16, 1, false), src)
+    defer: removeFile(path)
+
+    let raw = readFile(path)
+    var riffSize: uint32
+    var dataSize: uint32
+    copyMem(addr riffSize, unsafeAddr raw[4], 4)
+    copyMem(addr dataSize, unsafeAddr raw[40], 4)
+    check riffSize == uint32(raw.len - 8)
+    check dataSize == 128'u32 * 2'u32      # 16 бит × 128 кадров
+
+    let (samples, gotInfo) = loadAudioFile(path)
+    check gotInfo.numFrames == 128
+    check samples.len == 128
+

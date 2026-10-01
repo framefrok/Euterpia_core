@@ -452,7 +452,9 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   maxCtrl = max(maxCtrl, 1)
   maxEvent = max(maxEvent, 1)
 
-  let p = cast[ptr CompiledPipeline](allocShared0(sizeof(CompiledPipeline)))
+  # Единственная точка создания пайплайна (issue #79): версия графа
+  # ставится только в newCompiledPipeline, чтобы её нельзя было забыть.
+  let p = newCompiledPipeline()
   if p == nil:
     if compiler.delayStates != nil:
       for i in 0 ..< compiler.delayStateCount:
@@ -461,10 +463,10 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
       deallocShared(compiler.delayStates)
     return CompileResult(success: false, error: cekAllocationFailed)
 
-  # Каждый скомпилированный граф обязан иметь непустую монотонную версию.
-  # Audio thread публикует её в метриках и по ней же отбрасывает устаревшие
-  # пайплайны, поэтому версия 0 означает «неизвестно» и ломает контракт.
-  p.graphVersion = nextPipelineVersion()
+  # Каждый скомпилированный граф обязан иметь непустую монотонную версию:
+  # audio thread публикует её в метриках и по ней же отбрасывает устаревшие
+  # пайплайны. Версия проставлена newCompiledPipeline; проверяем инвариант.
+  doAssert(p.graphVersion != 0'u64, "пайплайн без версии графа")
 
   p.stepCount = order.len.int32
   p.steps = cast[ptr UncheckedArray[PipelineStep]](allocShared0(sizeof(PipelineStep) * order.len))

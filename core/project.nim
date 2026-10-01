@@ -317,6 +317,15 @@ proc safeBool(n: JsonNode, key: string, def: bool = false): bool =
   let val = n{key}
   if val != nil and val.kind == JBool: val.bval else: def
 
+proc isJObject(n: JsonNode): bool {.inline.} =
+  ## Элемент массива — объект?
+  ##
+  ## Все массивы формата проекта содержат ТОЛЬКО объекты. Не-объект — это
+  ## повреждённый файл, и подставлять вместо него «мусорную» ноду/точку из
+  ## дефолтов `safe*` нельзя: граф молча получал бы лишние узлы (issue #75).
+  ## Поэтому такие элементы пропускаются.
+  not n.isNil and n.kind == JObject
+
 proc parseNode(n: JsonNode): NodeFormat =
   result.id = safeInt(n, "id")
   result.nodeType = safeStr(n, "nodeType")
@@ -340,11 +349,13 @@ proc parseNode(n: JsonNode): NodeFormat =
   let subNodesNode = n{"subgraphNodes"}
   if subNodesNode != nil and subNodesNode.kind == JArray:
     for sn in subNodesNode:
+      if not isJObject(sn): continue
       result.subgraphNodes.add(parseNode(sn))
       
   let subConnsNode = n{"subgraphConnections"}
   if subConnsNode != nil and subConnsNode.kind == JArray:
     for sc in subConnsNode:
+      if not isJObject(sc): continue
       result.subgraphConnections.add(ConnectionFormat(
         srcNodeId: safeInt(sc, "srcNodeId"), srcPortIdx: safeInt(sc, "srcPortIdx"),
         dstNodeId: safeInt(sc, "dstNodeId"), dstPortIdx: safeInt(sc, "dstPortIdx"),
@@ -421,10 +432,12 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
     let nodesNode = graphNode{"nodes"}
     if nodesNode != nil and nodesNode.kind == JArray:
       for n in nodesNode:
+        if not isJObject(n): continue
         res.graph.nodes.add(parseNode(n))
     let connsNode = graphNode{"connections"}
     if connsNode != nil and connsNode.kind == JArray:
       for c in connsNode:
+        if not isJObject(c): continue
         res.graph.connections.add(ConnectionFormat(
           srcNodeId: safeInt(c, "srcNodeId"), srcPortIdx: safeInt(c, "srcPortIdx"),
           dstNodeId: safeInt(c, "dstNodeId"), dstPortIdx: safeInt(c, "dstPortIdx"),
@@ -436,6 +449,7 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
     let tracksNode = seqNode{"tracks"}
     if tracksNode != nil and tracksNode.kind == JArray:
       for t in tracksNode:
+        if not isJObject(t): continue
         var track = TrackFormat(
           id: int32(safeInt(t, "id")),
           name: safeStr(t, "name"),
@@ -451,6 +465,7 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
         let clipsNode = t{"clips"}
         if clipsNode != nil and clipsNode.kind == JArray:
           for c in clipsNode:
+            if not isJObject(c): continue
             var clip = ClipFormat(
               id: int32(safeInt(c, "id")),
               clipType: safeInt(c, "clipType"),
@@ -464,6 +479,7 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
             let notesNode = c{"notes"}
             if notesNode != nil and notesNode.kind == JArray:
               for n in notesNode:
+                if not isJObject(n): continue
                 clip.notes.add(NoteFormat(
                   startTick: int32(safeInt(n, "startTick")),
                   duration: int32(safeInt(n, "duration")),
@@ -477,6 +493,7 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
     let lanesNode = seqNode{"automationLanes"}
     if lanesNode != nil and lanesNode.kind == JArray:
       for l in lanesNode:
+        if not isJObject(l): continue
         var lane = AutomationLaneFormat(
           paramId: uint32(safeInt(l, "paramId")),
           nodeId: int32(safeInt(l, "nodeId"))
@@ -484,6 +501,7 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
         let pointsNode = l{"points"}
         if pointsNode != nil and pointsNode.kind == JArray:
           for p in pointsNode:
+            if not isJObject(p): continue
             lane.points.add(AutomationPointFormat(
               tick: int32(safeInt(p, "tick")),
               value: float32(safeFloat(p, "value")),

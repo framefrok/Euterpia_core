@@ -110,21 +110,29 @@ proc streamFileToBuffer*(path: string, rtBuffer: var StreamingAudioBuffer) {.thr
 proc loadAudioFile*(path: string): tuple[samples: seq[float32], info: AudioFileInfo] =
   var decoder = openDecoder(path)
   let info = decoder.getInfo()
-  
-  let totalSamples = int(info.numFrames * int64(info.channels))
-  result.samples = newSeq[float32](totalSamples)
   result.info = info
-  
+
+  let totalSamples = int(info.numFrames * int64(info.channels))
+  if totalSamples <= 0:
+    # Пустой/оборванный файл (issue #76): 0 кадров — это валидный результат.
+    # Без этой ветки `addr result.samples[0]` берётся от ПУСТОГО seq и даёт
+    # IndexDefect в debug-сборке.
+    decoder.close()
+    result.samples = @[]
+    return
+
+  result.samples = newSeq[float32](totalSamples)
+
   var rawBuf = newSeq[uint8](1024 * 1024)
-  
+
   let framesRead = decoder.readFrames(
     cast[ptr UncheckedArray[uint8]](addr rawBuf[0]),
     cast[ptr UncheckedArray[float32]](addr result.samples[0]),
     int32(info.numFrames)
   )
-  
+
   decoder.close()
-  
+
   if framesRead < int32(info.numFrames):
     result.samples.setLen(int(framesRead * int64(info.channels)))
     result.info.numFrames = int64(framesRead)

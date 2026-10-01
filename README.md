@@ -22,7 +22,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
-| Тесты | ✅ 270 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
+| Тесты | ✅ 278 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
 | CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты |
 
 ## Возможности
@@ -163,6 +163,12 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
       переполнении обоих уровней утилизации
 - [x] #74 `dsp_scheduler.renderBlock`: прерывание по `stopFlag` вместо
       вечного spin-loop (+ `inRender`-инвариант для `deinit`)
+- [x] #75–#80 надёжность и долг: `parseNode` не создаёт «мусорные» ноды из
+      не-объектов; `openWavWriter` пишет 0 вместо 0xFFFFFFFF (оборванный
+      файл читается как пустой); кламп таймстампа MIDI ДО приведения
+      float→int; `buildSchedule` на `Table` (O(N·M)); единая точка создания
+      пайплайна (`newCompiledPipeline`); контракт `findEventAtFrame` и
+      guard в `alignedDealloc`
 
 ### Ближайшие шаги
 
@@ -333,7 +339,9 @@ host- и plugin-side расширения, mock-плагин и состояни
 #4 (метрика xruns: счётчик драйвера → EngineMetric),
 #32 (выбор аудио-бэкенда по имени и hot-swap),
 #72 (PDC: per-frame кольцо для стерео), #73 (утилизация пайплайнов без
-утечки), #74 (renderBlock прерывается по stopFlag).
+утечки), #74 (renderBlock прерывается по stopFlag), #75–#80 (надёжность
+парсера проекта, WAV-заголовок, кламп MIDI-таймстампа, Table в
+buildSchedule, единая точка создания пайплайна).
 
 ## Входной тракт
 

@@ -213,6 +213,7 @@ proc openWavWriter*(path: string, info: AudioFileInfo): WavWriter =
   
   if result.isRf64:
     result.stream.write("RF64")
+    # В RF64 0xFFFFFFFF — часть спецификации: реальные размеры лежат в ds64.
     result.stream.write(0xFFFFFFFF'u32)
     result.stream.write("WAVE")
     result.stream.write("ds64")
@@ -223,7 +224,10 @@ proc openWavWriter*(path: string, info: AudioFileInfo): WavWriter =
     result.stream.write(uint32(0))
   else:
     result.stream.write("RIFF")
-    result.stream.write(0xFFFFFFFF'u32)
+    # 0, а не 0xFFFFFFFF: настоящий размер пишется в close(). Если процесс
+    # упадёт между open и close, на диске останется файл, который читается
+    # как ПУСТОЙ, а не как «4 ГБ данных» (issue #76).
+    result.stream.write(0'u32)
     result.stream.write("WAVE")
   
   result.stream.write("fmt ")
@@ -242,7 +246,11 @@ proc openWavWriter*(path: string, info: AudioFileInfo): WavWriter =
   result.stream.write(uint16(info.bitsPerSample))
   
   result.stream.write("data")
-  result.stream.write(0xFFFFFFFF'u32)
+  if result.isRf64:
+    result.stream.write(0xFFFFFFFF'u32)
+  else:
+    # Плейсхолдер 0 до close(): оборванный файл читается как пустой (#76).
+    result.stream.write(0'u32)
   
   result.dataOffset = result.stream.getPosition()
 

@@ -105,8 +105,13 @@ type
     userData*: pointer
 
 proc newCompiledPipeline*(): ptr CompiledPipeline {.inline.} =
-  ## Аллоцирует очищенный пайплайн в shared memory и проставляет свежий graphVersion.
+  ## Аллоцирует очищенный пайплайн в shared memory и проставляет свежий
+  ## graphVersion. Единственная точка создания пайплайна: иначе версию
+  ## пришлось бы ставить в двух местах и её можно забыть (issue #79).
+  ## Возвращает nil, если памяти не хватило.
   result = createShared(CompiledPipeline)
+  if result.isNil:
+    return
   result.graphVersion = nextPipelineVersion()
 
 proc destroyPipeline*(p: ptr CompiledPipeline) {.raises: [].} =
