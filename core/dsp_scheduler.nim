@@ -80,6 +80,17 @@ type
     commandBlock: Atomic[uint64]
     stopFlag: Atomic[uint8]
 
+    ## Диагностика (issue #74). Читается control-path, пишется в audio-потоке.
+    ##
+    ## `inRender` — сколько рендеров идёт прямо сейчас (0 или 1: рендер
+    ## вызывает один поток). По нему `deinitScheduler` проверяет инвариант
+    ## «не разбирать планировщик во время рендера».
+    ##
+    ## `abortedBlocks` — сколько блоков прервано из-за запроса остановки:
+    ## воркеры уже выходят и прогресс по уровням не придёт.
+    inRender: Atomic[int32]
+    abortedBlocks: Atomic[uint64]
+
     workerProgress: ptr UncheckedArray[Atomic[uint64]]
 
   WorkerArg = object
@@ -422,6 +433,8 @@ proc initScheduler*(
   sh.currentLevel.store(-1'i32, moRelaxed)
   sh.commandBlock.store(0'u64, moRelaxed)
   sh.stopFlag.store(0'u8, moRelaxed)
+  sh.inRender.store(0'i32, moRelaxed)
+  sh.abortedBlocks.store(0'u64, moRelaxed)
 
   if startThreads:
     for i in 0 ..< wc:
@@ -443,10 +456,42 @@ proc initScheduler*(
 
   return true
 
+proc requestStop*(s: var DspScheduler) {.raises: [], gcsafe.} =
+  ## Control-path: попросить планировщик остановиться. Воркеры выходят, а
+  ## `renderBlock` прерывает текущий/следующий блок вместо ожидания
+  ## прогресса, которого уже не будет (issue #74).
+  ##
+  ## Вызывать во время активного рендера всё равно нельзя (см.
+  ## `deinitScheduler`): это аварийный выход, а не штатный способ смены
+  ## расписания.
+  if s.shared.isNil:
+    return
+  s.shared.stopFlag.store(1'u8, moRelease)
+
+proc abortedBlocks*(s: DspScheduler): uint64 =
+  ## Сколько блоков прервано из-за запроса остановки. Control-path.
+  if s.shared.isNil:
+    return 0'u64
+  s.shared.abortedBlocks.load(moRelaxed)
+
+proc inRenderCount*(s: DspScheduler): int32 =
+  ## Сколько рендеров идёт прямо сейчас (0 или 1). Control-path:
+  ## `deinitScheduler` по этому значению проверяет инвариант владения.
+  if s.shared.isNil:
+    return 0'i32
+  s.shared.inRender.load(moAcquire)
+
 proc deinitScheduler*(s: var DspScheduler) =
   if s.shared.isNil:
     s.workerCount = 0
     return
+
+  # Инвариант владения (issue #74): разбирать планировщик нельзя, пока идёт
+  # рендер — воркеры выйдут, прогресс не придёт, а `renderBlock` остался бы
+  # в spin-loop (и читал бы уже освобождённую shared-память). Проверяем это
+  # явно, чтобы нарушение было видно в debug, а не превращалось в зависание.
+  doAssert(s.shared.inRender.load(moAcquire) == 0'i32,
+    "deinitScheduler вызван во время renderBlock: сначала остановите рендер")
 
   if s.running and s.workerCount > 0:
     s.shared.stopFlag.store(1'u8, moRelease)
@@ -481,9 +526,32 @@ proc renderBlock*(
   s: var DspScheduler,
   ctx: ptr NodeProcessContext
 ) {.raises: [], gcsafe.} =
+  ## Рендер одного блока: главный поток выполняет задачи уровня, затем ждёт,
+  ## пока воркеры добьют свой уровень.
+  ##
+  ## Ожидание ОБЯЗАНО проверять `stopFlag` (issue #74): `deinitScheduler`
+  ## выставляет флаг, воркеры после него выходят из `workerMain`, и прогресс
+  ## уже не публикуется. Без проверки главный поток зависал бы в spin-loop
+  ## навсегда. Достижимо это не в теории: `initScheduler` первой строкой
+  ## вызывает `deinitScheduler`, то есть повторная инициализация на живом
+  ## планировщике попадала бы в этот сценарий.
+  ##
+  ## При прерывании блок НЕ доводится до конца: часть уровней может быть не
+  ## выполнена, поэтому вызывающий обязан трактовать такой блок как
+  ## недостоверный (обычно это уже остановка рендера).
   let sh = s.shared
   if sh.isNil or sh.levelCount == 0:
     return
+
+  # После запроса остановки новый блок не начинаем: воркеры уже выходят.
+  if sh.stopFlag.load(moAcquire) != 0'u8:
+    discard sh.abortedBlocks.fetchAdd(1'u64, moRelaxed)
+    return
+
+  # Инвариант владения: планировщик нельзя разбирать во время рендера.
+  discard sh.inRender.fetchAdd(1'i32, moAcquireRelease)
+  defer:
+    discard sh.inRender.fetchAdd(-1'i32, moAcquireRelease)
 
   # Fix 15: 1. Reset level to -1 before publishing new command block
   sh.currentLevel.store(-1'i32, moRelease)
@@ -512,6 +580,11 @@ proc renderBlock*(
     var w = 0
     while w < s.workerCount:
       while sh.workerProgress[w].load(moAcquire) < target:
+        # Запрос остановки пришёл во время ожидания: выходим, иначе тут
+        # будет вечный spin (issue #74).
+        if sh.stopFlag.load(moAcquire) != 0'u8:
+          discard sh.abortedBlocks.fetchAdd(1'u64, moRelaxed)
+          return
         cpuRelax()
       inc w
 

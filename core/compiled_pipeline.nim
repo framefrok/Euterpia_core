@@ -11,6 +11,14 @@ proc nextPipelineVersion*(): uint64 {.inline.} =
   ## Генерирует уникальный монотонно возрастающий номер версии графа (начиная с 1).
   gPipelineVersionCounter.fetchAdd(1'u64, moRelaxed) + 1'u64
 
+const
+  ## Каналов обслуживает кольцо компенсации задержки (PDC).
+  ##
+  ## Проект — стерео: `MaxInputChannels = 2` в audio_engine и
+  ## `maxChannels: 2` в дескрипторах нод. Кольцо обязано покрывать все
+  ## каналы, иначе каналы перемешиваются (issue #72).
+  DelayCompensationRingChannels* = 2
+
 type
   PipelineRenderProc* = proc(
     ctx: ptr NodeProcessContext;
@@ -39,9 +47,14 @@ type
 
   DelayCompensationData* = object
     delayFrames*: int
+    ## Позиция записи в КАДРАХ (не в сэмплах): кольцо per-frame, слоты
+    ## канала `ch` лежат на `frame * ringChannels + ch` (issue #72).
     writePos*: int
     buffer*: ptr UncheckedArray[float32]
+    ## Ёмкость буфера в СЛОТАХ: `ringFrames * ringChannels`.
     bufferSize*: int
+    ## Число каналов, которое обслуживает кольцо (стерео-модель проекта).
+    ringChannels*: int32
 
   PoolFlag* = enum
     pfNeedsZeroing

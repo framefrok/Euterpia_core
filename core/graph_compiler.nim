@@ -96,6 +96,14 @@ proc initAdjacencyList(g: NodeGraph): AdjacencyList =
 # ============================================================================
 # DSP NODES (PDC Delay)
 # ============================================================================
+proc copyThroughDelayNode(inBuf, outBuf: ptr AudioBuffer; channels, stride: int;
+                         planar: bool; frames: int) {.inline.} =
+  ## Пропустить блок как есть (без задержки). Нужно для безопасного фолбэка.
+  for ch in 0 ..< channels:
+    for i in 0 ..< frames:
+      let idx = if planar: ch * stride + i else: i * channels + ch
+      outBuf.data[idx] = inBuf.data[idx]
+
 proc processDelayComp*(ctx: ptr NodeProcessContext,
                        audio: ptr NodeAudioPorts,
                        ctrl: ptr NodeControlPorts,
@@ -103,35 +111,68 @@ proc processDelayComp*(ctx: ptr NodeProcessContext,
                        userData: pointer) {.cdecl, raises: [].} =
   ## Задержка для выравнивания фаз (PDC).
   ##
-  ## Раньше обработка шла линейно по data[i], то есть молча считала, что
-  ## буфер моно-интерливнутый, и на stereo-буфере задерживал только левый
-  ## канал. Теперь каналы обрабатываются раздельно: раскладка
-  ## (planar или interleaved) определяется по stride/channels, ровно так же,
-  ## как это делает остальной код проекта.
-  let state = cast[ptr DelayCompensationData](userData)
-  if state == nil or state.buffer == nil or state.bufferSize <= 0: return
-
+  ## Память кольца — per-frame: слоты канала `ch` лежат на
+  ## `frame * ringChannels + ch`, а `writePos` считается в КАДРАХ.
+  ##
+  ## Раньше кольцо было моно: один `writePos`, который продвигался на КАЖДЫЙ
+  ## сэмпл, и общая линейная память на все каналы. Для стерео это давало
+  ## задержку `diff / channels` кадров и обмен данными между каналами —
+  ## компенсация фаз работала неверно (issue #72).
   let inBuf = audio.inputs[0]
   let outBuf = audio.outputs[0]
   if inBuf == nil or outBuf == nil or inBuf.data == nil or outBuf.data == nil: return
   if inBuf.channels <= 0 or inBuf.frames <= 0: return
 
   let frames = min(ctx.blockSize, inBuf.frames)
+  if frames <= 0: return
   let channels = inBuf.channels
   let stride = if inBuf.stride > 0: inBuf.stride else: inBuf.frames
   let planar = stride >= inBuf.frames
 
-  let delay = state.delayFrames
-  let size = state.bufferSize
+  let state = cast[ptr DelayCompensationData](userData)
+  if state == nil or state.buffer == nil or state.bufferSize <= 0 or
+     state.ringChannels <= 0:
+    # Кольца нет (не хватило памяти при компиляции графа). Пропускаем сигнал
+    # как есть: оставлять в арене старые данные было бы хуже — следующий узел
+    # получил бы мусор, который выглядит как звук.
+    copyThroughDelayNode(inBuf, outBuf, int(channels), stride, planar, frames)
+    return
 
-  for ch in 0 ..< channels:
-    for i in 0 ..< frames:
-      let idx = if planar: ch * stride + i else: i * channels + ch
-      let rPos = ((state.writePos - delay) mod size + size) mod size
-      outBuf.data[idx] = state.buffer[rPos]
-      state.buffer[state.writePos] = inBuf.data[idx]
-      state.writePos = (state.writePos + 1) mod size
+  let ringCh = int(state.ringChannels)
+  let ringFrames = state.bufferSize div ringCh      # ёмкость кольца в кадрах
+  if ringFrames <= 0: return
 
+  var delay = state.delayFrames
+  if delay < 0: delay = 0
+  # Больше кольца задержка быть не может: иначе чтение «завернётся» и
+  # задержка молча станет `delay mod ringFrames`.
+  if delay >= ringFrames: delay = ringFrames - 1
+
+  let ring = state.buffer
+  let ringed = min(int(channels), ringCh)
+
+  for i in 0 ..< frames:
+    let wPos = state.writePos * ringCh
+    var rFrame = state.writePos - delay
+    if rFrame < 0: rFrame += ringFrames
+    let rPos = rFrame * ringCh
+
+    for ch in 0 ..< ringed:
+      let idx = if planar: ch * stride + i else: i * int(channels) + ch
+      outBuf.data[idx] = ring[rPos + ch]
+      ring[wPos + ch] = inBuf.data[idx]
+
+    state.writePos = (state.writePos + 1) mod ringFrames
+
+  # Каналы сверх стерео-модели кольца пропускаем как есть: не теряем звук и
+  # не выходим за границы буфера. В проекте таких каналов быть не может
+  # (`MaxInputChannels = 2`), поэтому «без компенсации» здесь — осознанный
+  # безопасный фолбэк, а не рабочий режим.
+  if int(channels) > ringed:
+    for ch in ringed ..< int(channels):
+      for i in 0 ..< frames:
+        let idx = if planar: ch * stride + i else: i * int(channels) + ch
+        outBuf.data[idx] = inBuf.data[idx]
 # ============================================================================
 # 1. FLATTENING 
 # ============================================================================
@@ -277,14 +318,19 @@ proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int], co
       let srcLat = nodeTotalLatency.getOrDefault(c.srcNodeId, 0'u32)
       if srcLat < maxGraphLatency:
         let diff = int(maxGraphLatency - srcLat)
-        let bufferSize = max(diff + 256, 1024)
+        # Кольцо per-frame: ёмкость в СЛОТАХ = кадры × каналы. Раньше считалось
+        # на один канал, поэтому stereo-история не помещалась, а каналы
+        # перемешивались (issue #72).
+        let ringFrames = max(diff + 256, 1024)
+        let bufferSize = ringFrames * DelayCompensationRingChannels
         let buf = cast[ptr UncheckedArray[float32]](allocShared0(sizeof(float32) * bufferSize))
         
         compiler.delayStates[currentDelayIdx] = DelayCompensationData(
           delayFrames: diff,
           writePos: 0,
           buffer: buf,
-          bufferSize: bufferSize
+          bufferSize: bufferSize,
+          ringChannels: int32(DelayCompensationRingChannels)
         )
         
         let dNodeId = compiler.allocator.nextId()
