@@ -28,22 +28,37 @@ import signal_types
 import node_interface
 import clap_host
 import clap_host_extensions
+import clap_plugin_extensions
 
 {.push raises: [].}
 
 const
   ClapBackendName* = "clap"
+  ## Максимум отложенных изменений параметров между вызовами flush/process.
+  ## CLAP не имеет метода setValue: значения передаются событиями, поэтому
+  ## `paramSet` копит их здесь, а применяет `paramFlush`/`process`.
+  ClapMaxPendingParams = 32
 
 type
+  PendingParam = object
+    id: uint32
+    value: float64
+    used: bool
+
   ClapSlot = object
     ## Состояние одного инстанса. POD; размещается в shared-куче.
     inst: ClapPluginInstance
     ## host-side состояние (clap.host/params|state|gui|thread-check|latency).
     hostCtx: ptr ClapHostContext
+    ## plugin-side расширения (clap.params|state|latency|audio-ports).
+    exts: ClapPluginExtSet
     audioThreadMarked: bool
     maxBlock: int32
     audioIn: int32
     audioOut: int32
+    pendingParams: array[ClapMaxPendingParams, PendingParam]
+    ## Слияние внешних событий блока с отложенными параметрами.
+    mergedEvents: EventQueue
 
   ClapBackendImpl = object
     initCalls: int32
@@ -165,6 +180,32 @@ proc clapPluginInfo(
   info.hasState = false
   info.hasGui = false
   info.reportedLatency = 0
+
+  # Число портов/параметров и заявленная latency доступны только у
+  # инстанса плагина (расширения выдаются на plugin, а не на descriptor).
+  # Enumeration — холодный путь, поэтому создаём временный инстанс,
+  # опрашиваем и уничтожаем.
+  var host: ClapHost
+  initHost(host)
+  let hostCtx = newClapHostContext()
+  if not hostCtx.isNil:
+    installClapHostExtensions(host, hostCtx)
+
+  let plugin = f.createPlugin(f, addr host, desc.id)
+  if not plugin.isNil:
+    if plugin.init(plugin):
+      let exts = fetchClapPluginExts(plugin)
+      if not exts.audioPorts.isNil and not exts.audioPorts.count.isNil:
+        info.audioInCount = int32(exts.audioPorts.count(plugin, true))
+        info.audioOutCount = int32(exts.audioPorts.count(plugin, false))
+      if not exts.params.isNil and not exts.params.count.isNil:
+        info.paramCount = int32(exts.params.count(plugin))
+      if not exts.latency.isNil and not exts.latency.get.isNil:
+        info.reportedLatency = int32(exts.latency.get(plugin))
+      info.hasState = not exts.state.isNil
+    plugin.destroy(plugin)
+
+  freeClapHostContext(hostCtx)
   true
 
 proc clapInstantiate(
@@ -214,6 +255,9 @@ proc clapInstantiate(
 
   slot.inst.lib = m.lib
   slot.inst.plugin = plugin
+  # Кэшируем plugin-side расширения один раз (issue #49). Их может не быть —
+  # тогда соответствующие методы контракта вернут пустой результат.
+  slot.exts = fetchClapPluginExts(plugin)
   slot.maxBlock = 0
   slot.audioIn = 0
   slot.audioOut = 0
@@ -288,10 +332,23 @@ proc clapProcess(
     markAudioThread(slot.hostCtx)
     slot.audioThreadMarked = true
 
-  var evPorts: NodeEventPorts
+  # Отложенные параметры уезжают в плагин вместе с событиями блока: в CLAP
+  # значения параметров передаются событиями, а не отдельным вызовом.
+  clearEvents(addr slot.mergedEvents)
   if not inEvents.isNil:
-    evPorts.inputs[0] = inEvents
-    evPorts.inputCount = 1
+    for i in 0 ..< inEvents.count:
+      discard pushEvent(addr slot.mergedEvents, inEvents.events[i])
+  for i in 0 ..< ClapMaxPendingParams:
+    if slot.pendingParams[i].used:
+      discard pushEvent(addr slot.mergedEvents, RealtimeEvent(
+        frameOffset: 0'u32, kind: evParamChange,
+        data: [float32(slot.pendingParams[i].id),
+               float32(slot.pendingParams[i].value), 0.0f, 0.0f]))
+      slot.pendingParams[i].used = false
+
+  var evPorts: NodeEventPorts
+  evPorts.inputs[0] = addr slot.mergedEvents
+  evPorts.inputCount = 1
   if not outEvents.isNil:
     evPorts.outputs[0] = outEvents
     evPorts.outputCount = 1
@@ -299,46 +356,178 @@ proc clapProcess(
   statusToPlugin(processPlugin(slot.inst, ctx, audio, addr evPorts))
 
 # ----------------------------------------------------------------------------
-# Параметры / состояние / latency / main-thread
+# Параметры (clap.params) / состояние (clap.state) / latency (clap.latency)
 #
-# Доступ к `clap.params`, `clap.state`, `clap.latency` и `onMainThread`
-# идёт через плагинные расширения, а их обвязка (host-side extensions,
-# которые вызывает плагин) — предмет issue #6. Пока методы возвращают
-# пустой результат: контракт остаётся полным, а корректный «пустой»
-# ответ не ломает граф.
+# В CLAP нет метода «установить параметр»: значения передаются СОБЫТИЯМИ
+# (clap_event_param_value) через входные события `process` или через
+# `clap.params.flush`. Поэтому `paramSet` копит изменения в слоте, а
+# применяет их `paramFlush` (или ближайший `process`).
 # ----------------------------------------------------------------------------
+
+proc clapParamToFlags(flags: uint32): set[PluginParamFlag] {.inline.} =
+  if (flags and ClapParamIsAutomatable) != 0'u32: result.incl ppfAutomatable
+  if (flags and ClapParamIsModulatable) != 0'u32: result.incl ppfModulatable
+  if (flags and ClapParamIsStepped) != 0'u32: result.incl ppfInteger
+  if (flags and ClapParamIsEnum) != 0'u32: result.incl ppfChoice
+  if (flags and ClapParamIsHidden) != 0'u32: result.incl ppfHidden
+
+proc pendingIndexOf(slot: ptr ClapSlot; paramId: uint32): int =
+  for i in 0 ..< ClapMaxPendingParams:
+    if slot.pendingParams[i].used and slot.pendingParams[i].id == paramId:
+      return i
+  -1
+
+proc pendingFreeIndex(slot: ptr ClapSlot): int =
+  for i in 0 ..< ClapMaxPendingParams:
+    if not slot.pendingParams[i].used:
+      return i
+  -1
 
 proc clapParamCount(api: ptr PluginApi; handle: PluginHandle): int32
     {.cdecl, raises: [], gcsafe.} =
-  0
+  let slot = slotOf(handle)
+  if slot.isNil or slot.exts.params.isNil or slot.exts.params.count.isNil:
+    return 0
+  int32(slot.exts.params.count(slot.inst.plugin))
 
 proc clapParamInfo(api: ptr PluginApi; handle: PluginHandle; index: int32;
   info: var PluginParamInfo): bool {.cdecl, raises: [], gcsafe.} =
-  false
+  let slot = slotOf(handle)
+  if slot.isNil or index < 0:
+    return false
+  if slot.exts.params.isNil or slot.exts.params.getInfo.isNil:
+    return false
+
+  var raw: ClapParamInfo
+  if not slot.exts.params.getInfo(slot.inst.plugin, uint32(index), addr raw):
+    return false
+
+  info.id = raw.id
+  info.name = readFixedString(raw.name)
+  info.flags = clapParamToFlags(raw.flags)
+  info.minValue = raw.minValue
+  info.maxValue = raw.maxValue
+  info.defaultValue = raw.defaultValue
+  # CLAP не сообщает шаг: для ступенчатых/перечислимых параметров это 1,
+  # иначе шаг задаёт UI.
+  info.step = (if ppfInteger in info.flags or ppfChoice in info.flags: 1.0 else: 0.0)
+  true
 
 proc clapParamGet(api: ptr PluginApi; handle: PluginHandle;
   paramId: uint32): float64 {.cdecl, raises: [], gcsafe.} =
-  0.0
+  let slot = slotOf(handle)
+  if slot.isNil or slot.exts.params.isNil or slot.exts.params.getValue.isNil:
+    return 0.0
+  var value = 0.0
+  if not slot.exts.params.getValue(slot.inst.plugin, paramId, addr value):
+    return 0.0
+  value
 
 proc clapParamSet(api: ptr PluginApi; handle: PluginHandle; paramId: uint32;
   value: float64; normalized: bool): bool {.cdecl, raises: [], gcsafe.} =
-  false
+  ## Плагин не имеет setValue: значение откладывается и уедет в него
+  ## событием при следующем `paramFlush`/`process`.
+  let slot = slotOf(handle)
+  if slot.isNil or slot.exts.params.isNil:
+    return false
+
+  var v = value
+  if normalized:
+    # Нормировка требует min/max конкретного параметра — ищем по индексу.
+    let count = if slot.exts.params.count.isNil: 0'u32
+                else: slot.exts.params.count(slot.inst.plugin)
+    var raw: ClapParamInfo
+    var found = false
+    var i = 0'u32
+    while i < count:
+      if slot.exts.params.getInfo(slot.inst.plugin, i, addr raw) and raw.id == paramId:
+        found = true
+        break
+      inc i
+    if not found:
+      return false
+    v = raw.minValue + clamp(value, 0.0, 1.0) * (raw.maxValue - raw.minValue)
+
+  let existing = slot.pendingIndexOf(paramId)
+  if existing >= 0:
+    slot.pendingParams[existing].value = v
+    return true
+
+  let free = slot.pendingFreeIndex()
+  if free < 0:
+    return false
+  slot.pendingParams[free] = PendingParam(id: paramId, value: v, used: true)
+  true
 
 proc clapParamFlush(api: ptr PluginApi; handle: PluginHandle;
   inEvents, outEvents: ptr EventQueue): bool {.cdecl, raises: [], gcsafe.} =
-  false
+  ## Sample-accurate применение: отложенные `paramSet` + входные события
+  ## уезжают в `clap.params.flush`, out-events плагина возвращаются в
+  ## очередь Core.
+  let slot = slotOf(handle)
+  if slot.isNil or slot.exts.params.isNil or slot.exts.params.flush.isNil:
+    return false
+
+  # То же хранилище, что использует processPlugin: вызовы не пересекаются.
+  slot.inst.inputStorage.count = 0
+  slot.inst.outputStorage.count = 0
+
+  for i in 0 ..< ClapMaxPendingParams:
+    if slot.pendingParams[i].used:
+      discard pushParamToClap(slot.inst.inputStorage, 0'u32,
+        slot.pendingParams[i].id, slot.pendingParams[i].value)
+      slot.pendingParams[i].used = false
+
+  if not inEvents.isNil:
+    for i in 0 ..< inEvents.count:
+      discard convertRtEventToClap(inEvents.events[i], slot.inst.inputStorage)
+
+  var inList = initInputEvents(addr slot.inst.inputStorage)
+  var outList = initOutputEvents(addr slot.inst.outputStorage)
+  slot.exts.params.flush(slot.inst.plugin, addr inList, addr outList)
+
+  if not outEvents.isNil:
+    clearEvents(outEvents)
+    for i in 0 ..< slot.inst.outputStorage.count:
+      let hdr = cast[ptr ClapEventHeader](addr slot.inst.outputStorage.events[i])
+      discard pushEvent(outEvents, convertClapEventToRt(hdr))
+
+  true
 
 proc clapStateSave(api: ptr PluginApi; handle: PluginHandle;
   dst: pointer; maxLen: int): int {.cdecl, raises: [], gcsafe.} =
-  -1
+  ## Байтовый стрим clap.state. Контракт CLAP: `write` вернёт -1 при
+  ## переполнении, тогда сохранение считается неудачным.
+  let slot = slotOf(handle)
+  if slot.isNil or dst.isNil or maxLen <= 0:
+    return -1
+  if slot.exts.state.isNil or slot.exts.state.save.isNil:
+    return -1
+
+  var cursor: BufferCursor
+  var stream = initWriteStream(cursor, dst, maxLen)
+  if not slot.exts.state.save(slot.inst.plugin, addr stream):
+    return -1
+  bytesUsed(cursor)
 
 proc clapStateLoad(api: ptr PluginApi; handle: PluginHandle;
   src: pointer; len: int): bool {.cdecl, raises: [], gcsafe.} =
-  false
+  let slot = slotOf(handle)
+  if slot.isNil or src.isNil or len <= 0:
+    return false
+  if slot.exts.state.isNil or slot.exts.state.load.isNil:
+    return false
+
+  var cursor: BufferCursor
+  var stream = initReadStream(cursor, src, len)
+  slot.exts.state.load(slot.inst.plugin, addr stream)
 
 proc clapLatencyFrames(api: ptr PluginApi; handle: PluginHandle): int32
     {.cdecl, raises: [], gcsafe.} =
-  0
+  let slot = slotOf(handle)
+  if slot.isNil or slot.exts.latency.isNil or slot.exts.latency.get.isNil:
+    return 0
+  int32(slot.exts.latency.get(slot.inst.plugin))
 
 proc clapOnMainThread(api: ptr PluginApi; handle: PluginHandle)
     {.cdecl, raises: [], gcsafe.} =
