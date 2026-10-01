@@ -240,6 +240,35 @@ proc releaseWaveform*(cache: WaveformCache, entry: WaveformCacheEntry) =
     dec entry.refCount
   release(cache.lock)
 
+proc waveformReady*(cache: WaveformCache, entry: WaveformCacheEntry): bool =
+  ## Готовы ли данные этой записи.
+  ##
+  ## Читает `entry.state` ПОД `cache.lock`: рабочий поток пишет `state` и
+  ## `data` под тем же локом, поэтому чтение без него — гонка данных
+  ## (нашёл TSan, issue #84).
+  result = false
+  if cache.isNil or entry.isNil:
+    return
+  acquire(cache.lock)
+  result = entry.state == wsReady
+  release(cache.lock)
+
+proc waveformSnapshot*(cache: WaveformCache; entry: WaveformCacheEntry;
+                       data: var WaveformData): bool =
+  ## КОПИЯ готовых данных под локом. false — данные ещё не готовы.
+  ##
+  ## Копия, а не ссылка: `entry.data` (seq) публикуется рабочим потоком, и
+  ## отдавать его наружу без синхронизации нельзя (issue #84). Копирование —
+  ## control-path (UI), поэтому его стоимость допустима.
+  result = false
+  if cache.isNil or entry.isNil:
+    return
+  acquire(cache.lock)
+  if entry.state == wsReady:
+    data = entry.data
+    result = true
+  release(cache.lock)
+
 proc saveWaveformToCache*(cache: WaveformCache, filepath: string, data: WaveformData) =
   var info: FileInfo
   try:
@@ -288,13 +317,16 @@ proc getWaveformForDisplay*(cache: WaveformCache, filepath: string, displayWidth
   # defer гарантирует, что refCount не уйдет в утечку при любом выходе из функции
   defer: cache.releaseWaveform(entry)
   
-  # UI может отрисовать лоадер, если состояние не Ready
-  if entry.state != wsReady:
+  # Данные копируются под локом: рабочий поток публикует их параллельно.
+  # Прямое чтение `entry.state`/`entry.data` здесь было гонкой (issue #84).
+  var data: WaveformData
+  if not cache.waveformSnapshot(entry, data):
+    # UI может отрисовать лоадер, если состояние не Ready
     return @[]
   
-  result = newSeq[tuple[minY, maxY: float32]](int(entry.data.numPoints))
-  for i in 0 ..< entry.data.numPoints:
-    result[i] = (minY: entry.data.minValues[i], maxY: entry.data.maxValues[i])
+  result = newSeq[tuple[minY, maxY: float32]](int(data.numPoints))
+  for i in 0 ..< data.numPoints:
+    result[i] = (minY: data.minValues[i], maxY: data.maxValues[i])
 
 proc getPeakAtPosition*(cache: WaveformCache, filepath: string, position: float64): float32 =
   let entry = cache.getWaveform(filepath, 4096)
@@ -303,11 +335,12 @@ proc getPeakAtPosition*(cache: WaveformCache, filepath: string, position: float6
     
   defer: cache.releaseWaveform(entry)
   
-  if entry.state != wsReady:
+  var data: WaveformData
+  if not cache.waveformSnapshot(entry, data):
     return 0.0f
   
-  let pointIdx = int(position * float64(entry.data.numPoints))
-  if pointIdx < 0 or pointIdx >= entry.data.numPoints:
+  let pointIdx = int(position * float64(data.numPoints))
+  if pointIdx < 0 or pointIdx >= data.numPoints:
     return 0.0f
   
-  return max(abs(entry.data.minValues[pointIdx]), abs(entry.data.maxValues[pointIdx]))
+  return max(abs(data.minValues[pointIdx]), abs(data.maxValues[pointIdx]))

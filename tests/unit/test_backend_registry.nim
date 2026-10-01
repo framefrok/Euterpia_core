@@ -202,7 +202,7 @@ proc pump(api: ptr AudioBackendApi; buf: ptr UncheckedArray[float32];
 proc engineRender(engineCtx: pointer; driverIn: ptr UncheckedArray[float32];
                   driverOut: ptr UncheckedArray[float32]; frames: int32;
                   inputChannels, outputChannels: int32)
-    {.cdecl, raises: [].} =
+    {.cdecl, raises: [], gcsafe.} =
   let engine = cast[ptr AudioEngine](engineCtx)
   if engine.isNil or driverOut.isNil:
     return

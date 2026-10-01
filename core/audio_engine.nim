@@ -9,7 +9,11 @@ import
   compiled_pipeline,
   audio_recorder
 
-{.pragma: rt, raises: [].}
+## Прагма realtime-пути: собрана из двух требований контракта (MANIFEST §9/§10).
+## `raises: []` — никаких исключений в audio-потоке;
+## `gcsafe` — никаких обращений к глобальному GC-состоянию (issue #16).
+## Всё, что помечено `{.rt.}`, проверяется компилятором на оба требования.
+{.pragma: rt, raises: [], gcsafe.}
 
 const
   AudioCommandQueueCapacity = 1024
@@ -779,7 +783,7 @@ proc noteXrunInternal(engine: ptr AudioEngine; statusFlags: uint32) {.inline.} =
   discard engine.pendingXruns.fetchAdd(1'u32, moRelaxed)
   discard engine.totalXruns.fetchAdd(1'u32, moRelaxed)
 
-proc noteStatus*(engine: ptr AudioEngine; statusFlags: uint32) {.cdecl.} =
+proc noteStatus*(engine: ptr AudioEngine; statusFlags: uint32) {.cdecl, gcsafe.} =
   ## Realtime-safe: адаптер сообщает xrun любого направления (issue #4).
   ##
   ## Один вызов = один xrun. `statusFlags` — битмаск по ординалам
@@ -789,7 +793,7 @@ proc noteStatus*(engine: ptr AudioEngine; statusFlags: uint32) {.cdecl.} =
     return
   noteXrunInternal(engine, statusFlags)
 
-proc noteInputStatus*(engine: ptr AudioEngine; statusFlags: uint32) {.cdecl.} =
+proc noteInputStatus*(engine: ptr AudioEngine; statusFlags: uint32) {.cdecl, gcsafe.} =
   ## Как `noteStatus`, но дополнительно ведёт отдельный счётчик ВХОДНЫХ
   ## xrun'ов (issue #3): драйвер сообщает входные overflow/underflow.
   if engine == nil or statusFlags == 0'u32:

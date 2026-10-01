@@ -88,6 +88,6 @@ type
                       audio: ptr NodeAudioPorts,
                       ctrl: ptr NodeControlPorts,
                       events: ptr NodeEventPorts,
-                      userData: pointer) {.cdecl, raises: [].}
+                      userData: pointer) {.cdecl, raises: [], gcsafe.}
 
 {.pop.}

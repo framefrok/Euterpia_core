@@ -16,7 +16,7 @@ proc passThroughProc(
     ctrl: ptr NodeControlPorts,
     events: ptr NodeEventPorts,
     userData: pointer
-) {.cdecl, raises: [].} =
+) {.cdecl, raises: [], gcsafe.} =
   discard ctrl
   discard events
   discard userData
