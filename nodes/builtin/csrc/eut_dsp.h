@@ -175,9 +175,10 @@ typedef enum {
 } EutOscKind;
 
 typedef struct {
-  float phase;       /* [0, 1) */
+  float phase;       /* [0, 1) — фаза левого канала */
   float inc;         /* приращение фазы на сэмпл */
   float pulseWidth;  /* [0.05, 0.95] */
+  float phaseR;      /* [0, 1) — фаза правого канала (detune), непрерывная */
 } EutOscState;
 
 void eut_osc_init(EutOscState *st, float sampleRate, float freq);
@@ -193,6 +194,27 @@ void eut_osc_render(EutOscState *st, int kind, float *out, int n, float gain);
 void eut_osc_render_stereo(EutOscState *st, int kind,
                            float *outL, float *outR, int n,
                            float gain, float detuneCents);
+
+/* ===========================================================================
+ * Шум
+ * ========================================================================= */
+
+typedef enum {
+  EUT_NOISE_WHITE = 0,
+  EUT_NOISE_PINK  = 1,
+  EUT_NOISE_BROWN = 2,
+  EUT_NOISE_COUNT
+} EutNoiseKind;
+
+typedef struct {
+  uint32_t rng;
+  float b0, b1, b2, b3, b4, b5, b6;  /* pink: фильтр Paul Kellet */
+  float brown;                       /* brown: интегратор с утечкой */
+} EutNoiseState;
+
+void eut_noise_init(EutNoiseState *st, uint32_t seed);
+void eut_noise_render(EutNoiseState *st, int kind, float *out, int n, float gain);
+
 /* ===========================================================================
  * Микс: gain, pan, bus
  * ========================================================================= */
@@ -246,6 +268,7 @@ typedef struct {
   float makeupLin;
 
   float env;             /* текущий уровень детектора, линейный */
+  float rmsEnv;          /* усреднённая МОЩНОСТЬ — отдельно от огибающей env */
   float gainLin;         /* текущая линейная gain (<= 1) */
   float gainDb;          /* gain reduction, <= 0 */
 
@@ -331,25 +354,4 @@ int eut_abi_sizeof_delay(void);
 #endif
 
 #endif /* EUT_DSP_H */
-
-
-/* ===========================================================================
- * Шум
- * ========================================================================= */
-
-typedef enum {
-  EUT_NOISE_WHITE = 0,
-  EUT_NOISE_PINK  = 1,
-  EUT_NOISE_BROWN = 2,
-  EUT_NOISE_COUNT
-} EutNoiseKind;
-
-typedef struct {
-  uint32_t rng;
-  float b0, b1, b2, b3, b4, b5, b6;  /* pink: фильтр Paul Kellet */
-  float brown;                       /* brown: интегратор с утечкой */
-} EutNoiseState;
-
-void eut_noise_init(EutNoiseState *st, uint32_t seed);
-void eut_noise_render(EutNoiseState *st, int kind, float *out, int n, float gain);
 

@@ -84,10 +84,15 @@ static inline float delay_read(const EutDelay *d, float delayFrames, int channel
   while (rp < 0.0f) rp += (float)cap;
   while (rp >= (float)cap) rp -= (float)cap;
 
-  int i0 = (int)rp;
-  const float t = rp - (float)i0;
+  /* Окрестность вокруг центральной точки i1 = floor(rp): (i1-1, i1, i1+1,
+     i1+2). Именно так записан полином: при t = 0 он возвращает y1 = buf[i1].
+     Прежний базис (i0, i0+1, i0+2, i0+3) отдавал при t = 0 значение
+     buf[i0+1], то есть чтение было сдвинуто ровно на один отсчёт вперёд
+     (и «защита минимальной задержки» на самом деле не срабатывала). */
+  int i1 = (int)rp;
+  const float t = rp - (float)i1;
 
-  int i1 = i0 + 1; if (i1 >= cap) i1 -= cap;
+  int i0 = i1 - 1; if (i0 < 0) i0 += cap;
   int i2 = i1 + 1; if (i2 >= cap) i2 -= cap;
   int i3 = i2 + 1; if (i3 >= cap) i3 -= cap;
 
@@ -113,8 +118,12 @@ void eut_delay_process(EutDelay *d, const float *inL, const float *inR,
   const float fb   = d->feedback;
   const float mix  = d->mix;
   const int   ping = d->pingPong;
-  const float wetGain = mix * 0.5f;   /* -6 dB в центре при mix = 1 */
-  const float dryGain = 1.0f - wetGain;
+  /* Линейный dry/wet-баланс (сумма = 1): mix = 0 — сухой проход,
+     mix = 1 — строго 100% wet, mix = 0.5 — равные доли. Прежняя формула
+     (wetGain = mix*0.5) при mix = 1 оставляла половину сухого сигнала,
+     то есть 100% wet был недостижим, а «центр» ручки перекашивал 3:1. */
+  const float wetGain = mix;
+  const float dryGain = 1.0f - mix;
 
   float lpL = d->lpStateL;
   float lpR = d->lpStateR;

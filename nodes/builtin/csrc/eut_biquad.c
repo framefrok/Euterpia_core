@@ -57,25 +57,30 @@ void eut_biquad_design(EutBiquadState *st, int kind,
       break;
     }
     case EUT_BIQUAD_LOWSHELF: {
+      /* RBJ Audio EQ Cookbook: beta = 2*sqrt(A)*alpha (не sqrt(A)*alpha),
+         и в b1 члена beta НЕТ. Прежняя формула поднимала НЧ на +16..+20 dB
+         даже при gain = 0 dB. */
       const double alpha = 0.5 * sw *
         sqrt((A + 1.0 / A) * (1.0 / (double)EUT_SHELF_SLOPE - 1.0) + 2.0);
-      a0 = (A + 1.0) + (A - 1.0) * cw + sqrt(A) * alpha;
+      const double beta = 2.0 * sqrt(A) * alpha;
+      a0 =        (A + 1.0) + (A - 1.0) * cw + beta;
       a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cw);
-      a2 = (A + 1.0) + (A - 1.0) * cw - sqrt(A) * alpha;
-      b0 =      A * ((A + 1.0) - (A - 1.0) * cw + sqrt(A) * alpha);
-      b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cw + sqrt(A) * alpha);
-      b2 =      A * ((A + 1.0) - (A - 1.0) * cw - sqrt(A) * alpha);
+      a2 =        (A + 1.0) + (A - 1.0) * cw - beta;
+      b0 =    A * ((A + 1.0) - (A - 1.0) * cw + beta);
+      b1 =  2.0 * A * ((A - 1.0) - (A + 1.0) * cw);
+      b2 =    A * ((A + 1.0) - (A - 1.0) * cw - beta);
       break;
     }
     case EUT_BIQUAD_HIGHSHELF: {
       const double alpha = 0.5 * sw *
         sqrt((A + 1.0 / A) * (1.0 / (double)EUT_SHELF_SLOPE - 1.0) + 2.0);
-      a0 = (A + 1.0) - (A - 1.0) * cw + sqrt(A) * alpha;
+      const double beta = 2.0 * sqrt(A) * alpha;
+      a0 =        (A + 1.0) - (A - 1.0) * cw + beta;
       a1 =  2.0 * ((A - 1.0) - (A + 1.0) * cw);
-      a2 = (A + 1.0) - (A - 1.0) * cw - sqrt(A) * alpha;
-      b0 =      A * ((A + 1.0) + (A - 1.0) * cw + sqrt(A) * alpha);
-      b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cw - sqrt(A) * alpha);
-      b2 =      A * ((A + 1.0) + (A - 1.0) * cw - sqrt(A) * alpha);
+      a2 =        (A + 1.0) - (A - 1.0) * cw - beta;
+      b0 =    A * ((A + 1.0) + (A - 1.0) * cw + beta);
+      b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cw);
+      b2 =    A * ((A + 1.0) + (A - 1.0) * cw - beta);
       break;
     }
     case EUT_BIQUAD_LOWPASS:
@@ -95,8 +100,10 @@ void eut_biquad_design(EutBiquadState *st, int kind,
   st->b2 = (float)(b2 * inv);
   st->a1 = (float)(a1 * inv);
   st->a2 = (float)(a2 * inv);
-  st->z1 = 0.0f;
-  st->z2 = 0.0f;
+  /* z1/z2 НЕ трогаем: design() вызывается на каждый аудиоблок (коэффициенты
+     сглаживаются), а z1/z2 — непрерывная история фильтра. Обнуление здесь
+     рвало сигнал на каждой границе блока -> слышимый щелчок с периодом
+     blockSize. Сброс состояния — только в eut_biquad_reset(). */
 }
 
 void eut_biquad_reset(EutBiquadState *st)

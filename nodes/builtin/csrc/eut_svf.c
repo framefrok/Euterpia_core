@@ -81,7 +81,10 @@ void eut_svf_process(EutSvfState *st, int kind, const float *in, float *out, int
         const float v2 = ic2eq + a2 * ic1eq + a3 * v3;
         ic1eq = 2.0f * v1 - ic1eq;
         ic2eq = 2.0f * v2 - ic2eq;
-        out[i] = v2 - k * v1;
+        /* Notch = HP + LP = (x - k*v1 - v2) + v2 = x - k*v1.
+           Прежнее v2 - k*v1 давало LP - k*BP: не глушило собственную
+           частоту среза и проваливалось в ноль на ВЧ. */
+        out[i] = in[i] - k * v1;
       }
       break;
 
@@ -116,7 +119,7 @@ float eut_svf_process_one(EutSvfState *st, int kind, float x)
   switch (kind) {
     case EUT_SVF_HIGHPASS: return x - st->k * v1 - v2;
     case EUT_SVF_BANDPASS: return v1;
-    case EUT_SVF_NOTCH:    return v2 - st->k * v1;
+    case EUT_SVF_NOTCH:    return x - st->k * v1;
     default:               return v2;
   }
 }

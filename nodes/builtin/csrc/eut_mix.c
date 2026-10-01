@@ -102,14 +102,18 @@ void eut_saturate(float *buf, int n, float drive, float ceiling)
   drive   = eut_clampf(drive, 0.0f, 16.0f);
   ceiling = eut_clampf(ceiling, 0.05f, 4.0f);
 
-  const float norm = 1.0f / (1.0f + drive);
+  /* g = 1 + drive — усиление на входе. Прежняя нормировка 2/(1+drive)
+     ровно компенсировала входное усиление: drive не усиливал, а ОСЛАБЛЯЛ
+     сигнал, а при drive = 0 выход обнулялся полностью.
+     Здесь y = g*x / (1 + g*|x|) имеет единичный наклон в нуле
+     (drive = 0 -> прозрачный проход) и асимптоту ±ceiling при |x| -> inf. */
+  const float g = 1.0f + drive;
 
   for (int i = 0; i < n; ++i) {
-    /* Мягкий клиппинг: (x / (1 + |x|)) даёт асимптоту ±1 с плавным
-       подходом — в отличие от жёсткого clamp, который даёт щелчки
-       на вершинах и широкополосный треск при перегрузке. */
-    const float x = buf[i] * drive;
-    const float y = x / (1.0f + ((x < 0.0f) ? -x : x));
-    buf[i] = y * ceiling * 2.0f * norm;
+    /* Мягкий клиппинг без разрыва производной — в отличие от жёсткого
+       clamp, который даёт щелчки на вершинах и широкополосный треск. */
+    const float x = buf[i];
+    const float y = (g * x) / (1.0f + g * ((x < 0.0f) ? -x : x));
+    buf[i] = y * ceiling;
   }
 }

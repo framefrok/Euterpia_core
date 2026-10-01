@@ -19,6 +19,7 @@ import test_svf
 import test_noise
 import test_gain
 import test_pan
+import test_saturate
 import test_compressor
 import test_delay
 import test_graph_compiler

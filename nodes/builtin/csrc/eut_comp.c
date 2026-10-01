@@ -54,6 +54,7 @@ void eut_comp_reset(EutComp *c)
 {
   if (c == NULL) return;
   c->env     = 0.0f;
+  c->rmsEnv  = 0.0f;
   c->gainLin = 1.0f;
   c->gainDb  = 0.0f;
   for (int i = 0; i < EUT_COMP_MAX_BLOCK; ++i) {
@@ -105,8 +106,9 @@ void eut_comp_detect(EutComp *c, const float *in, int n)
   const float makeup   = c->makeupLin;
   const int   isRms    = (c->detector == EUT_COMP_RMS);
 
-  float env  = c->env;
-  float gain = c->gainLin;
+  float env    = c->env;
+  float rmsEnv = c->rmsEnv;
+  float gain   = c->gainLin;
   float gainDb = c->gainDb;
 
   for (int i = 0; i < n; ++i) {
@@ -114,10 +116,13 @@ void eut_comp_detect(EutComp *c, const float *in, int n)
     if (level < 0.0f) level = -level;
 
     if (isRms) {
-      /* RMS: усредняем мощность, корень берём после — так среднее
-         соответствует энергии, а не амплитуде. */
-      env += avg * (level * level - env);
-      level = sqrtf(env);
+      /* RMS: усредняем МОЩНОСТЬ в отдельном накопителе rmsEnv, а корень
+         берём только чтобы получить линейный уровень. Смешивать мощность
+         и линейную огибающую в одной переменной нельзя — это величины
+         разной размерности, из-за чего детектор сходился не к RMS
+         (на постоянном сигнале «недобутывал» почти вдвое). */
+      rmsEnv += avg * (level * level - rmsEnv);
+      level = sqrtf(rmsEnv);
     }
 
     /* Огибающая: мгновенный подъём, экспоненциальный спад. */
@@ -125,13 +130,19 @@ void eut_comp_detect(EutComp *c, const float *in, int n)
     env = coef * env + (1.0f - coef) * level;
 
     gain = comp_gain_from_env(env, thrDb, slope, kneeDb, makeup);
-    gainDb = eut_lin_to_db(env) - thrDb;
-    if (gainDb > 0.0f) gainDb = -((1.0f - slope) * gainDb);
+    /* Метрика GR считается из ФАКТИЧЕСКИ применённого gain (без makeup):
+       она согласована с сигналом и учитывает soft knee. Прежняя формула
+       (lin_to_db(env) - thrDb) при уровне ниже порога давала отрицательное
+       «подавление» там, где подавления нет. makeupLin >= 0.063 (зажат по
+       dB), поэтому деление безопасно. */
+    gainDb = eut_lin_to_db(gain / makeup);
+    if (gainDb > 0.0f) gainDb = 0.0f;
 
     c->gainCurve[i] = gain;
   }
 
   c->env     = eut_flush(env);
+  c->rmsEnv  = eut_flush(rmsEnv);
   c->gainLin = gain;
   c->gainDb  = gainDb;
 }

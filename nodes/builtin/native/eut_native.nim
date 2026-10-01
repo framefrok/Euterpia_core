@@ -99,6 +99,7 @@ type
 
   EutOscState {.importc: "EutOscState", bycopy.} = object
     phase, inc, pulseWidth: float32
+    phaseR: float32          # фаза правого канала (detune)
 
   EutNoiseState {.importc: "EutNoiseState", bycopy.} = object
     rng: uint32
@@ -111,7 +112,9 @@ type
     channels: cint
     attackCoef, releaseCoef, avgCoef: float32
     thresholdDb, slope, kneeDb, makeupLin: float32
-    env, gainLin, gainDb: float32
+    env: float32
+    rmsEnv: float32
+    gainLin, gainDb: float32
     gainCurve: array[EutCompMaxBlock.int, float32]
 
   EutDelay {.importc: "EutDelay", bycopy.} = object
@@ -448,9 +451,9 @@ proc abiCheck*(): bool =
   ## к примеру, добавление поля меняет размер, и это видно сразу.
   c_size_biquad() == 28 and
   c_size_svf() == 28 and
-  c_size_osc() == 12 and
+  c_size_osc() == 16 and        # phase, inc, pulseWidth, phaseR
   c_size_noise() == 36 and
-  c_size_comp() == 4148 and
+  c_size_comp() == 4152 and     # + rmsEnv (усреднённая мощность RMS)
   c_size_delay() == 48
 
 {.pop.}

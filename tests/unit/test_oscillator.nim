@@ -66,3 +66,29 @@ suite "oscillator":
     check abs(midiNoteToFreq(81.0f) - 880.0f) < 0.01f
     check abs(midiNoteToFreq(57.0f) - 220.0f) < 0.01f
     check abs(freqToMidiNote(440.0f) - 69.0f) < 0.01f
+
+  # --- регрессия ядра (issue #24) --------------------------------------------
+
+  test "detune правого канала: f(R) = 440 * 2^(cents/1200) (#24)":
+    # Раньше фаза правого канала пересоздавалась из phase0 + 0.5 каждый блок,
+    # скачок фазы накапливался, и при 10-20 центах расстройка пропадала.
+    const Cents = 20.0'f32
+    let stereo = renderNodeStereo(getOscillatorFactory(), getOscillatorDesc(), 256,
+      setup = proc(state: pointer) =
+        getOscillatorFactory().setParam(state, OscParamWaveform, 0.0f, false)
+        getOscillatorFactory().setParam(state, OscParamFrequency, 440.0f, false)
+        getOscillatorFactory().setParam(state, OscParamLevel, 0.0f, false)
+        getOscillatorFactory().setParam(state, OscParamDetune, Cents, false)
+    )
+
+    check stereo.l.isFinite()
+    check stereo.r.isFinite()
+
+    let expected = 440.0f * pow(2.0f, Cents / 1200.0f)
+    let fL = stereo.l.estimateFreq()
+    let fR = stereo.r.estimateFreq()
+
+    # Разрешение оценки по пересечениям нуля ~0.4 Гц; допуск 1.5 Гц с запасом
+    # ловит баг (там f(R) совпадала с f(L) = 440 Гц, то есть ошибка ~5 Гц).
+    check abs(fL - 440.0f) < 1.5f
+    check abs(fR - expected) < 1.5f
