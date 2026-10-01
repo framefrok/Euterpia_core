@@ -13,6 +13,7 @@
 import
   ../sdk/node_api,
   ../sdk/node_registry,
+  io/input,
   generators/oscillator,
   generators/noise,
   filters/biquad,
@@ -24,6 +25,7 @@ import
 
 type
   BuiltinNodeId* = enum
+    bnInput,
     bnOscillator, bnNoise,
     bnBiquad, bnSvf,
     bnGain, bnPan,
@@ -37,6 +39,7 @@ const
 
 const
   builtinIds*: array[BuiltinCount, BuiltinNodeId] = [
+    bnInput,
     bnOscillator, bnNoise,
     bnBiquad, bnSvf,
     bnGain, bnPan,
@@ -45,6 +48,7 @@ const
 
 proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
   case id
+  of bnInput:       getInputDesc()
   of bnOscillator:  getOscillatorDesc()
   of bnNoise:       getNoiseDesc()
   of bnBiquad:      getBiquadDesc()
@@ -56,6 +60,7 @@ proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
 
 proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   case id
+  of bnInput:       getInputFactory()
   of bnOscillator:  getOscillatorFactory()
   of bnNoise:       getNoiseFactory()
   of bnBiquad:      getBiquadFactory()

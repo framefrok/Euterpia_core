@@ -37,6 +37,18 @@ type
     transport*: TransportInfo
     flags*: set[ProcessingFlags]
 
+    ## Входной тракт (issue #3).
+    ##
+    ## `input` указывает на planar-буфер драйверного входа: `channels` —
+    ## фактическое число входных каналов устройства (1 или 2), `stride` —
+    ## шаг между каналами в арене, `frames` — длина блока. Указатель
+    ## валиден всегда, пока движок рендерит блок.
+    ##
+    ## `channels == 0` означает «входа нет» (устройство без входных
+    ## каналов или offline-рендер): ноды обязаны выдать тишину.
+    input*: PAudioBuffer
+    inputChannels*: int32
+
   # Audio ports container - все аудио-порты ноды
   NodeAudioPorts* = object
     inputs*: array[MaxAudioPorts, PAudioBuffer]

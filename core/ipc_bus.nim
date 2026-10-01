@@ -76,6 +76,17 @@ type
     activeVoices*: int32
     graphVersion*: uint64
 
+    ## Входной тракт (issue #3).
+    ##
+    ## Пики входа считаются до нод, по сырому драйверному буферу:
+    ## так метр показывает именно то, что пришло с устройства, а не то,
+    ## что от него оставил граф.
+    inputPeakL*: float32
+    inputPeakR*: float32
+    ## Счётчик входных xrun'ов (paInputOverflow/paInputUnderflow), суммируется
+    ## адаптером через engine.noteInputStatus (#4).
+    inputXruns*: uint32
+
   # Multi-Producer Single-Consumer queue: путь UI/control -> Audio,
   # отправителей может быть несколько. Обёртка над MpscRingBuffer
   # (core/ring_buffer.nim). Инвариант «producers не уничтожаются
