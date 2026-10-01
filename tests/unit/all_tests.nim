@@ -17,6 +17,7 @@ import test_ring_buffer
 import test_midi_api
 import test_midi_smf
 import test_backend_contract
+import test_backend_registry
 import test_input_path
 import test_plugin_api
 import test_clap_host_extensions
