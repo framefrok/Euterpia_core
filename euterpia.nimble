@@ -35,6 +35,9 @@ proc checkAdapters() =
   buildLog "adapters type-check"
   exec "nim check --hints:off adapters/portaudio/audio_backend_portaudio.nim"
   exec "nim check --hints:off adapters/rtmidi/midi_backend_rtmidi.nim"
+  # Хостинг плагинов за core/plugin_api (issue #29): формат-агностичный
+  # эталонный адаптер проверяется как обычный модуль и участвует в тестах.
+  exec "nim check --hints:off adapters/reference/fake_plugin_backend.nim"
 
 # Флаги потоков и memory manager задаются в config.nims, чтобы они
 # были одинаковыми при любой точке входа (unit, integration, CLI).
