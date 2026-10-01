@@ -18,6 +18,7 @@ import test_midi_smf
 import test_backend_contract
 import test_input_path
 import test_plugin_api
+import test_clap_host_extensions
 import test_oscillator
 import test_biquad
 import test_svf
