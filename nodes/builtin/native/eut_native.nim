@@ -41,7 +41,7 @@ import std/os
 
 const
   EutMaxChannels* = 8.cint
-  EutCompMaxBlock* = 1024.cint
+  EutCompMaxBlock* = 4096.cint
 
   EutHasSimdDispatch* =
     when defined(x86_64) or defined(amd64):
@@ -453,7 +453,7 @@ proc abiCheck*(): bool =
   c_size_svf() == 28 and
   c_size_osc() == 16 and        # phase, inc, pulseWidth, phaseR
   c_size_noise() == 36 and
-  c_size_comp() == 4152 and     # + rmsEnv (усреднённая мощность RMS)
+  c_size_comp() == 16440 and    # gainCurve обязан покрывать EUT_MAX_BLOCK (4096)
   c_size_delay() == 48
 
 {.pop.}

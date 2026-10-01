@@ -151,6 +151,10 @@ void eut_comp_detect(EutComp *c, const float *in, int n)
 void eut_comp_apply(const float *gainCurve, const float *in, float *out, int n)
 {
   if (gainCurve == NULL || in == NULL || out == NULL || n <= 0) return;
+  /* Кривая рассчитана максимум на EUT_COMP_MAX_BLOCK сэмплов (детектор
+     клампит n тем же пределом). Без клампа здесь чтение уходит за границу
+     массива: именно это происходило на блоках > 1024. */
+  if (n > EUT_COMP_MAX_BLOCK) n = EUT_COMP_MAX_BLOCK;
 
   for (int i = 0; i < n; ++i) {
     out[i] = in[i] * gainCurve[i];
