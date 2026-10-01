@@ -28,7 +28,11 @@ jobs:
 
       - uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: '2.2.x'
+          # Точная версия, а не '2.2.x': ветка 'x' заставляет action дёргать
+          # GitHub API (refs/tags) без токена -> 401 -> падение jq в action.
+          # С точной версией action просто качает релиз с nim-lang.org.
+          nim-version: '2.2.12'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Показать версию Nim
         run: nim --version
@@ -48,7 +52,8 @@ jobs:
 
       - uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: '2.2.x'
+          nim-version: '2.2.12'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: nimble buildRelease
         run: nimble buildRelease
@@ -67,7 +72,8 @@ jobs:
 
       - uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: '2.2.x'
+          nim-version: '2.2.12'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Сборка и прогон под TSan
         run: |
