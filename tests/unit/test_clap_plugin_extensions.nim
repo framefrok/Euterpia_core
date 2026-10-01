@@ -67,8 +67,10 @@ suite "clap plugin-side extensions (#49)":
     let a = [byte 10, 20, 30]
     let b = "euterpia"
     check os.write(addr os, cast[pointer](unsafeAddr a[0]), 3'u64) == 3
-    check os.write(addr os, cast[pointer](unsafeAddr b[0]), uint64(b.len)) ==
-      int64(b.len)
+    # Пишем строку ВМЕСТЕ с завершающим NUL: иначе cast[cstring] читал бы
+    # за пределы записанного (на Linux это случайно «работало», macOS — нет).
+    check os.write(addr os, cast[pointer](cstring(b)),
+      uint64(b.len + 1)) == int64(b.len + 1)
     let total = bytesUsed(wcur)
 
     var rcur: BufferCursor
@@ -80,8 +82,9 @@ suite "clap plugin-side extensions (#49)":
     check aBack[0] == 10'u8
     check aBack[2] == 30'u8
 
-    var bBack: array[8, byte]
-    check istr.read(addr istr, cast[pointer](addr bBack[0]), 8'u64) == 8
+    var bBack: array[9, byte]
+    check istr.read(addr istr, cast[pointer](addr bBack[0]), 9'u64) == 9
+    check bBack[8] == 0'u8
     check cast[cstring](addr bBack[0]) == cstring"euterpia"
 
     # Чтение за пределами записанного -> -1.
