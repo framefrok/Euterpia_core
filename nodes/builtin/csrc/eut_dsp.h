@@ -42,7 +42,14 @@ extern "C" {
  * не стоит ничего, зато не нужно ни -march=native (ломает переносимость),
  * ни ручного dispatch в каждом process().
  * ------------------------------------------------------------------------ */
-#if (defined(__x86_64__) || defined(_M_X64)) && \
+/*
+ * target_clones раскрывается в IFUNC-резолвер, а его поддерживают только
+ * ELF-платформы. На Windows (PE/COFF, MinGW) GCC отвечает ошибкой
+ * «the call requires 'ifunc', which is not supported by this target»,
+ * а на macOS (Mach-O) тот же признак отсутствует. Признак __ELF__
+ * выставлен ровно там, где IFUNC реально работает (Linux/BSD).
+ */
+#if (defined(__x86_64__) || defined(_M_X64)) && defined(__ELF__) && \
     (defined(__GNUC__) || defined(__clang__))
   #define EUT_TARGET_CLONES __attribute__((target_clones("avx2", "default")))
   #define EUT_HAS_SIMD_DISPATCH 1
