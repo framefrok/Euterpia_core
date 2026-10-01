@@ -12,6 +12,7 @@
 
 import test_signal_types
 import test_native_abi
+import test_backend_contract
 import test_oscillator
 import test_biquad
 import test_svf
