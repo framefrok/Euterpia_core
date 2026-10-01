@@ -25,6 +25,7 @@ import clap_plugin_extensions
 
 const
   MockPluginId* = "com.euterpia.mock.gain"
+  MockTailPluginId* = "com.euterpia.mock.tail"
   MockLatencyFrames* = 8'u32
   MockChannels* = 2'u32
 
@@ -33,12 +34,24 @@ const
 
   MockStateBytes = 16
 
+  ## Режим инстанса. Разные дескрипторы фабрики дают разное поведение
+  ## одного и того же mock-плагина (issue #7: проверка маппинга статусов
+  ## обработки ClapProcessContinue / ClapProcessTail).
+  MockModeGain = 0'i32
+  MockModeTail = 1'i32
+
+  ## Кадр внутри блока, на котором mock «генерирует» ноту: нужно, чтобы
+  ## проверить sample-accurate трансляцию out-events (issue #7).
+  MockGeneratedNoteFrame* = 64'u32
+  MockGeneratedNoteKey* = 69'i16
+
 type
   MockInstance = object
     ## Первое поле — ABI-совместимая `clap_plugin`; адрес совпадает с
     ## адресом объекта, поэтому `cast[ptr MockInstance](plugin)` корректен.
     plugin: ClapPlugin
     host: ptr ClapHost
+    mode: int32
     sampleRate: float64
     gain: float64
     bypass: float64
@@ -235,6 +248,7 @@ var
   gLatency: ClapPluginLatency
   gAudioPorts: ClapPluginAudioPorts
   gDescriptor: ClapPluginDescriptor
+  gTailDescriptor: ClapPluginDescriptor
   gFactory: ClapPluginFactory
 
 
@@ -299,6 +313,56 @@ proc silenceChannel(dst: pointer; frames: int) =
     d[i] = 0.0'f32
     inc i
 
+proc statusOf(inst: ptr MockInstance): int32 {.inline.} =
+  ## Режим tail отдаёт ClapProcessTail: так проверяется маппинг статусов
+  ## обработки адаптером (issue #7).
+  if inst.mode == MockModeTail: ClapProcessTail else: ClapProcessContinue
+
+proc emitNote(process: ptr ClapProcess; time: uint32; evType: uint16;
+              channel, key: int16; velocity: float64) =
+  ## Кладёт нотное событие в выходной список плагина. Неудачный push (нет
+  ## места) игнорируется — ровно так делает и реальный плагин.
+  if process.outEvents.isNil or process.outEvents.tryPush.isNil:
+    return
+  var ev: ClapEventNote
+  ev.header.size = uint32(sizeof(ClapEventNote))
+  ev.header.time = time
+  ev.header.spaceId = 0
+  ev.header.eventType = evType
+  ev.header.flags = ClapEvtIsLive
+  ev.noteId = -1
+  ev.portIndex = 0
+  ev.channel = channel
+  ev.key = key
+  ev.velocity = velocity
+  discard process.outEvents.tryPush(process.outEvents, addr ev.header)
+
+proc echoNoteEvents(process: ptr ClapProcess) =
+  ## Возвращает входные ноты на выход. Это одновременно доказывает, что
+  ## EventQueue доехал до плагина, и что out-events транслируются назад в
+  ## Core (issue #7).
+  if process.inEvents.isNil or process.inEvents.get.isNil or
+     process.inEvents.size.isNil:
+    return
+  let n = process.inEvents.size(process.inEvents)
+  var i = 0'u32
+  while i < n:
+    let hdr = process.inEvents.get(process.inEvents, i)
+    if not hdr.isNil and (hdr.eventType == ClapEvtNoteOn or
+                          hdr.eventType == ClapEvtNoteOff):
+      let note = cast[ptr ClapEventNote](hdr)
+      emitNote(process, hdr.time, hdr.eventType, note.channel, note.key,
+               note.velocity)
+    inc i
+
+proc emitGeneratedNote(process: ptr ClapProcess) =
+  ## Одна «сгенерированная» нота на фиксированном кадре блока —
+  ## sample-accurate проверка out-events.
+  if int(process.framesCount) <= int(MockGeneratedNoteFrame):
+    return
+  emitNote(process, MockGeneratedNoteFrame, ClapEvtNoteOn,
+           0'i16, MockGeneratedNoteKey, 0.8)
+
 proc mockProcess(plugin: ptr ClapPlugin; process: ptr ClapProcess): int32
     {.cdecl, raises: [], gcsafe.} =
   let inst = instanceOf(plugin)
@@ -307,6 +371,10 @@ proc mockProcess(plugin: ptr ClapPlugin; process: ptr ClapProcess): int32
 
   # Значения параметров уезжают событиями (в CLAP нет setValue).
   applyParamEvents(inst, process.inEvents)
+
+  # Out-events: эхо входных нот + сгенерированная нота (issue #7).
+  echoNoteEvents(process)
+  emitGeneratedNote(process)
 
   # Обратный вызов хоста ровно один раз: проверяет request_callback →
   # on_main_thread и заодно thread-check со стороны плагина.
@@ -317,7 +385,7 @@ proc mockProcess(plugin: ptr ClapPlugin; process: ptr ClapProcess): int32
 
   let frames = int(process.framesCount)
   if frames <= 0:
-    return ClapProcessContinue
+    return statusOf(inst)
 
   let gain = if inst.bypass >= 0.5: 1.0 else: inst.gain
   let ins = cast[ptr UncheckedArray[ClapAudioBuffer]](process.audioInputs)
@@ -341,7 +409,7 @@ proc mockProcess(plugin: ptr ClapPlugin; process: ptr ClapProcess): int32
       inc c
     inc p
 
-  ClapProcessContinue
+  statusOf(inst)
 
 proc mockOnMainThread(plugin: ptr ClapPlugin) {.cdecl, raises: [], gcsafe.} =
   let inst = instanceOf(plugin)
@@ -367,25 +435,37 @@ proc mockGetExtension(plugin: ptr ClapPlugin; id: cstring): pointer
 
 proc mockFactoryGetCount(factory: ptr ClapPluginFactory): uint32
     {.cdecl, raises: [], gcsafe.} =
-  1'u32
+  2'u32
 
 proc mockFactoryGetDescriptor(factory: ptr ClapPluginFactory; index: uint32):
     ptr ClapPluginDescriptor {.cdecl, raises: [], gcsafe.} =
-  if index != 0: return nil
-  addr gDescriptor
+  case index
+  of 0: addr gDescriptor
+  of 1: addr gTailDescriptor
+  else: nil
 
 proc mockCreatePlugin(factory: ptr ClapPluginFactory; host: ptr ClapHost;
                       pluginId: cstring): ptr ClapPlugin
     {.cdecl, raises: [], gcsafe.} =
-  if pluginId.isNil or $pluginId != MockPluginId:
+  var mode = MockModeGain
+  if pluginId.isNil:
     return nil
+  elif cstreq(pluginId, MockPluginId):
+    mode = MockModeGain
+  elif cstreq(pluginId, MockTailPluginId):
+    mode = MockModeTail
+  else:
+    return nil
+
   let inst = cast[ptr MockInstance](allocShared0(sizeof(MockInstance)))
   if inst.isNil:
     return nil
   inst.host = host
+  inst.mode = mode
   inst.gain = 1.0
   inst.bypass = 0.0
-  inst.plugin.desc = addr gDescriptor
+  inst.plugin.desc = (if mode == MockModeTail: addr gTailDescriptor
+                      else: addr gDescriptor)
   inst.plugin.pluginData = nil
   inst.plugin.init = mockInit
   inst.plugin.destroy = mockDestroy
@@ -445,6 +525,21 @@ proc setupMockPlugin() =
   gDescriptor.version = cstring"1.0.0"
   gDescriptor.description = cstring"Mock gain plugin for host integration tests"
   gDescriptor.features = nil
+
+  # Второй дескриптор той же библиотеки: отдаёт ClapProcessTail, чтобы
+  # проверить маппинг статусов обработки (ppsTail) на реальном ABI.
+  gTailDescriptor.clapVersion.major = ClapVersionMajor
+  gTailDescriptor.clapVersion.minor = ClapVersionMinor
+  gTailDescriptor.clapVersion.revision = ClapVersionRevision
+  gTailDescriptor.id = cstring(MockTailPluginId)
+  gTailDescriptor.name = cstring"EUTERPIA Mock Tail"
+  gTailDescriptor.vendor = cstring"EUTERPIA"
+  gTailDescriptor.url = cstring""
+  gTailDescriptor.manualUrl = cstring""
+  gTailDescriptor.supportUrl = cstring""
+  gTailDescriptor.version = cstring"1.0.0"
+  gTailDescriptor.description = cstring"Mock plugin returning ClapProcessTail"
+  gTailDescriptor.features = nil
 
   gFactory.getPluginCount = mockFactoryGetCount
   gFactory.getPluginDescriptor = mockFactoryGetDescriptor

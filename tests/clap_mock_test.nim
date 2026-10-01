@@ -20,7 +20,9 @@ import clap_host_extensions
 import project
 
 const
-  Frames = 64
+  ## Блок длиннее MockGeneratedNoteFrame (64), иначе mock не «сгенерирует»
+  ## ноту на этом кадре и sample-accurate проверка out-events не сработает.
+  Frames = 128
 
   MockLibPath =
     when defined(windows): "build/mockclap.dll"
@@ -88,7 +90,7 @@ suite "clap mock plugin: host end-to-end":
     check pluginBackendNameOf(api) == "clap"
 
     let path = mockLibPath()
-    check pluginCount(api, path) == 1
+    check pluginCount(api, path) == 2
 
     var info: PluginInfo
     check pluginInfo(api, path, 0, info)
@@ -100,6 +102,13 @@ suite "clap mock plugin: host end-to-end":
     check info.paramCount == 2
     check info.hasState
     check info.reportedLatency == 8
+
+    # Второй дескриптор той же библиотеки (для маппинга ClapProcessTail).
+    var tailInfo: PluginInfo
+    check pluginInfo(api, path, 1, tailInfo)
+    check tailInfo.id == "com.euterpia.mock.tail"
+    check tailInfo.name == "EUTERPIA Mock Tail"
+    check not pluginInfo(api, path, 2, tailInfo)
 
     let h = pluginInstantiate(api, path, 0)
     check not h.isNil
@@ -267,4 +276,143 @@ suite "clap mock plugin: state в проекте":
     check abs(pluginParamGet(api, h2, 0'u32) - 1.0) < 1e-9   # дефолт
     check loadInstanceState(api, h2, restoredBlob)
     check abs(pluginParamGet(api, h2, 0'u32) - 0.75) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# События: вход EventQueue → плагин, out-events → EventQueue (issue #7)
+# ---------------------------------------------------------------------------
+
+proc findByKey(q: ptr EventQueue; kind: RealtimeEventKind; key: float32): int =
+  for i in 0 ..< q.count:
+    if q.events[i].kind == kind and abs(q.events[i].data[0] - key) < 1e-6f:
+      return i
+  -1
+
+suite "clap mock plugin: events (#7)":
+  test "input доходит до плагина, out-events возвращаются sample-accurately":
+    let api = newClapPluginApi()
+    check not api.isNil
+    defer: freeClapPluginApi(api)
+    var log = silentLogger()
+    discard pluginInit(api, addr log)
+
+    let h = pluginInstantiate(api, mockLibPath(), 0)
+    check not h.isNil
+    defer: pluginDestroy(api, h)
+    check pluginActivate(api, h, 48000.0, int32(Frames), 1, 1) == peOk
+
+    var rig: Rig
+    rig.initRig()
+    rig.fillInput()
+
+    # Вход: нота на 32-м сэмпле блока. Плагин вернёт её эхом и сгенерирует
+    # ещё одну ноту на фиксированном кадре 64.
+    var inQ, outQ: EventQueue
+    check pushEvent(addr inQ, RealtimeEvent(
+      frameOffset: 32'u32, kind: evNoteOn, channel: 2'u8,
+      data: [55.0f, 0.6f, 0.0f, 0.0f]))
+
+    check pluginProcess(api, h, addr rig.ctx, addr rig.ports,
+                        addr inQ, addr outQ) == ppsContinue
+
+    # Сгенерированная плагином нота обязана попасть ровно на 64-й сэмпл.
+    let gen = findByKey(addr outQ, evNoteOn, 69.0f)
+    check gen >= 0
+    check outQ.events[gen].frameOffset == 64'u32
+
+    # Эхо входной ноты: значит EventQueue реально доехал до плагина.
+    let echo = findByKey(addr outQ, evNoteOn, 55.0f)
+    check echo >= 0
+    check outQ.events[echo].frameOffset == 32'u32
+    check outQ.events[echo].channel == 2'u8
+    check abs(outQ.events[echo].data[1] - 0.6f) < 1e-5f
+
+  test "нота без out-events не роняет процесс":
+    # outEvents == nil: адаптер не должен ни падать, ни терять аудио.
+    let api = newClapPluginApi()
+    check not api.isNil
+    defer: freeClapPluginApi(api)
+    var log = silentLogger()
+    discard pluginInit(api, addr log)
+
+    let h = pluginInstantiate(api, mockLibPath(), 0)
+    check not h.isNil
+    defer: pluginDestroy(api, h)
+    check pluginActivate(api, h, 48000.0, int32(Frames), 1, 1) == peOk
+
+    var rig: Rig
+    rig.initRig()
+    rig.fillInput()
+    var inQ: EventQueue
+    check pushEvent(addr inQ, RealtimeEvent(
+      frameOffset: 8'u32, kind: evNoteOn, data: [60.0f, 1.0f, 0.0f, 0.0f]))
+
+    rig.clearOutput()
+    check pluginProcess(api, h, addr rig.ctx, addr rig.ports, addr inQ, nil) ==
+      ppsContinue
+    check rig.outputScaledBy(1.0'f32)
+
+  test "статус ClapProcessTail маппится в ppsTail":
+    let api = newClapPluginApi()
+    check not api.isNil
+    defer: freeClapPluginApi(api)
+    var log = silentLogger()
+    discard pluginInit(api, addr log)
+
+    let h = pluginInstantiate(api, mockLibPath(), 1)   # дескриптор tail
+    check not h.isNil
+    defer: pluginDestroy(api, h)
+    check pluginActivate(api, h, 48000.0, int32(Frames), 1, 1) == peOk
+
+    var rig: Rig
+    rig.initRig()
+    rig.fillInput()
+    check pluginProcess(api, h, addr rig.ctx, addr rig.ports, nil, nil) ==
+      ppsTail
+
+  test "конфигурация 2 входа / 2 выхода обрабатывается без выхода за границы":
+    let api = newClapPluginApi()
+    check not api.isNil
+    defer: freeClapPluginApi(api)
+    var log = silentLogger()
+    discard pluginInit(api, addr log)
+
+    let h = pluginInstantiate(api, mockLibPath(), 0)
+    check not h.isNil
+    defer: pluginDestroy(api, h)
+    check pluginActivate(api, h, 48000.0, int32(Frames), 2, 2) == peOk
+
+    var inA, inB, outA, outB: array[Frames, float32]
+    for i in 0 ..< Frames:
+      inA[i] = 0.2'f32
+      inB[i] = -0.3'f32
+    var bInA = AudioBuffer(
+      data: cast[ptr UncheckedArray[float32]](addr inA[0]),
+      channels: 1, frames: int32(Frames), stride: int32(Frames))
+    var bInB = AudioBuffer(
+      data: cast[ptr UncheckedArray[float32]](addr inB[0]),
+      channels: 1, frames: int32(Frames), stride: int32(Frames))
+    var bOutA = AudioBuffer(
+      data: cast[ptr UncheckedArray[float32]](addr outA[0]),
+      channels: 1, frames: int32(Frames), stride: int32(Frames))
+    var bOutB = AudioBuffer(
+      data: cast[ptr UncheckedArray[float32]](addr outB[0]),
+      channels: 1, frames: int32(Frames), stride: int32(Frames))
+
+    var ports: NodeAudioPorts
+    ports.inputs[0] = addr bInA
+    ports.inputs[1] = addr bInB
+    ports.inputCount = 2
+    ports.outputs[0] = addr bOutA
+    ports.outputs[1] = addr bOutB
+    ports.outputCount = 2
+
+    var rig: Rig
+    rig.initRig()
+    check pluginProcess(api, h, addr rig.ctx, addr ports, nil, nil) ==
+      ppsContinue
+
+    for i in 0 ..< Frames:
+      check abs(outA[i] - 0.2'f32) < 1e-6f
+      check abs(outB[i] + 0.3'f32) < 1e-6f
 

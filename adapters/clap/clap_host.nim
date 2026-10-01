@@ -328,8 +328,60 @@ proc pushParamToClap*(storage: var ClapEventStorage,
   inc storage.count
   return true
 
+proc midiStatus(base: uint8; channel: uint8): uint8 {.inline.} =
+  ## Статус-байт MIDI: тип сообщения | номер канала (4 бита).
+  base or (channel and 0x0F'u8)
+
+proc to7BitRaw(v: float32): uint8 {.inline.} =
+  ## Значение уже в единицах MIDI (0..127) -> 7 бит без нормировки.
+  if v <= 0.0f: 0'u8
+  elif v >= 127.0f: 127'u8
+  else: uint8(v + 0.5f)
+
+proc to7BitNorm(v: float32): uint8 {.inline.} =
+  ## Нормированное значение (0..1) -> 7 бит.
+  if v <= 0.0f: 0'u8
+  elif v >= 1.0f: 127'u8
+  else: uint8(v * 127.0f + 0.5f)
+
+proc pitchBend14(v: float32): int32 {.inline.} =
+  ## [-1, 1] -> 14-битное значение с центром 8192 (0..16383).
+  var bend = int32(v * 8192.0f) + 8192
+  if bend < 0: bend = 0
+  if bend > 16383: bend = 16383
+  bend
+
+proc pushMidiToClap*(storage: var ClapEventStorage,
+                     frameOffset: uint32,
+                     status, d1, d2: uint8): bool =
+  ## 3-байтное MIDI-сообщение в CLAP (`clap_event_midi`).
+  ##
+  ## Это штатный «запасной выход» CLAP: отдельные типы событий есть только у
+  ## нот и параметров, всё остальное (CC, pitch bend, aftertouch, program
+  ## change) ходит как MIDI-байты.
+  if storage.count >= MaxBlockEvents:
+    return false
+  var ev: ClapEventMidi
+  ev.header.size = uint32(sizeof(ClapEventMidi))
+  ev.header.time = frameOffset
+  ev.header.spaceId = 0
+  ev.header.eventType = ClapEvtMidi
+  ev.header.flags = ClapEvtIsLive
+  ev.portIndex = 0
+  ev.data[0] = status
+  ev.data[1] = d1
+  ev.data[2] = d2
+  copyMem(addr storage.events[storage.count], addr ev, sizeof(ClapEventMidi))
+  inc storage.count
+  true
+
 proc convertRtEventToClap*(ev: RealtimeEvent, storage: var ClapEventStorage): bool =
   ## Convert internal RealtimeEvent → CLAP raw storage.
+  ##
+  ## Для CC / pitch bend / aftertouch / program change в CLAP нет отдельных
+  ## типов событий: они уезжают как `clap_event_midi` (3 байта). Раньше эти
+  ## виды событий молча терялись — плагин не получал ни CC, ни pitch bend
+  ## с клавиатуры (issue #7).
   case ev.kind
   of evNoteOn:
     return pushNoteToClap(storage, ClapEvtNoteOn, ev.frameOffset,
@@ -342,6 +394,26 @@ proc convertRtEventToClap*(ev: RealtimeEvent, storage: var ClapEventStorage): bo
   of evParamChange:
     return pushParamToClap(storage, ev.frameOffset,
                            ev.data[0].uint32, ev.data[1].float64)
+  of evCC:
+    # data[0] — номер контроллера (0..127), data[1] — нормированное значение.
+    return pushMidiToClap(storage, ev.frameOffset,
+                          midiStatus(0xB0'u8, ev.channel),
+                          to7BitRaw(ev.data[0]), to7BitNorm(ev.data[1]))
+  of evPitchBend:
+    # data[0] — [-1, 1] -> 14-битное значение вокруг центра 8192.
+    let bend = pitchBend14(ev.data[0])
+    return pushMidiToClap(storage, ev.frameOffset,
+                          midiStatus(0xE0'u8, ev.channel),
+                          uint8(bend and 0x7F'i32),
+                          uint8((bend shr 7) and 0x7F'i32))
+  of evAftertouch:
+    return pushMidiToClap(storage, ev.frameOffset,
+                          midiStatus(0xD0'u8, ev.channel),
+                          to7BitNorm(ev.data[0]), 0'u8)
+  of evProgramChange:
+    return pushMidiToClap(storage, ev.frameOffset,
+                          midiStatus(0xC0'u8, ev.channel),
+                          to7BitRaw(ev.data[0]), 0'u8)
   else:
     return false
 
@@ -374,11 +446,45 @@ proc convertClapEventToRt*(header: ptr ClapEventHeader): RealtimeEvent =
     result.data[1] = param.value.float32
 
   of ClapEvtMidi:
+    # Симметрично convertRtEventToClap: разбираем статус-байт, чтобы out-event
+    # вернулся в Core тем же типом, каким ушёл бы вход (issue #7). Раньше
+    # всё сводилось к evCC, и MIDI-out плагина терял тип сообщения.
     let midi = cast[ptr ClapEventMidi](header)
-    result.kind = evCC
-    result.channel = midi.data[0] and 0x0F
-    result.data[0] = midi.data[1].float32
-    result.data[1] = midi.data[2].float32
+    let status = midi.data[0] and 0xF0'u8
+    result.channel = midi.data[0] and 0x0F'u8
+    case status
+    of 0x90'u8:                       # Note On (velocity 0 == Note Off)
+      if midi.data[2] == 0'u8:
+        result.kind = evNoteOff
+        result.data[0] = float32(midi.data[1])
+        result.data[1] = 0.0f
+      else:
+        result.kind = evNoteOn
+        result.data[0] = float32(midi.data[1])
+        result.data[1] = float32(midi.data[2]) / 127.0f
+    of 0x80'u8:                       # Note Off
+      result.kind = evNoteOff
+      result.data[0] = float32(midi.data[1])
+      result.data[1] = 0.0f
+    of 0xB0'u8:                       # Control Change
+      result.kind = evCC
+      result.data[0] = float32(midi.data[1])
+      result.data[1] = float32(midi.data[2]) / 127.0f
+    of 0xE0'u8:                       # Pitch Bend
+      let bend = (int32(midi.data[2]) shl 7) or int32(midi.data[1])
+      result.kind = evPitchBend
+      result.data[0] = float32(bend - 8192) / 8192.0f
+    of 0xD0'u8:                       # Channel Aftertouch
+      result.kind = evAftertouch
+      result.data[0] = float32(midi.data[1]) / 127.0f
+    of 0xC0'u8:                       # Program Change
+      result.kind = evProgramChange
+      result.data[0] = float32(midi.data[1])
+    else:
+      result.kind = evTrigger
+      result.data[0] = float32(midi.data[0])
+      result.data[1] = float32(midi.data[1])
+      result.data[2] = float32(midi.data[2])
 
   else:
     result.kind = evTrigger
@@ -397,7 +503,12 @@ proc setupClapAudioBuffer*(buf: PAudioBuffer,
     clapBuf.channelCount = 0
     return
 
-  let ch = buf.channels.int
+  # Клампим число каналов: `channelPtrs` — фиксированный array[MaxAudioPorts].
+  # Без клампа буфер с большим числом каналов писал бы ЗА массив, а плагину
+  # сообщался бы `channelCount` больше, чем реально есть указателей (он читал
+  # бы мусор за границей). Конфигурации 1/1, 2/2, 2/4 обязаны оставаться в
+  # границах (issue #7).
+  let ch = min(buf.channels.int, MaxAudioPorts)
   let stride = buf.stride.int
   for c in 0 ..< ch:
     if stride == buf.frames.int:
@@ -590,10 +701,16 @@ proc processPlugin*(inst: var ClapPluginInstance,
   var clapAudioIns: array[MaxAudioPorts, ClapAudioBuffer]
   var clapAudioOuts: array[MaxAudioPorts, ClapAudioBuffer]
 
+  # Число портов клампим к MaxAudioPorts: и массивы буферов, и per-port
+  # указатели на каналы имеют фиксированную длину. Граф Core тоже ограничен
+  # MaxAudioPorts, но адаптер не должен полагаться на это (issue #7).
+  let inPorts = if audio.isNil: 0 else: min(audio.inputCount.int, MaxAudioPorts)
+  let outPorts = if audio.isNil: 0 else: min(audio.outputCount.int, MaxAudioPorts)
+
   if not audio.isNil:
-    for i in 0 ..< audio.inputCount:
+    for i in 0 ..< inPorts:
       setupClapAudioBuffer(audio.inputs[i], inst.inChannelPtrs[i], clapAudioIns[i])
-    for i in 0 ..< audio.outputCount:
+    for i in 0 ..< outPorts:
       setupClapAudioBuffer(audio.outputs[i], inst.outChannelPtrs[i], clapAudioOuts[i])
 
   # Setup event list interfaces
@@ -612,8 +729,8 @@ proc processPlugin*(inst: var ClapPluginInstance,
   clapProc.steadyTime = ctx.samplePosition
   clapProc.framesCount = ctx.blockSize.uint32
   clapProc.transport = addr transport
-  clapProc.audioInputsCount = if audio.isNil: 0'u32 else: audio.inputCount.uint32
-  clapProc.audioOutputsCount = if audio.isNil: 0'u32 else: audio.outputCount.uint32
+  clapProc.audioInputsCount = inPorts.uint32
+  clapProc.audioOutputsCount = outPorts.uint32
   clapProc.audioInputs = cast[ptr ClapAudioBuffer](addr clapAudioIns)
   clapProc.audioOutputs = cast[ptr ClapAudioBuffer](addr clapAudioOuts)
   clapProc.inEvents = addr inEvtList

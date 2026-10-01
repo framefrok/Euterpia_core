@@ -22,7 +22,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
-| Тесты | ✅ 232 unit-проверки + интеграционный набор; Core/Commons покрыты (#57) |
+| Тесты | ✅ 243 unit-проверки + интеграционный набор; Core/Commons покрыты (#57) |
 | CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты |
 
 ## Возможности
@@ -150,10 +150,11 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
 - [x] #6 CLAP: host- и plugin-side расширения + сквозной mock-плагин и
       состояние плагина в проекте (`nimble clapMock`, #53)
 - [x] TSan-джоб в CI и архитектурные guards (`core` не знает про форматы)
+- [x] #7 трансляция событий `EventQueue` ↔ CLAP: out-events, MIDI для
+      CC/pitch bend/aftertouch/program change, клампы портов и каналов
 
 ### Ближайшие шаги
 
-- [ ] #7 трансляция out-events и группировка аудиопортов CLAP
 - [ ] #4 метрика `xruns` доходит до control-plane
 
 ### Экосистема и бэкенды
@@ -264,16 +265,18 @@ Audio-поток не выполняет: аллокаций, блокирующ
 
 - #4 — метрика `xruns` не доходит до control plane;
 - #5 — Commons частично зависит от Core (`audio_file_io` → `wav_codec`);
-- #6, #7 — CLAP host extensions (params/state/gui/thread-check/latency)
+- CLAP (#6, #7, #49): host extensions (params/state/gui/thread-check/latency)
   и `request_callback`/`request_restart` реализованы в
   `adapters/clap/clap_host_extensions.nim` и покрыты
   `tests/unit/test_clap_host_extensions.nim`; сквозной путь
   load → instantiate → process → params → state проверяется `nimble
   clapMock` (`tests/mock/mock_clap_plugin.nim` + `tests/clap_mock_test.nim`,
   джоб `clap` в CI), состояние плагина хранится в `core/project.nim`.
-  Остаётся трансляция out-events и группировка аудиопортов — #7. Прогон
-  официального `clap-validator` — ручной: он требует реальных `.clap` и
-  сети и в CI невозможен;
+  Трансляция событий (#7) — `EventQueue` ↔ CLAP в обе стороны, включая
+  MIDI-сообщения для CC/pitch bend/aftertouch/program change; тесты
+  `tests/unit/test_clap_events.nim` + сквозные. Прогон официального
+  `clap-validator` — ручной: он требует реальных `.clap` и сети и в CI
+  невозможен;
 - доступ к параметрам/состоянию/latency/аудио-портам ПЛАГИНА
   (plugin-side расширения) реализован в
   `adapters/clap/clap_plugin_extensions.nim` (#49) и покрыт
@@ -296,7 +299,8 @@ Audio-поток не выполняет: аллокаций, блокирующ
 контрактом), #31 (miniaudio-бэкенд), #37 (единый `ring_buffer`),
 #12/#14 (CI, Logger вместо `echo`), #57 (тесты непокрытых модулей
 Core/Commons), #13 (UBSan/ASan-цели и CI-джобы), #6/#49/#53 (CLAP:
-host- и plugin-side расширения, mock-плагин и состояние в проекте).
+host- и plugin-side расширения, mock-плагин и состояние в проекте),
+#7 (трансляция событий EventQueue ↔ CLAP и MIDI-out плагина).
 
 ## Входной тракт
 
