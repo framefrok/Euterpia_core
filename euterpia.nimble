@@ -44,6 +44,10 @@ proc checkAdapters() =
   exec "nim check --hints:off adapters/eut/eut_plugin.nim"
   exec "nim check --hints:off adapters/eut/eut_plugin_backend.nim"
   exec "nim check --hints:off adapters/reference/fake_plugin_backend.nim"
+  # miniaudio (#31): TU шима здесь НЕ компилируется (`nim check` не трогает
+  # {.compile.}), поэтому проверка быстрая; сборка+прогон — задача
+  # `miniaudioSmoke`.
+  exec "nim check --hints:off adapters/miniaudio/audio_backend_miniaudio.nim"
 
 # Флаги потоков и memory manager задаются в config.nims, чтобы они
 # были одинаковыми при любой точке входа (unit, integration, CLI).
@@ -74,4 +78,16 @@ task integration, "Интеграционный тест ядра":
 task buildRelease, "Сборка интеграционного теста в release с LTO":
   mkDir buildDir
   exec "nim c --hints:off -d:release --passL:-flto --out:" & intBin & " tests/integration_test.nim"
+
+# ---------------------------------------------------------------------------
+# miniaudio (#31). Здесь РЕАЛЬНО собирается и линкуется TU miniaudio
+# (adapters/miniaudio/miniaudio_impl.c) — это единственная проверка, что
+# C-шим компилируется. Устройства может не быть: тогда тест печатает SKIP
+# и завершается успешно, но обязательно проверяет, что отсутствие
+# устройства даёт код ошибки, а не падение.
+# ---------------------------------------------------------------------------
+task miniaudioSmoke, "Сборка TU miniaudio и smoke-прогон адаптера (#31)":
+  mkDir buildDir
+  buildLog "miniaudio smoke"
+  exec "nim c -r --hints:off --out:build/miniaudio_smoke tests/miniaudio_smoke.nim"
 
