@@ -59,6 +59,39 @@ jobs:
         run: nimble buildRelease
 
   # ---------------------------------------------------------------------------
+  # Архитектурные guard'ы границ слоёв (MANIFEST §40, §41, §42).
+  #
+  # Это executable-версия критериев приёмки issue #29: конкретный формат
+  # плагинов и конкретный аудио-бэкенд не имеют права протечь в Core.
+  # Guard дешёвый (только grep), поэтому он блокирует merge.
+  # ---------------------------------------------------------------------------
+  architecture:
+    name: architecture guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Core не знает о формате плагинов (plugin_api, #29)
+        run: |
+          if grep -rn "clap\|Clap" core/ nodes/sdk/; then
+            echo "::error::CLAP-типы протекли в core/ или nodes/sdk/ (§40, §42)"
+            exit 1
+          fi
+          if grep -rn "clap_entry\|clap_plugin_entry" core/; then
+            echo "::error::clap_entry протёк в core/ (#29)"
+            exit 1
+          fi
+
+      - name: Core знает только audio_backend_api, а не miniaudio (#31)
+        run: |
+          # Только код, а не комментарии: audio_backend_api.nim перечисляет
+          # возможные бэкенды в прозе, и это допустимо.
+          if grep -rnE "miniaudio\.[hc]|MINIAUDIO_IMPLEMENTATION|ma_[a-z0-9]+_" core/; then
+            echo "::error::miniaudio протёк в core/ (§8, §41)"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
   # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool / ring_buffer.
   #
   # Прогон гоняет весь unit-набор, включая стресс ring_buffer (issue #37):
