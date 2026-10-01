@@ -40,7 +40,7 @@ proc checkAdapters() =
   # а контракт покрыт unit-тестом на эталонном адаптере.
   exec "nim check --hints:off adapters/clap/clap_host.nim"
   exec "nim check --hints:off adapters/clap/clap_host_extensions.nim"
-  exec "nim check --hints:off adapters/clap/clap_plugin_host.nim"
+  exec "nim check --hints:off adapters/clap/clap_plugin_extensions.nim"
   exec "nim check --hints:off adapters/clap/clap_plugin_backend.nim"
   exec "nim check --hints:off adapters/eut/eut_plugin.nim"
   exec "nim check --hints:off adapters/eut/eut_plugin_backend.nim"

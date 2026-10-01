@@ -261,6 +261,20 @@ proc outputEventsTryPush(list: ptr ClapOutputEvents, event: ptr ClapEventHeader)
 proc outputEventsTryFlush(list: ptr ClapOutputEvents): bool {.cdecl, gcsafe.} =
   return true
 
+proc initInputEvents*(storage: ptr ClapEventStorage): ClapInputEvents =
+  ## Собирает clap_input_events поверх нашего хранилища. Нужно тем, кто
+  ## зовёт не `process`, а другие методы с событиями (например
+  ## `clap.params.flush`, issue #49).
+  result.ctx = cast[pointer](storage)
+  result.size = inputEventsSize
+  result.get = inputEventsGet
+
+proc initOutputEvents*(storage: ptr ClapEventStorage): ClapOutputEvents =
+  ## Парная обёртка для clap_output_events.
+  result.ctx = cast[pointer](storage)
+  result.tryPush = outputEventsTryPush
+  result.tryFlush = outputEventsTryFlush
+
 # ==============================================================================
 # Event Conversion: Internal ↔ CLAP
 # ==============================================================================
