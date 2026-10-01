@@ -14,9 +14,16 @@ import
 const
   AudioCommandQueueCapacity = 1024
   AudioMetricQueueCapacity = 256
-  AudioRetireQueueCapacity = 1024
 
-  LocalRetireCapacity = 1024
+  ## Ёмкость SPSC-очереди утилизированных пайплайнов: столько смен графа
+  ## движок готов отдать control-plane через `pollReclamation` (issue #73).
+  AudioRetireQueueCapacity* = 1024
+
+  ## Ёмкость локального overflow утилизации: столько пайплайнов движок
+  ## держит в audio-потоке, если SPSC-очередь полна. При переполнении ОБОИХ
+  ## уровней пайплайн освобождается аварийно (issue #73).
+  LocalRetireCapacity* = 1024
+
   MaxPendingParams = 256
 
   ## Верхняя граница входного тракта. Ядро работает с моно/стерео входом;
@@ -164,10 +171,28 @@ proc flushLocalRetire(engine: ptr AudioEngine) {.rt.} =
     engine.localRetireCount = remaining
 
 
-proc retirePipelineRT(
+proc retirePipelineRT*(
   engine: ptr AudioEngine;
   p: ptr CompiledPipeline
 ) {.rt.} =
+  ## Передать пайплайн на утилизацию. Вызывается из audio-пути при смене
+  ## графа (и доступен хосту, который меняет пайплайны сам).
+  ##
+  ## Пайплайн уходит по первому свободному уровню:
+  ##   1. SPSC-очередь `fromAudioRetire` — штатный путь, разбирает
+  ##      control-plane через `pollReclamation`;
+  ##   2. локальный overflow `localRetire` — если очередь полна.
+  ##
+  ## Если полны ОБА уровня, хранить пайплайн некуда. Раньше указатель просто
+  ## терялся: `droppedRetirements` рос, а `destroyPipeline` не вызывался
+  ## никогда — утечка неограниченная (issue #73). Теперь пайплайн
+  ## освобождается ПРЯМО ЗДЕСЬ.
+  ##
+  ## Это единственное освобождение памяти в audio-пути и осознанное
+  ## отступление от MANIFEST §9/§10: событие исключительное (control-plane
+  ## не разбирал очередь >~2000 смен графа), цена — один `deallocShared`,
+  ## а альтернатива — тихая потеря арен и шагов пайплайна. Факт виден
+  ## control-plane через `droppedRetirementsCount()`.
   if p == nil:
     return
 
@@ -183,9 +208,9 @@ proc retirePipelineRT(
     engine.localRetire[engine.localRetireCount] = p
     inc engine.localRetireCount
   else:
-    # Крайне нежелательная ситуация: контроль не разбирает очередь.
-    # В реальном времени удалять нельзя, поэтому здесь только счётчик.
+    # Оба уровня полны: аварийное освобождение (issue #73).
     inc engine.droppedRetirements
+    destroyPipeline(p)
 
 
 proc writeUint64ToBlock(
@@ -1301,6 +1326,11 @@ proc droppedMetricsCount*(engine: ptr AudioEngine): uint32 =
 
 
 proc droppedRetirementsCount*(engine: ptr AudioEngine): uint32 =
+  ## Сколько пайплайнов пришлось освободить АВАРИЙНО в audio-потоке: оба
+  ## уровня утилизации были полны, то есть control-plane не разбирал очередь
+  ## (`pollReclamation`). Control-path диагностика: ненулевое значение —
+  ## признак, что хост перестал опрашивать движок при частой смене графа
+  ## (issue #73).
   if engine == nil:
     return 0
 
