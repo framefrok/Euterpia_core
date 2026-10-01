@@ -83,9 +83,13 @@ extern "C" {
 #define EUT_MAX_CHANNELS 8
 #define EUT_MAX_BLOCK    4096
 
-/* Gain curve компрессора живёт в состоянии: 1024 фрейма достаточно
-   для любого разумного block size. */
-#define EUT_COMP_MAX_BLOCK 1024
+/* Gain curve компрессора живёт в состоянии. Размер обязан покрывать
+   ЛЮБОЙ легальный блок (EUT_MAX_BLOCK), иначе применение кривой читает
+   память за границей массива: детектор клампит n, а apply/gain_at — нет
+   (это был реальный баг: на блоке > 1024 хвост блока глушился). */
+#define EUT_COMP_MAX_BLOCK 4096
+_Static_assert(EUT_COMP_MAX_BLOCK >= EUT_MAX_BLOCK,
+               "EUT_COMP_MAX_BLOCK must cover EUT_MAX_BLOCK");
 
 /* ---------------------------------------------------------------------------
  * Базовые утилиты состояния
@@ -293,9 +297,16 @@ typedef struct {
   /* Размер задан литералом, а не макросом EUT_COMP_MAX_BLOCK:
      Nim разбирает скомпилированные .c файлы (вместе с #include этого
      заголовка) и НЕ разворачивает макросы — макрос внутри объявления
-     поля ломает разбор структуры и «съедает» имена полей на стороне Nim. */
-  float gainCurve[1024];
+     поля ломает разбор структуры и «съедает» имена полей на стороне Nim.
+     Литерал обязан совпадать с EUT_COMP_MAX_BLOCK и с Nim-зеркалом
+     (nodes/builtin/native/eut_native.nim); соответствие проверяется
+     compile-time assert'ами здесь и ниже. */
+  float gainCurve[4096];
 } EutComp;
+
+_Static_assert(sizeof(((EutComp *)0)->gainCurve) ==
+               EUT_COMP_MAX_BLOCK * sizeof(float),
+               "gainCurve must match EUT_COMP_MAX_BLOCK");
 
 void eut_comp_init(EutComp *c, int channels, int detector, float sampleRate);
 void eut_comp_set_params(EutComp *c, float thresholdDb, float ratio,

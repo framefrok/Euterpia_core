@@ -217,7 +217,10 @@ proc processCompNode(
   if inBuf.isNil or outBuf.isNil:
     return
 
-  let frames = processFrames(ctx, outBuf)
+  # Кривая gain в C-состоянии рассчитана максимум на EutCompMaxBlock
+  # сэмплов (он же — предел блока в Core). Клампим явно: без этого
+  # применение кривой читало бы память за границей массива (issue #64).
+  let frames = min(processFrames(ctx, outBuf), EutCompMaxBlock.int32)
   if frames <= 0:
     return
 
