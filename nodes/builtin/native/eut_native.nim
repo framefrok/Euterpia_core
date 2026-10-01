@@ -28,14 +28,56 @@ import std/os
 
 {.passC: "-I" & (currentSourcePath.parentDir / ".." / "csrc") & "/".}
 
-{.compile: "../csrc/eut_biquad.c".}
-{.compile: "../csrc/eut_svf.c".}
-{.compile: "../csrc/eut_osc.c".}
-{.compile: "../csrc/eut_noise.c".}
-{.compile: "../csrc/eut_mix.c".}
-{.compile: "../csrc/eut_comp.c".}
-{.compile: "../csrc/eut_delay.c".}
-{.compile: "../csrc/eut_abi.c".}
+# ---------------------------------------------------------------------------
+# Инвалидация кэша при правке C-заголовка (issue #43)
+#
+# Nim НЕ отслеживает `#include` для `{.compile.}`: правка `eut_dsp.h` не
+# пересобирает C-объекты, и в одном бинарнике оказываются TU, собранные по
+# РАЗНЫМ версиям заголовка. На практике это выглядело как «случайные»
+# падения тестов после правки размера структуры: stale `sizeof(EutComp)`
+# ломал abiCheck(), а рассогласованные TU роняли посторонний тест фильтра.
+#
+# Лечение: хеш содержимого заголовка становится частью ИМЕНИ объектного
+# файла (`{.compile: (cfile, obj)}` берёт имя .o вторым аргументом). Nim
+# пересобирает `{.compile.}`-файл, если менялись его исходник или параметры,
+# а при новом имени объекта прежний .o просто не переиспользуется.
+#
+# Проверено на практике:
+#   * правка заголовка -> в nimcache появляются объекты с новым префиксом
+#     (старые остаются лежать и игнорируются);
+#   * намеренно рассогласованный заголовок (`gainCurve[4097]` при макросе
+#     4096) теперь ЛОМАЕТ инкрементальную сборку на `_Static_assert`,
+#     тогда как раньше stale-объект это маскировал;
+#   * `passC` для этого не годится — Nim не пересобирает `{.compile.}` при
+#     смене флагов (проверено: объект оставался прежним).
+# Старые объекты копятся в nimcache и удаляются вместе с ним.
+# ---------------------------------------------------------------------------
+
+func eutHeaderHash(s: string): uint64 =
+  ## FNV-1a. Нужен только детерминированный, одинаковый между запусками и
+  ## платформами хеш: std/hashes для этого не подходит (не обязан
+  ## вычисляться на этапе компиляции).
+  result = 14695981039346656037'u64
+  for ch in s:
+    result = result xor uint64(ord(ch))
+    result = result * 1099511628211'u64
+
+const
+  EutDspHeaderSource = staticRead("../csrc/eut_dsp.h")
+  EutDspHeaderHash = eutHeaderHash(EutDspHeaderSource)
+  ## Префикс имени объектного файла ядер: `{.compile: (cfile, obj)}`
+  ## принимает имя .o, поэтому смена хеша заголовка меняет и имя объекта —
+  ## Nim пересобирает его вместо использования прежнего (issue #43).
+  EutDspObjPrefix = "eut_hdr_" & $EutDspHeaderHash & "_"
+
+{.compile: ("../csrc/eut_biquad.c", EutDspObjPrefix & "eut_biquad.o").}
+{.compile: ("../csrc/eut_svf.c", EutDspObjPrefix & "eut_svf.o").}
+{.compile: ("../csrc/eut_osc.c", EutDspObjPrefix & "eut_osc.o").}
+{.compile: ("../csrc/eut_noise.c", EutDspObjPrefix & "eut_noise.o").}
+{.compile: ("../csrc/eut_mix.c", EutDspObjPrefix & "eut_mix.o").}
+{.compile: ("../csrc/eut_comp.c", EutDspObjPrefix & "eut_comp.o").}
+{.compile: ("../csrc/eut_delay.c", EutDspObjPrefix & "eut_delay.o").}
+{.compile: ("../csrc/eut_abi.c", EutDspObjPrefix & "eut_abi.o").}
 
 {.push raises: [].}
 

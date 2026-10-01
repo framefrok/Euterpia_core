@@ -140,6 +140,8 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
 - [x] #49 `param*`/`state*`/`latencyFrames` CLAP через `clap_plugin_extensions`
 - [x] #58 BBT-конверсия учитывает знаменатель размера (PR #59)
 - [x] #61 `audio_recorder`: устаревшая `rcArm` не откатывает `disarm` (PR #62)
+- [x] #64 компрессор: кривая gain покрывает весь блок, убран OOB (PR #65)
+- [x] #43 инвалидация кэша C-ядер при правке `eut_dsp.h` (хеш заголовка в имени объекта)
 - [x] #12 CI-матрица, LICENSE, шаблоны; #14 `Logger` вместо `echo` в Core
 - [x] TSan-джоб в CI и архитектурные guards (`core` не знает про форматы)
 
@@ -166,7 +168,7 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
 - [ ] #11 `DEBUG_ASSERT_REALTIME_SAFE` — guard на аллокации/локи в audio-потоке
 - [ ] #16 gcsafe-аудит audio-пути
 - [ ] #5 убрать остаточную зависимость Commons → Core
-- [ ] #43 пересборка C-ядер при правке `#include`; #42 кэш Nim в macOS-джобе
+- [ ] #42 кэш Nim в macOS-джобе
 - [ ] #50 расширить architecture-guards на направление зависимостей;
       #52 miniaudio-сборка на Windows/macOS
 
