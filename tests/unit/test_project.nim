@@ -134,6 +134,29 @@ suite "project: round-trip":
     check p.sequencer.automationLanes[0].points[1].value == 1.0f
     check p.sequencer.automationLanes[0].points[1].curve == 2
 
+  test "pluginStates: непрозрачные блобы сохраняются байт-в-байт":
+    let path = getTempDir() / "euterpia_proj_pluginstate.json"
+    var proj = makeProject()
+    proj.pluginStates.add PluginStateFormat(
+      nodeId: 7, pluginId: "com.euterpia.mock.gain",
+      state: @[byte 0, byte 1, byte 255, byte 128, byte 42])
+    proj.pluginStates.add PluginStateFormat(
+      nodeId: 9, pluginId: "euterpia.eut.v1", state: @[])
+
+    check saveProject(proj, path).success
+    defer: removeFile(path)
+
+    let loaded = loadProject(path)
+    check loaded.success
+    check loaded.value.pluginStates.len == 2
+    check loaded.value.pluginStates[0].nodeId == 7
+    check loaded.value.pluginStates[0].pluginId == "com.euterpia.mock.gain"
+    check loaded.value.pluginStates[0].state ==
+      @[byte 0, byte 1, byte 255, byte 128, byte 42]
+    check loaded.value.pluginStates[1].nodeId == 9
+    check loaded.value.pluginStates[1].state.len == 0
+
+
 
 # =============================================================================
 # Ошибки формата и I/O (через ProjectResult, без исключений наружу)
@@ -192,6 +215,7 @@ suite "project: ошибки":
     check p.metadata.tempo == 120.0f
     check p.metadata.timeSignature.numerator == 4
     check p.metadata.timeSignature.denominator == 4
+    check p.pluginStates.len == 0
 
   test "отсутствующий timeSignature внутри metadata -> 4/4 по умолчанию":
     # Именно этот fallback опирается на safeInt(..., "numerator", 4).

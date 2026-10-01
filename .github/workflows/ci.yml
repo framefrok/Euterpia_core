@@ -201,3 +201,27 @@ jobs:
       - name: nimble asan
         run: nimble asan
 
+  # ---------------------------------------------------------------------------
+  # Сквозной CLAP-тест (#53): mock-плагин из tests/mock/ собирается в
+  # разделяемую библиотеку (nim c --app:lib) и прогоняется через адаптер
+  # целиком: load → enumerate → instantiate → activate → process → params →
+  # state, включая request_callback → on_main_thread и round-trip состояния
+  # через core/project.
+  #
+  # Только Linux: ABI разделяемых библиотек и упаковка символьной таблицы
+  # отличаются на Windows/macOS (для них нужен свой джоб).
+  # ---------------------------------------------------------------------------
+  clap:
+    name: clap host integration (mock plugin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.12'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: nimble clapMock
+        run: nimble clapMock
+

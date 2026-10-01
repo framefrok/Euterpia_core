@@ -117,3 +117,23 @@ task asan, "Unit-набор под AddressSanitizer (#13)":
     "--passC:-fsanitize=address --passC:-fno-omit-frame-pointer " &
     "--passL:-fsanitize=address --out:build/unit_asan tests/unit/all_tests.nim"
 
+# ---------------------------------------------------------------------------
+# Сквозной CLAP-тест (issue #53). Mock-плагин (tests/mock/) собирается в
+# РАЗДЕЛЯЕМУЮ библиотеку — в дереве нет ни одного внешнего `.clap`.
+#
+# Отдельная цель нужна потому, что `nimble test` не должен зависеть от
+# сборки разделяемых библиотек: если `--app:lib` где-то не поддержан,
+# падает именно этот джоб, а не весь unit-набор.
+# ---------------------------------------------------------------------------
+task clapMock, "Сборка mock CLAP-плагина и сквозной тест хостинга (#53)":
+  mkDir buildDir
+  buildLog "mock CLAP plugin (shared library)"
+  let mockLib =
+    when defined(windows): "build/mockclap.dll"
+    elif defined(macosx): "build/libmockclap.dylib"
+    else: "build/libmockclap.so"
+  exec "nim c --app:lib --hints:off --out:" & mockLib &
+    " tests/mock/mock_clap_plugin.nim"
+  buildLog "clap host end-to-end test"
+  exec "nim c -r --hints:off --out:build/clap_mock_test tests/clap_mock_test.nim"
+
