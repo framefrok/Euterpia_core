@@ -97,45 +97,70 @@ proc samplesPerQuarter*(t: var Transport): float64 {.inline.} =
   if bpm <= 0.0: return 0.0
   return (float64(t.sampleRate) * 60.0) / bpm
 
+proc beatsPerBar*(t: var Transport): float64 {.inline.} =
+  ## Сколько долей (в единицах знаменателя) в такте.
+  ## При некорректном знаменателе считаем его четвёртым: деление на ноль
+  ## в UI-хелпере хуже, чем «размер 4/4 по умолчанию».
+  let den = t.timeSignature.denominator
+  let d = if den > 0: float64(den) else: 4.0
+  float64(t.timeSignature.numerator) * 4.0 / d
+
+proc samplesPerBeat*(t: var Transport): float64 {.inline.} =
+  ## Сэмплов на долю. Именно ДОЛЯ (знаменатель размера), а не четверть:
+  ## в 6/8 доля — восьмая, и BBT обязан считать именно их (issue #58).
+  let den = if t.timeSignature.denominator > 0: t.timeSignature.denominator else: 4'i32
+  t.samplesPerQuarter() * (4.0 / float64(den))
+
+proc ticksPerBeat*(t: var Transport): int32 {.inline.} =
+  ## Тиков на долю при разрешении 960 PPQ.
+  let den = if t.timeSignature.denominator > 0: t.timeSignature.denominator else: 4'i32
+  let v = 960'i32 * 4'i32 div den
+  if v > 0: v else: 960'i32
+
 proc samplesPerBar*(t: var Transport): float64 {.inline.} =
   ## Вычисляет количество сэмплов на один такт с учётом TimeSignature.
   ## Control Thread helper.
-  let spq = t.samplesPerQuarter()
-  # Корректный учет denominator (например, для 6/8 или 3/4)
-  let quarterNotesPerBar = float64(t.timeSignature.numerator) * 4.0 / float64(t.timeSignature.denominator)
-  return spq * quarterNotesPerBar
+  t.samplesPerQuarter() * t.beatsPerBar()
 
 proc sampleToBarBeatTick*(t: var Transport, samplePos: int64): tuple[bar, beat, tick: int32] =
-  ## Конвертирует сэмпловую позицию в Bar:Beat:Tick (960 PPQ).
-  ## Control Thread / UI helper.
+  ## Конвертирует сэмпловую позицию в Bar:Beat:Tick.
+  ##
+  ## `beat` — доля в единицах знаменателя размера (в 6/8 это восьмые, а не
+  ## четверти), `tick` — позиция внутри доли при 960 PPQ, пересчитанных на
+  ## долю (для 6/8 это 480 тиков на долю). Control Thread / UI helper.
   let spBar = t.samplesPerBar()
-  let spQuarter = t.samplesPerQuarter()
-  
-  if spBar <= 0.0 or spQuarter <= 0.0:
+  let spBeat = t.samplesPerBeat()
+  let tpb = t.ticksPerBeat()
+
+  if spBar <= 0.0 or spBeat <= 0.0 or tpb <= 0:
     return (1, 1, 0)
-  
+
   # Точная float64 математика — без накопления ошибки от int truncation
   let barFloat = float64(samplePos) / spBar
   let bar = int32(barFloat) + 1
   let remainderSamples = float64(samplePos) - (float64(bar - 1) * spBar)
-  
-  let beatFloat = remainderSamples / spQuarter
+
+  let beatFloat = remainderSamples / spBeat
   let beat = int32(beatFloat) + 1
-  let beatRemainderSamples = remainderSamples - (float64(beat - 1) * spQuarter)
-  
-  let tick = int32((beatRemainderSamples / spQuarter) * 960.0)
-  
+  let beatRemainderSamples = remainderSamples - (float64(beat - 1) * spBeat)
+
+  let tick = int32((beatRemainderSamples / spBeat) * float64(tpb))
+
   return (bar, beat, tick)
 
 proc barBeatTickToSample*(t: var Transport, bar, beat, tick: int32): int64 =
-  ## Конвертирует Bar:Beat:Tick (960 PPQ) в абсолютную позицию в сэмплах.
-  ## Control Thread / UI helper.
+  ## Конвертирует Bar:Beat:Tick в абсолютную позицию в сэмплах.
+  ## Обратная к `sampleToBarBeatTick` (см. issue #58). Control Thread helper.
   let spBar = t.samplesPerBar()
-  let spQuarter = t.samplesPerQuarter()
-  
+  let spBeat = t.samplesPerBeat()
+  let tpb = t.ticksPerBeat()
+
+  if spBar <= 0.0 or spBeat <= 0.0 or tpb <= 0:
+    return 0'i64
+
   result = int64(float64(bar - 1) * spBar)
-  result += int64(float64(beat - 1) * spQuarter)
-  result += int64((float64(tick) / 960.0) * float64(spQuarter))
+  result += int64(float64(beat - 1) * spBeat)
+  result += int64((float64(tick) / float64(tpb)) * spBeat)
 
 # ============================================================================
 # State mutations (Вызываются из Control Thread)
@@ -216,18 +241,24 @@ proc getSnapshot*(t: var Transport): TransportSnapshot =
   let bpm = t.tempo.load(moRelaxed)
   let spQuarter = t.samplesPerQuarter()
   let spBar = t.samplesPerBar()
-  
+  let tpb = t.ticksPerBeat()
+  # Долей в такте = числитель размера: `beat` из sampleToBarBeatTick уже в
+  # единицах знаменателя, поэтому делить на что-то другое нельзя (#58).
+  let beatsPerBar =
+    if t.timeSignature.numerator > 0: float64(t.timeSignature.numerator) else: 1.0
+
   result.sampleRate = t.sampleRate
   result.tempo = bpm
   result.timeSignature = t.timeSignature
   result.samplePosition = pos
   result.isPlaying = t.isPlaying()
-  
+
   let (bar, beat, tick) = t.sampleToBarBeatTick(pos)
-  result.barPosition = float64(bar - 1) + 
-    (float64(beat - 1) + float64(tick) / 960.0) / float64(t.timeSignature.numerator)
-  result.beatPosition = float64(bar - 1) * float64(t.timeSignature.numerator) + 
-    float64(beat - 1) + float64(tick) / 960.0
+  let beatFraction =
+    if tpb > 0: float64(tick) / float64(tpb) else: 0.0
+  let beatsSinceBarStart = float64(beat - 1) + beatFraction
+  result.barPosition = float64(bar - 1) + beatsSinceBarStart / beatsPerBar
+  result.beatPosition = float64(bar - 1) * beatsPerBar + beatsSinceBarStart
   result.tickPosition = tick
   result.quarterNotePosition = if spQuarter > 0.0: float64(pos) / spQuarter else: 0.0
   
