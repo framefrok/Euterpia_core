@@ -20,6 +20,9 @@ switch("path", "commons")
 switch("path", "nodes")
 switch("path", "adapters")
 switch("path", "adapters/portaudio")
+switch("path", "adapters/clap")
+switch("path", "adapters/eut")
+switch("path", "adapters/reference")
 switch("path", "tests")
 
 # ----------------------------------------------------------------------------

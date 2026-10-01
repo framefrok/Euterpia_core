@@ -1,6 +1,6 @@
 # clap_host.nim
-import ../core/signal_types 
-import ../core/node_interface
+import ../../core/signal_types 
+import ../../core/node_interface
 import std/dynlib
 
 {.push raises: [].}
@@ -108,13 +108,13 @@ type
 
   ClapInputEvents* {.bycopy.} = object
     ctx*: pointer
-    size*: proc(list: ptr ClapInputEvents): uint32 {.cdecl, raises: [].}
-    get*: proc(list: ptr ClapInputEvents, index: uint32): ptr ClapEventHeader {.cdecl, raises: [].}
+    size*: proc(list: ptr ClapInputEvents): uint32 {.cdecl, raises: [], gcsafe.}
+    get*: proc(list: ptr ClapInputEvents, index: uint32): ptr ClapEventHeader {.cdecl, raises: [], gcsafe.}
 
   ClapOutputEvents* {.bycopy.} = object
     ctx*: pointer
-    tryPush*: proc(list: ptr ClapOutputEvents, event: ptr ClapEventHeader): bool {.cdecl, raises: [].}
-    tryFlush*: proc(list: ptr ClapOutputEvents): bool {.cdecl, raises: [].}
+    tryPush*: proc(list: ptr ClapOutputEvents, event: ptr ClapEventHeader): bool {.cdecl, raises: [], gcsafe.}
+    tryFlush*: proc(list: ptr ClapOutputEvents): bool {.cdecl, raises: [], gcsafe.}
 
   ClapAudioBuffer* {.bycopy.} = object
     data32*: ptr UncheckedArray[ptr float32]
@@ -141,10 +141,10 @@ type
     vendor*: cstring
     url*: cstring
     version*: cstring
-    getExtension*: proc(host: ptr ClapHost, extensionId: cstring): pointer {.cdecl, raises: [].}
-    requestRestart*: proc(host: ptr ClapHost) {.cdecl, raises: [].}
-    requestProcess*: proc(host: ptr ClapHost) {.cdecl, raises: [].}
-    requestCallback*: proc(host: ptr ClapHost) {.cdecl, raises: [].}
+    getExtension*: proc(host: ptr ClapHost, extensionId: cstring): pointer {.cdecl, raises: [], gcsafe.}
+    requestRestart*: proc(host: ptr ClapHost) {.cdecl, raises: [], gcsafe.}
+    requestProcess*: proc(host: ptr ClapHost) {.cdecl, raises: [], gcsafe.}
+    requestCallback*: proc(host: ptr ClapHost) {.cdecl, raises: [], gcsafe.}
 
   ClapPluginDescriptor* {.bycopy.} = object
     clapVersion*: ClapVersion
@@ -161,29 +161,29 @@ type
   ClapPlugin* {.bycopy.} = object
     desc*: ptr ClapPluginDescriptor
     pluginData*: pointer
-    init*: proc(plugin: ptr ClapPlugin): bool {.cdecl, raises: [].}
-    destroy*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [].}
+    init*: proc(plugin: ptr ClapPlugin): bool {.cdecl, raises: [], gcsafe.}
+    destroy*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [], gcsafe.}
     activate*: proc(plugin: ptr ClapPlugin, sampleRate: float64,
-                    minFrames: uint32, maxFrames: uint32): bool {.cdecl, raises: [].}
-    deactivate*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [].}
-    startProcessing*: proc(plugin: ptr ClapPlugin): bool {.cdecl, raises: [].}
-    stopProcessing*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [].}
-    reset*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [].}
-    process*: proc(plugin: ptr ClapPlugin, process: ptr ClapProcess): int32 {.cdecl, raises: [].}
-    getExtension*: proc(plugin: ptr ClapPlugin, id: cstring): pointer {.cdecl, raises: [].}
+                    minFrames: uint32, maxFrames: uint32): bool {.cdecl, raises: [], gcsafe.}
+    deactivate*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [], gcsafe.}
+    startProcessing*: proc(plugin: ptr ClapPlugin): bool {.cdecl, raises: [], gcsafe.}
+    stopProcessing*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [], gcsafe.}
+    reset*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [], gcsafe.}
+    process*: proc(plugin: ptr ClapPlugin, process: ptr ClapProcess): int32 {.cdecl, raises: [], gcsafe.}
+    getExtension*: proc(plugin: ptr ClapPlugin, id: cstring): pointer {.cdecl, raises: [], gcsafe.}
 
   ClapPluginFactory* {.bycopy.} = object
-    getPluginCount*: proc(factory: ptr ClapPluginFactory): uint32 {.cdecl, raises: [].}
+    getPluginCount*: proc(factory: ptr ClapPluginFactory): uint32 {.cdecl, raises: [], gcsafe.}
     getPluginDescriptor*: proc(factory: ptr ClapPluginFactory,
-                               index: uint32): ptr ClapPluginDescriptor {.cdecl, raises: [].}
+                               index: uint32): ptr ClapPluginDescriptor {.cdecl, raises: [], gcsafe.}
     createPlugin*: proc(factory: ptr ClapPluginFactory, host: ptr ClapHost,
-                        pluginId: cstring): ptr ClapPlugin {.cdecl, raises: [].}
+                        pluginId: cstring): ptr ClapPlugin {.cdecl, raises: [], gcsafe.}
 
   ClapPluginEntry* {.bycopy.} = object
     clapVersion*: ClapVersion
-    init*: proc(pluginPath: cstring): bool {.cdecl, raises: [].}
-    deinit*: proc() {.cdecl, raises: [].}
-    getFactory*: proc(factoryId: cstring): pointer {.cdecl, raises: [].}
+    init*: proc(pluginPath: cstring): bool {.cdecl, raises: [], gcsafe.}
+    deinit*: proc() {.cdecl, raises: [], gcsafe.}
+    getFactory*: proc(factoryId: cstring): pointer {.cdecl, raises: [], gcsafe.}
 
 # ==============================================================================
 # Internal Types
@@ -217,34 +217,34 @@ type
 # Host Callbacks (minimal implementation)
 # ==============================================================================
 
-proc hostGetExtension(host: ptr ClapHost, extensionId: cstring): pointer {.cdecl.} =
+proc hostGetExtension(host: ptr ClapHost, extensionId: cstring): pointer {.cdecl, gcsafe.} =
   # No extensions supported yet
   return nil
 
-proc hostRequestRestart(host: ptr ClapHost) {.cdecl.} =
+proc hostRequestRestart(host: ptr ClapHost) {.cdecl, gcsafe.} =
   discard
 
-proc hostRequestProcess(host: ptr ClapHost) {.cdecl.} =
+proc hostRequestProcess(host: ptr ClapHost) {.cdecl, gcsafe.} =
   discard
 
-proc hostRequestCallback(host: ptr ClapHost) {.cdecl.} =
+proc hostRequestCallback(host: ptr ClapHost) {.cdecl, gcsafe.} =
   discard
 
 # ==============================================================================
 # Event List Callbacks for CLAP
 # ==============================================================================
 
-proc inputEventsSize(list: ptr ClapInputEvents): uint32 {.cdecl.} =
+proc inputEventsSize(list: ptr ClapInputEvents): uint32 {.cdecl, gcsafe.} =
   let storage = cast[ptr ClapEventStorage](list.ctx)
   return storage.count.uint32
 
-proc inputEventsGet(list: ptr ClapInputEvents, index: uint32): ptr ClapEventHeader {.cdecl.} =
+proc inputEventsGet(list: ptr ClapInputEvents, index: uint32): ptr ClapEventHeader {.cdecl, gcsafe.} =
   let storage = cast[ptr ClapEventStorage](list.ctx)
   if index < storage.count.uint32:
     return cast[ptr ClapEventHeader](addr storage.events[index])
   return nil
 
-proc outputEventsTryPush(list: ptr ClapOutputEvents, event: ptr ClapEventHeader): bool {.cdecl.} =
+proc outputEventsTryPush(list: ptr ClapOutputEvents, event: ptr ClapEventHeader): bool {.cdecl, gcsafe.} =
   let storage = cast[ptr ClapEventStorage](list.ctx)
   if storage.count >= MaxBlockEvents:
     return false
@@ -255,7 +255,7 @@ proc outputEventsTryPush(list: ptr ClapOutputEvents, event: ptr ClapEventHeader)
   inc storage.count
   return true
 
-proc outputEventsTryFlush(list: ptr ClapOutputEvents): bool {.cdecl.} =
+proc outputEventsTryFlush(list: ptr ClapOutputEvents): bool {.cdecl, gcsafe.} =
   return true
 
 # ==============================================================================
