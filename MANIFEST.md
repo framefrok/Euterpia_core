@@ -1,447 +1,435 @@
-# EUTERPIA
+# EUTERPIA — Архитектурный манифест
 
-## Архитектурный манифест и правила разработки
+**Версия 2.0**
 
-**Версия архитектуры: 1.0**
+Единый источник архитектурных правил. Всё, что не описано здесь, решается по духу
+документа: маленькое ядро, ясные границы, заменяемые компоненты.
 
----
-
-# 1. Главный принцип EUTERPIA
-
-> **EUTERPIA должна оставаться системой независимых компонентов, а не единым приложением с десятками связанных модулей.**
-
-Любая часть проекта должна иметь возможность быть:
-
-* переписана;
-* заменена;
-* отключена;
-* перенесена;
-* протестирована отдельно;
-* использована без GUI;
-* использована без CLI;
-* использована без конкретного набора Nodes.
-
-Главная ценность проекта — **не конкретный UI, не конкретный plugin API и даже не конкретная реализация DSP**.
-
-Главная ценность — стабильные контракты между частями системы.
+Главное в версии 2.0: **ядро модернизируемое и заменяемое**. Открытые библиотеки
+на C и Nim разрешены — но только за стабильными контрактами и только после
+проверки качества, скорости и работоспособности (§11).
 
 ---
 
-# 2. Четыре основополагающих направления
+## 1. Назначение
 
-EUTERPIA состоит из четырёх основных направлений:
+EUTERPIA — ядро цифровой звуковой рабочей станции (DAW) и среда исполнения
+аудио-графов в реальном времени.
+
+Три идеи проекта:
+
+1. **Ядро маленькое.** Малый объём легче защищать и переписывать.
+2. **Границы важнее реализации.** Ценность — стабильные контракты, а не конкретный
+   UI, плагинный формат или отдельный DSP-алгоритм.
+3. **Всё заменяемо.** Ядро, backend, плагины, GUI — каждый компонент заменяем без
+   переписывания остальных.
+
+> Не большое, а хорошо разделённое.
+
+---
+
+## 2. Главный принцип
+
+Система — набор независимых компонентов, а не монолит.
+
+Каждая часть должна уметь:
+
+- быть переписана;
+- быть заменена;
+- быть отключена;
+- тестироваться отдельно;
+- работать без GUI;
+- работать без CLI;
+- работать без конкретного набора нод.
+
+Если компонент нельзя заменить или протестировать отдельно — это архитектурная
+ошибка, а не «технический долг».
+
+---
+
+## 3. Слои
 
 ```text
-EUTERPIA
-│
-├── Core
-├── CLI
-├── Commons
-└── Editor
+Commons    нейтральные утилиты; никого не знают
+Core       ядро (Nim stdlib + свой код) + контракты core/api
+adapters/  реализации контрактов поверх внешних библиотек
+Nodes      реализации возможностей поверх Core
+CLI        управление (control)
+Editor     визуализация (control)
 ```
 
-Но существует ещё один особый слой:
-
 ```text
-Nodes
+                 CLI        Editor
+                   \         /
+                    \       /
+                     Nodes
+                       |
+                     Core
+                       |
+                    Commons
 ```
 
-Nodes не являются частью Core и не должны превращаться в его содержимое.
-
-Они являются **реализациями возможностей EUTERPIA**, построенными поверх Core.
-
-Поэтому итоговая архитектура:
+`adapters/` стоит сбоку и знает только контракты:
 
 ```text
-                   ┌─────────────┐
-                   │    Editor   │
-                   └──────┬──────┘
-                          │
-                   ┌──────▼──────┐
-                   │     CLI     │
-                   └──────┬──────┘
-                          │
-             ┌────────────▼────────────┐
-             │          Nodes          │
-             └────────────┬────────────┘
-                          │
-                    ┌─────▼─────┐
-                    │   Core    │
-                    └─────┬─────┘
-                          │
-                    ┌─────▼─────┐
-                    │  stdlib   │
-                    └───────────┘
-
-Commons
-   ↑
-используется верхними слоями,
-но не знает о них.
+Core ── core/api/<X>_api ──► adapters/<lib> ──► внешняя библиотека
 ```
-
-При этом зависимости должны быть строго однонаправленными.
 
 ---
 
-# 3. Core
+## 4. Dependency Law
 
-## Core — фундамент EUTERPIA
+Зависимости направлены строго вниз.
 
-Core — самая важная часть проекта.
+```text
+Commons  → никого не знает
+Core     → Commons не обязателен
+adapters → core/api + Commons
+Nodes    → Core (+ Commons)
+CLI      → Core + Nodes + Commons
+Editor   → Core + Nodes + Commons
+```
 
-Core должен изменяться **только при доказанной необходимости**.
+Запрещено:
 
-Это не означает, что Core нельзя улучшать.
+```text
+Core     → Nodes / CLI / Editor / adapters
+Nodes    → CLI / Editor
+CLI      → Editor
+Editor   → CLI
+Commons  → Core / Nodes / CLI / Editor
+adapters → внутренности ядра (только core/api)
+adapters → adapters
+```
 
-Это означает:
-
-> **Любое изменение Core должно иметь очень высокую цену принятия.**
-
-Если проблему можно решить в Node, CLI, Editor или Commons — Core менять запрещается.
+Правило проверяется автоматически (§29).
 
 ---
 
-## Core отвечает только за фундамент
+## 5. Core: назначение
 
-Core должен содержать:
+Core — фундамент. Он меняется только при доказанной необходимости.
+
+Если задачу можно решить в Node, CLI, Editor или adapters — Core не меняется.
+
+Core не знает, кто им управляет:
 
 ```text
-audio runtime
-graph
-graph compiler
+не знает:  Editor, CLI, Qt, SDL, OpenGL, GUI, конкретный плагин, конкретный backend
+работает:  из CLI, Editor, теста, headless-сервера, другого приложения
+```
+
+---
+
+## 6. Core: что входит
+
+Ядро (`core/`, без сторонних библиотек):
+
+```text
+runtime (audio engine)
+graph + graph compiler
 realtime scheduler
 transport
-events
-parameters
-memory management
-plugin ABI
-node ABI
+события (events)
+параметры (parameters)
+память (memory pool)
+шины (realtime bus)
 audio buffers
-clock
-realtime communication
 ```
 
-Core НЕ должен содержать:
+Контракты внешних миров — отдельно, в `core/api/` (§8).
 
-```text
-GUI
-консоль UI
-меню
-проектный редактор
-визуальные элементы
-названия кнопок
-панели
-горячие клавиши Editor
-формат layout Editor
-специфический UI state
-```
+DSP-алгоритмы по умолчанию **не** в ядре: это Nodes.
 
 ---
-
-# 4. Священное правило Core
-
-> **Core не должен знать, кто им управляет.**
-
-Core не знает:
+## 7. Core: что запрещено
 
 ```text
-Editor
-CLI
-Qt
-SDL
-OpenGL
-Vulkan
-Wayland
-Windows GUI
-```
-
-Core должен одинаково работать:
-
-```text
-из CLI
-из Editor
-из теста
-из другого приложения
-из headless-сервера
-из AI-generated workflow
-```
-
----
-
-# 5. Core должен быть максимально маленьким
-
-В Core должно попадать только то, без чего невозможно существование audio engine.
-
-Например:
-
-```text
-core/
-├── signal_types
-├── node_api
-├── event_system
-├── parameter_system
-├── graph
-├── graph_compiler
-├── pipeline
-├── scheduler
-├── transport
-├── realtime_bus
-├── memory
-├── audio_engine
-├── plugin_api
-└── runtime
-```
-
-DSP algorithms не должны автоматически считаться Core.
-
----
-
-# 6. Что запрещено в Core
-
-Запрещается:
-
-```text
-echo
-printf для обычной работы
+echo / printf для обычной работы
 GUI
 filesystem access в render path
 JSON parsing в realtime
-dynamic allocation в render path
+аллокации в render path
 seq mutation в render path
 строки в realtime API
-exception handling в realtime
-threadpool spawn во время render
-lock/mutex в realtime
-загрузка DLL во время render
-загрузка файлов во время render
+исключения в realtime
+locks / mutex в realtime
+spawn во время render
+загрузка DLL / файлов во время render
 ```
 
-Также запрещается:
+И запрещено:
 
 ```text
-Node → Editor
-Core → Editor
-Core → CLI
-Core → Project UI
-Core → конкретный plugin
+Core → конкретная внешняя библиотека
+Core → adapters
+зависимость Core от Editor / CLI / Nodes
+```
+
+Единственный обмен с внешним миром — через контракт `core/api/` (§8).
+
+---
+
+## 8. Контракты core/api
+
+Контракт — тонкое описание внешней возможности. Только типы, таблица методов и
+nil-safe обёртки. Никакой реализации.
+
+Форма контракта:
+
+```text
+объект-таблица методов   (поля-proc, опциональные)
+имя контракта            (cstring)
+указатель impl           (принадлежит адаптеру; ядро его не читает)
+nil-safe обёртки         (ядро вызывает только их)
+POD-типы                 (без seq/string/ref в realtime-полях)
+{.push raises: [].}      (ошибки — кодом/значением)
+```
+
+Контракты (открытый список):
+
+```text
+core/api/audio_backend_api   аудио-ввод/вывод
+core/api/midi_api            MIDI
+core/api/plugin_api          хостинг плагинов
+core/api/codec_api           кодеки аудиофайлов
+core/api/src_api             ресемплинг
+core/api/stretch_api         time-stretch / pitch-shift
+core/api/fft_api             FFT
+```
+
+Свойства:
+
+- контракт стабилен и версионируется отдельно от реализации;
+- контракт опционален: ядро собирается и без него (§11);
+- ошибки — кодом/значением, а не исключением.
+
+Контракт-образец: `core/api/audio_backend_api.nim`.
+
+---
+
+## 9. Адаптеры
+
+Адаптер реализует ровно один контракт `core/api/`.
+
+```text
+1. одному контракту может соответствовать несколько адаптеров;
+2. адаптер не расширяет контракт «сбоку»;
+3. адаптер не импортирует внутренности ядра и другие адаптеры;
+4. адаптер опционален: без библиотеки ядро всё равно собирается;
+5. адаптер регистрируется на control-path (§31);
+6. ошибки — кодом/значением.
+```
+
+Размещение (одна библиотека — один каталог):
+
+```text
+adapters/portaudio     adapters/miniaudio   adapters/jack
+adapters/rtmidi        adapters/libremidi
+adapters/clap          adapters/lilv        adapters/vst3   adapters/eut
+adapters/dr_libs       adapters/libsndfile
+adapters/libsamplerate adapters/speexdsp
+adapters/rubberband    adapters/soundtouch
+adapters/pocketfft     adapters/kissfft
+```
+
+Замена библиотеки — без изменения ядра и без изменения типов, которыми пользуется
+ядро.
+
+---
+
+## 10. Внешние библиотеки (C и Nim)
+
+Открытые библиотеки на C и Nim **разрешены и приветствуются**. Мы не изобретаем
+заново то, что уже хорошо сделано.
+
+Правила:
+
+```text
+1. библиотека живёт только в adapters/<lib>/, один каталог на библиотеку;
+2. в ядре Core её имени быть не должно (нет dynlib / importc / #include);
+3. ядро работает с ней только через контракт core/api/;
+4. версия библиотеки фиксируется (pinned);
+5. лицензия совместима — либо изоляция явно оговорена.
+```
+
+Библиотеку допустимо брать, если она:
+
+```text
+- решает сложную системную задачу;
+- стабильна и имеет известный ABI;
+- изолируется одним адаптером;
+- удаляется без переписывания половины Core.
 ```
 
 ---
 
-# 7. Core и сторонние зависимости
+## 11. Проверка внешних библиотек (обязательно)
 
-Главное правило:
+Оговорка, без которой ничего не добавляется.
 
-> **Core должен максимально зависеть от стандартной библиотеки Nim и собственного кода.**
-
-Предпочтение:
+Новая библиотека или изменение допускаются **только после проверки**:
 
 ```text
-Nim stdlib
-+
-EUTERPIA Core
+КАЧЕСТВО         корректность результата, тесты, отсутствие регрессий
+СКОРОСТЬ         бенчмарк до/после: CPU, память, latency
+РАБОТОСПОСОБНОСТЬ собирается, запускается, не падает, не течёт
 ```
 
-а не:
+Порядок:
 
 ```text
-Nim
-+
-10 framework
-+
-7 helper libraries
-+
-GUI
-+
-audio abstraction
-+
-plugin abstraction
-+
-serialization framework
-+
-...
+1. замер baseline;
+2. прототип за контрактом (в adapters/, опционально);
+3. тесты (unit + contract) и бенчмарки;
+4. сравнение с baseline: не хуже по скорости и по качеству;
+5. решение: принять / отклонить.
 ```
 
-Сторонняя библиотека допускается в Core только если одновременно выполняется одно из условий:
+> Нет проверки — нет изменения.
 
-1. её невозможно разумно заменить небольшим собственным слоем;
-2. она решает сложную системную задачу;
-3. она стабильна;
-4. её ABI хорошо известен;
-5. зависимость можно изолировать отдельным модулем;
-6. удаление библиотеки не требует переписывать половину Core.
+Анти-правило:
+
+```text
+❌ «потянем библиотеку, потом разберёмся»
+❌ линковка внешней библиотеки в дефолтную сборку ядра
+❌ падение на старте, если библиотека не найдена
+```
 
 ---
+## 12. Realtime — неприкосновенная зона
 
-# 8. Внешние библиотеки изолируются
-
-Нельзя писать:
-
-```text
-Core
- ├── PortAudio
- ├── RtMidi
- ├── CLAP
- └── какая-нибудь GUI library
-```
-
-Напрямую во всех модулях.
-
-Должно быть:
+Audio thread — особый мир. В realtime запрещено:
 
 ```text
-Core
- │
- ├── audio_backend_api
- │
- ├── midi_api
- │
- └── plugin_api
- │
-        ↓
-adapters/
- ├── portaudio
- ├── rtmidi
- └── clap
+malloc / allocShared / newSeq / seq.add
+Table / HashSet / JSON / FileStream
+echo / locks / sleep / spawn
+GC-sensitive операции
+загрузка DLL / файлов
+операция с неизвестной стоимостью
 ```
 
-Таким образом PortAudio можно заменить на:
+Realtime обязан быть:
 
 ```text
-JACK
-ALSA
-WASAPI
-CoreAudio
-PipeWire
-SDL
-собственный backend
+allocation-free
+lock-free
+exception-free
+deterministic
 ```
-
-не переписывая AudioEngine.
-
----
-
-# 9. Realtime — неприкосновенная зона
-
-Audio thread — особый мир.
-
-В realtime processing запрещено:
-
-```text
-malloc
-allocShared
-newSeq
-seq.add
-Table
-HashSet
-JSON
-FileStream
-echo
-locks
-sleep
-spawn
-GC-sensitive operations
-DLL loading
-```
-
-и вообще всё, что может дать непредсказуемую задержку.
 
 Правило:
 
-> **Если операция потенциально имеет неизвестную стоимость — она не выполняется в realtime path.**
+> Если стоимость операции неизвестна — она не выполняется в realtime path.
 
 ---
 
-# 10. Разделение control time и audio time
+## 13. Control и Realtime
 
-EUTERPIA должна иметь два совершенно разных мира:
-
-```text
-CONTROL WORLD
-────────────────────────────
-Editor
-CLI
-Project
-File I/O
-Plugin loading
-Graph editing
-Compilation
-Undo/Redo
-Waveform generation
-Asset management
-
-
-REALTIME WORLD
-────────────────────────────
-Audio callback
-DSP
-Transport clock
-Events
-Parameters
-Pipeline
-Meters
-Audio output
-```
-
-Они не должны смешиваться.
-
-Связь:
+Два разных мира:
 
 ```text
-Control
-   │
-   │ lock-free commands
-   ▼
-Realtime
-   │
-   │ lock-free events/metrics
-   ▼
-Control
+CONTROL:   Editor, CLI, Project, File I/O, загрузка плагинов,
+           редактирование графа, компиляция, undo/redo, waveform
+
+REALTIME:  audio callback, DSP, transport clock, events,
+           parameters, pipeline, meters, audio output
 ```
+
+Они не смешиваются. Связь — только lock-free:
+
+```text
+Control ──lock-free commands──► Realtime
+Control ◄──lock-free events────  Realtime
+```
+
+Всё дорогое (аллокации, файлы, плагины, компиляция) — только в control world.
 
 ---
 
-# 11. Graph не должен существовать в realtime
-
-Editor изменяет:
+## 14. Потоки и владение
 
 ```text
-Graph
+1. один ресурс — один владелец;
+2. жизненный цикл ресурса явен (init → use → destroy);
+3. поток-владелец фиксирован;
+4. нет скрытого глобального мутабельного состояния;
+5. «thread-safe» не равно «realtime-safe».
 ```
 
-Core получает immutable snapshot.
-
-Затем:
+Потоки проекта:
 
 ```text
-Graph
- ↓
-Validation
- ↓
-Compilation
- ↓
-CompiledPipeline
+control / main  — редактирование, компиляция, загрузка, диалоги
+audio           — render callback; максимальный приоритет
+workers         — фоновые задачи (I/O, waveform, offline render)
 ```
 
-Audio thread работает только:
+Обмен между потоками — через lock-free очереди и предвыделенную память.
+
+---
+
+## 15. Ошибки и логирование
+
+Ошибки в ядре — кодом или значением, а не исключением (особенно в realtime).
 
 ```text
-CompiledPipeline
+realtime  → никогда не бросает исключений
+audio API → возвращает код ошибки / enum
+control   → может использовать исключения на границе с ОС и файлами
 ```
 
-Он не знает о:
+Логирование:
 
 ```text
-Table
-seq[EditorNode]
-EditorConnection
+echo/printf в Core запрещён;
+используется Logger (абстракция);
+адаптеры логируют через тот же Logger;
+логирование никогда не выполняется в realtime.
 ```
 
 ---
 
-# 12. CompiledPipeline — священный объект
+## 16. Память
 
-После compilation pipeline должен содержать всё необходимое для работы:
+```text
+реaltime      → только предвыделенные буферы и пулы; ноль аллокаций
+control       → допустимы обычные аллокации и Nim-seq
+```
+
+Механизмы ядра:
+
+```text
+memory pool       — фиксированные блоки, O(1) acquire/release
+handles           — вместо сырых указателей там, где нужен lifetime
+preallocation     — размеры известны заранее
+stable addresses  — блоки не перемещаются
+```
+
+`seq` нельзя использовать как постоянное хранилище указателей: перевыделение
+инвалидирует адреса.
+
+---
+
+## 17. Граф и компиляция
+
+Граф создаётся и правится на control-path. Ядро получает immutable snapshot.
+
+```text
+Graph → Validation → Compilation → CompiledPipeline → Atomic Swap → Audio Thread
+```
+
+Realtime знает только `CompiledPipeline`. Он не знает про `Table`, `seq[Node]`,
+`EditorConnection`.
+
+Если граф меняется — пересобирается pipeline и атомарно подменяется; render не
+выполняет анализ графа.
+
+---
+## 18. CompiledPipeline
+
+После компиляции pipeline самодостаточен:
 
 ```text
 execution order
@@ -454,1244 +442,49 @@ node state
 worker schedule
 ```
 
-Во время render ничего из этого не вычисляется.
+Во время render ничего из этого не вычисляется. Pipeline — священный объект: он
+не мутирует в realtime, только читается.
 
-Идеальная схема:
+---
+
+## 19. Параметры и события
+
+Параметры:
 
 ```text
-Editor Graph
-     ↓
-Compiler
-     ↓
-CompiledPipeline
-     ↓
-Atomic Swap
-     ↓
-Audio Thread
+сглаживание (smoothing) в сэмплах, а не «по блокам»;
+значение не зависит от blockSize;
+изменения приходят командами из control world.
+```
+
+События (notes, MIDI, transport) — POD-структуры в lock-free очередях:
+
+```text
+нулевая аллокация в realtime;
+сортировка по времени в блоке;
+фиксированный максимум на блок.
 ```
 
 ---
 
-# 13. Nodes
+## 20. Nodes
 
-## Nodes — отдельный слой
-
-Nodes **не должны находиться внутри Core**.
-
-Это принципиально важно.
-
-Core должен знать только:
+Nodes — реализации возможностей поверх Core. Не часть Core.
 
 ```text
-что такое Node;
-как Node запускается;
-какие у Node есть ports;
-как Node сообщает latency;
-как Node получает parameters;
-как Node получает events.
+nodes/sdk/          контракты нод (стабильнее самих нод)
+nodes/builtin/      генераторы, фильтры, динамика, эффекты, микширование
+nodes/extensions/   eut/, clap/ (и другие plugin-форматы)
 ```
 
-Но Core не должен знать:
-
-```text
-что такое CompressorNode
-что такое ReverbNode
-что такое SynthNode
-что такое EQNode
-```
+Node не знает про Editor. Node не хранит Editor state. DSP state отделён от
+дескриптора ноды.
 
 ---
 
-# 14. Где должны храниться Nodes
+## 21. Node SDK
 
-Рекомендуемая структура:
-
-```text
-EUTERPIA/
-│
-├── core/
-│
-├── nodes/
-│   │
-│   ├── builtin/
-│   │   ├── generators/
-│   │   ├── effects/
-│   │   ├── dynamics/
-│   │   ├── filters/
-│   │   ├── utilities/
-│   │   ├── routing/
-│   │   └── instruments/
-│   │
-│   ├── extensions/
-│   │   ├── eut/
-│   │   └── clap/
-│   │
-│   └── sdk/
-│
-├── cli/
-├── commons/
-├── editor/
-│
-├── tests/
-└── docs/
-```
-
-Это наиболее важное архитектурное решение.
-
----
-
-# 15. Почему Nodes не являются Commons
-
-Commons нельзя превращать в:
-
-```text
-"всё, что не знаем куда положить"
-```
-
-Нельзя:
-
-```text
-Commons/
- ├── Synth
- ├── Reverb
- ├── EQ
- ├── FileManager
- ├── EditorStuff
- └── ...
-```
-
-Это создаст второй Core, только ещё хуже.
-
-Commons должен содержать **общие нейтральные инструменты**, а Nodes — реальные возможности audio engine.
-
----
-
-# 16. Builtin Nodes
-
-Builtin nodes являются официальными Node implementations EUTERPIA.
-
-Например:
-
-```text
-nodes/builtin/
-├── oscillator
-├── sampler
-├── gain
-├── pan
-├── mixer
-├── filter
-├── eq
-├── compressor
-├── limiter
-├── reverb
-├── delay
-├── analyzer
-├── midi
-└── utility
-```
-
-Они:
-
-```text
-зависят от Core
-могут зависеть от Commons
-не зависят от Editor
-не зависят от CLI
-```
-
----
-
-# 17. Node никогда не должен знать об Editor
-
-Node не должен содержать:
-
-```text
-draw()
-drawNode()
-uiColor
-editorPosition
-windowSize
-imguiState
-editorNamePosition
-```
-
-У Node могут быть описания параметров:
-
-```text
-name
-defaultValue
-min
-max
-unit
-flags
-```
-
-Но визуальное представление принадлежит Editor.
-
----
-
-# 18. Один Node — два представления
-
-Например:
-
-```text
-Compressor
-```
-
-Core-level descriptor:
-
-```text
-threshold
-ratio
-attack
-release
-makeup
-```
-
-Editor-level presentation:
-
-```text
-knob
-slider
-meter
-graph
-label
-color
-layout
-```
-
-И это должны быть два разных мира.
-
----
-
-# 19. CLI
-
-CLI — не "вспомогательная утилита".
-
-Это полноценный интерфейс управления EUTERPIA.
-
-Цель:
-
-> Любой проект должен быть возможно создать, изменить, собрать и отрендерить без Editor.
-
-Например концептуально:
-
-```text
-euterpia init
-euterpia node add oscillator
-euterpia node add filter
-euterpia connect oscillator:out filter:in
-euterpia param set filter cutoff 1200
-euterpia transport tempo 140
-euterpia render project.eut
-```
-
----
-
-# 20. CLI не должен содержать бизнес-логику Core
-
-Запрещено:
-
-```text
-CLI сам компилирует Graph
-CLI сам управляет DSP
-CLI сам создаёт buffers
-CLI сам знает внутренние структуры pipeline
-```
-
-Правильно:
-
-```text
-CLI
- ↓
-Core API
-```
-
-CLI — только интерфейс.
-
----
-
-# 21. CLI должен быть пригоден для AI
-
-Это отдельный принцип EUTERPIA.
-
-CLI должен быть:
-
-```text
-deterministic
-scriptable
-machine-readable
-human-readable
-composable
-```
-
-Желательно иметь два режима:
-
-```text
-human
-json
-```
-
-Например:
-
-```text
-euterpia node list
-```
-
-и:
-
-```text
-euterpia --json node list
-```
-
-Это позволит AI легко:
-
-```text
-создавать проекты
-исследовать структуру
-изменять параметры
-читать ошибки
-строить workflows
-```
-
----
-
-# 22. Editor
-
-Editor — это визуальная оболочка.
-
-Он не является ядром.
-
-Editor отвечает за:
-
-```text
-node canvas
-drag & drop
-connections
-parameter editing
-timeline
-mixer UI
-meters
-waveforms
-project browser
-keyboard shortcuts
-visual state
-```
-
-Но всё действие выполняется через Core API.
-
----
-
-# 23. Editor нельзя превращать в "второй Core"
-
-Плохо:
-
-```text
-Editor хранит собственную DSP graph
-Editor имеет собственный Transport
-Editor считает latency
-Editor самостоятельно компилирует pipeline
-Editor вручную управляет audio buffers
-```
-
-Правильно:
-
-```text
-Editor
-   ↓
-Core API
-   ↓
-Core
-```
-
-Editor должен говорить:
-
-```text
-create node
-connect nodes
-set parameter
-load project
-save project
-play
-stop
-```
-
-и не знать внутреннюю реализацию.
-
----
-
-# 24. ComfyUI-подход
-
-От ComfyUI имеет смысл брать не код, а философию интерфейса:
-
-```text
-Node
-Port
-Connection
-Workflow
-Visual graph
-Properties
-Search
-Modularity
-```
-
-Но EUTERPIA не должна копировать ComfyUI архитектурно.
-
-DAW имеет свои требования:
-
-```text
-sample accuracy
-latency
-realtime processing
-tempo
-transport
-audio buffers
-MIDI
-automation
-plugin processing
-```
-
-Поэтому:
-
-> **ComfyUI вдохновляет Editor, но Core EUTERPIA развивается независимо.**
-
----
-
-# 25. Commons
-
-Commons должен быть самым скучным модулем проекта.
-
-И это хорошо.
-
-Commons содержит только:
-
-```text
-math helpers
-result/error types
-strings helpers
-path helpers
-small containers
-ID generators
-logging abstractions
-serialization helpers
-utility algorithms
-```
-
-Но только если они действительно общие.
-
----
-
-# 26. Главное правило Commons
-
-> Если модуль можно назвать конкретно — он, вероятно, не должен лежать в Commons.
-
-Например:
-
-```text
-wav_utils
-```
-
-не Commons.
-
-Это:
-
-```text
-audio_file_io
-```
-
-`midi_parser` не Commons.
-
-Это MIDI layer.
-
-`NodeEditorMath` не Commons.
-
-Это Editor.
-
-Commons нельзя превращать в свалку utilities.
-
----
-
-# 27. Dependency Law
-
-Официальный закон:
-
-```text
-Commons
-   ↑
-   │
-Core
-   ↑
-   │
-Nodes
-   ↑
- ┌─┴─────────┐
-CLI        Editor
-```
-
-Но с ещё более строгим правилом:
-
-```text
-Commons → никого не знает
-
-Core → Commons НЕ обязателен
-
-Nodes → Core (+ Commons)
-
-CLI → Core + Nodes + Commons
-
-Editor → Core + Nodes + Commons
-```
-
-И особенно:
-
-```text
-Core ─X→ Nodes
-Core ─X→ CLI
-Core ─X→ Editor
-
-Nodes ─X→ CLI
-Nodes ─X→ Editor
-
-CLI ─X→ Editor
-Editor ─X→ CLI
-
-Commons ─X→ Core
-Commons ─X→ Nodes
-Commons ─X→ Editor
-Commons ─X→ CLI
-```
-
-Это правило должно проверяться автоматически.
-
----
-
-# 28. Почему Core желательно не связывать с Commons
-
-Это намеренно.
-
-Хотя Core может использовать некоторые utility-функции Commons, желательно, чтобы самое фундаментальное ядро могло существовать отдельно:
-
-```text
-Core
-   ↓
-Nim stdlib
-```
-
-Тогда теоретически можно создать:
-
-```text
-EUTERPIA Core
-```
-
-как отдельную библиотеку.
-
-Это даст максимальную свободу будущих переписываний.
-
----
-
-# 29. API прежде реализации
-
-Каждый крупный модуль сначала должен иметь контракт.
-
-Например:
-
-```text
-transport.nim
-```
-
-не должен начинаться с огромной реализации.
-
-Сначала определяется:
-
-```text
-Transport
-    play()
-    stop()
-    pause()
-    seek()
-    setTempo()
-    setLoop()
-    position()
-```
-
-Затем implementation.
-
-Такой подход позволяет заменить реализацию, сохранив API.
-
----
-
-# 30. Stable API / Private implementation
-
-Наружу:
-
-```text
-Transport*
-AudioEngine*
-NodeDescriptor*
-CompiledPipeline*
-```
-
-Внутри:
-
-```text
-TransportState
-InternalGraph
-PipelineBuilder
-WorkerState
-DelayState
-```
-
-Внутренние структуры не экспортируются без необходимости.
-
----
-
-# 31. Минимизация `*`
-
-В Nim экспорт:
-
-```nim
-foo*
-```
-
-должен быть осознанным.
-
-Правило:
-
-> Не экспортируй символ, если другой модуль не должен его использовать.
-
-Это значительно уменьшит связанность.
-
----
-
-# 32. Не передавать большие структуры просто так
-
-Плохо:
-
-```text
-Editor → огромный Project → Core → Node → Editor
-```
-
-Хорошо:
-
-```text
-Editor
- ↓
-Core Command
- ↓
-Core
-```
-
-или:
-
-```text
-ProjectSnapshot
-```
-
----
-
-# 33. Ownership должен быть очевидным
-
-Для каждого pointer должно быть понятно:
-
-```text
-кто создал?
-кто владеет?
-кто уничтожает?
-когда указатель становится недействительным?
-может ли он пересекать thread boundary?
-```
-
-Запрещается код типа:
-
-```text
-seq.add(...)
-pointer = addr seq[^1]
-```
-
-без гарантии стабильного lifetime.
-
----
-
-# 34. `seq` нельзя использовать как постоянное хранилище указателей
-
-Особенно:
-
-```text
-addr seq[i]
-```
-
-не должен переживать операции, способные изменить capacity.
-
-Для долгоживущего state использовать:
-
-```text
-stable allocation
-object
-shared allocation
-fixed storage
-arena with stable addresses
-handle/index
-```
-
----
-
-# 35. ID лучше pointer
-
-Для editor/control системы предпочтительнее:
-
-```text
-NodeId
-TrackId
-ClipId
-ParameterId
-```
-
-чем передача указателей между подсистемами.
-
-Пример:
-
-```text
-NodeId → Core registry → NodeState
-```
-
-Так компоненты не зависят от адресов памяти.
-
----
-
-# 36. Handles > raw pointers
-
-Raw pointers допускаются там, где это действительно необходимо:
-
-```text
-audio buffer
-DSP state
-C ABI
-device callback
-```
-
-Для остального:
-
-```text
-NodeHandle
-BufferHandle
-PluginHandle
-TrackHandle
-ClipHandle
-```
-
-Это упрощает lifetime management.
-
----
-
-# 37. Один модуль — одна ответственность
-
-Нельзя:
-
-```text
-audio_engine.nim
-```
-
-который одновременно:
-
-```text
-обрабатывает DSP
-работает с PortAudio
-читает MIDI
-управляет проектом
-сохраняет JSON
-рисует UI
-```
-
-Правильно:
-
-```text
-AudioEngine
-AudioBackend
-Midi
-Project
-Editor
-```
-
----
-
-# 38. Не создавать "God modules"
-
-Особенно опасные будущие файлы:
-
-```text
-euterpia.nim
-manager.nim
-system.nim
-utils.nim
-common.nim
-core.nim
-```
-
-которые постепенно начинают импортировать всё.
-
-Если модуль импортирует половину проекта — архитектура уже начинает разрушаться.
-
----
-
-# 39. Циклические зависимости запрещены
-
-Нельзя:
-
-```text
-A → B
-B → C
-C → A
-```
-
-Если возникает цикл:
-
-> проблема решается архитектурой, а не `include`, `forward` или дополнительными pointer hacks.
-
----
-
-# 40. Interfaces вместо взаимного знания
-
-Если два слоя действительно должны взаимодействовать, создаётся маленький контракт.
-
-Например:
-
-```text
-audio_backend_api
-```
-
-вместо:
-
-```text
-audio_engine → PortAudio
-PortAudio → audio_engine internals
-```
-
----
-
-# 41. Каждый внешний мир получает Adapter
-
-Структура:
-
-```text
-Core API
-   ↑
-Adapter
-   ↑
-External library
-```
-
-Например:
-
-```text
-CLAP Adapter
-PortAudio Adapter
-RtMidi Adapter
-```
-
-Заменить библиотеку должно быть возможно без изменения Core.
-
----
-
-# 42. Сторонняя библиотека не должна проникать внутрь проекта
-
-Если используется:
-
-```text
-PortAudio
-```
-
-не должно быть 30 модулей, которые импортируют его напрямую.
-
-Только:
-
-```text
-audio_backend_portaudio
-```
-
-знает PortAudio.
-
-То же самое для:
-
-```text
-RtMidi
-CLAP
-GUI
-```
-
----
-
-# 43. Logging
-
-Core не должен постоянно писать:
-
-```text
-echo
-```
-
-Особенно realtime.
-
-Нужен абстрактный logger:
-
-```text
-Logger
- ├── CLI logger
- ├── Editor logger
- └── Silent logger
-```
-
-Audio thread должен иметь только realtime-safe diagnostic mechanisms.
-
----
-
-# 44. Ошибки
-
-Нельзя использовать exceptions как обычный runtime-control-flow в realtime.
-
-Realtime API:
-
-```text
-bool
-Result
-status code
-enum
-```
-
-Control API может использовать exceptions там, где это удобно.
-
-Например:
-
-```text
-project loading
-plugin loading
-file IO
-CLI parsing
-```
-
----
-
-# 45. Realtime assertions
-
-В Debug build допускается больше проверок.
-
-В Release:
-
-```text
-Audio thread
-```
-
-должен быть предсказуемым.
-
-Полезно иметь механизм:
-
-```text
-DEBUG_ASSERT_REALTIME_SAFE
-```
-
-который помогает обнаруживать запрещённые операции во время разработки.
-
----
-
-# 46. DSP code должен быть скучным
-
-DSP node должен выглядеть приблизительно так:
-
-```text
-read parameters
-read input
-process samples
-write output
-update state
-```
-
-Не надо:
-
-```text
-Table
-string
-objects creation
-logging
-file access
-graph traversal
-```
-
-внутри `process()`.
-
----
-
-# 47. DSP state отделяется от Node descriptor
-
-Например:
-
-```text
-GainDescriptor
-GainState
-processGain()
-```
-
-Descriptor:
-
-```text
-metadata
-parameters
-ports
-```
-
-State:
-
-```text
-current gain
-smoother
-DSP variables
-```
-
----
-
-# 48. Node не должен хранить Editor state
-
-Запрещено:
-
-```text
-node.editorX
-node.editorY
-node.selected
-node.collapsed
-node.color
-```
-
-Это состояние Editor.
-
-Node runtime:
-
-```text
-DSP state
-parameter state
-latency
-ports
-```
-
----
-
-# 49. Project data и Runtime data
-
-Разделять:
-
-```text
-Project Model
-```
-
-и:
-
-```text
-Runtime Model
-```
-
-Проект хранит:
-
-```text
-nodes
-connections
-parameters
-clips
-automation
-tracks
-settings
-```
-
-Runtime хранит:
-
-```text
-compiled pipeline
-buffers
-DSP state
-plugin instances
-workers
-audio handles
-```
-
-Runtime pointers нельзя сериализовать.
-
----
-
-# 50. Project должен быть независим от Editor
-
-Проект можно создать:
-
-```text
-CLI
-```
-
-и открыть:
-
-```text
-Editor
-```
-
-и наоборот.
-
-Файл проекта не должен содержать:
-
-```text
-Editor window position
-panel sizes
-selected node
-zoom
-temporary UI state
-```
-
-Это может существовать в отдельном UI state file.
-
----
-
-# 51. Editor State
-
-Например:
-
-```text
-project.eut
-project.editor.json
-```
-
-Или:
-
-```text
-project.eut
-.editor/
-```
-
-Так проектный файл остаётся чистым.
-
----
-
-# 52. Node State в проекте
-
-Project должен хранить **данные Node**, но не реализацию Node.
-
-Например:
-
-```json
-{
-    "type": "builtin.compressor",
-    "parameters": {
-        "threshold": -12,
-        "ratio": 4
-    }
-}
-```
-
-А runtime получает:
-
-```text
-builtin.compressor
-        ↓
-NodeRegistry
-        ↓
-NodeFactory
-        ↓
-NodeState
-```
-
----
-
-# 53. Node Registry
-
-Нужен отдельный механизм:
-
-```text
-NodeRegistry
-```
-
-Он связывает:
-
-```text
-Node Type ID
-        ↓
-Descriptor
-        ↓
-Factory
-        ↓
-Processor
-```
-
-Пример:
-
-```text
-builtin.gain
-builtin.filter
-builtin.oscillator
-eut.example.synth
-clap.vendor.plugin
-```
-
-Core знает API Registry.
-
-Конкретные Nodes регистрируются извне.
-
----
-
-# 54. Core не должен знать список Nodes
-
-Это фундаментальное правило.
-
-Не надо делать:
-
-```nim
-import dsp_nodes
-import core_nodes
-import synth_nodes
-import mixer_nodes
-```
-
-в Core.
-
-Вместо этого:
-
-```text
-Core
- ↓
-NodeRegistry
- ↑
-Builtin Nodes
-```
-
----
-
-# 55. Где лежат project-specific Nodes
-
-Если в будущем пользователь создаёт собственные Nodes, структура может быть:
-
-```text
-project/
-├── project.eut
-├── assets/
-├── presets/
-└── nodes/
-```
-
-Например:
-
-```text
-project/nodes/my_synth.eut
-```
-
-или:
-
-```text
-project/nodes/my_synth.dll
-```
-
-Но сам project не должен встраивать чужую реализацию в Core.
-
----
-
-# 56. SDK
-
-Именно поэтому нужен:
-
-```text
-nodes/sdk/
-```
-
-SDK содержит:
+`nodes/sdk/` содержит:
 
 ```text
 Node API
@@ -1699,53 +492,114 @@ Descriptor API
 Parameter API
 Event API
 DSP helpers
-Plugin helpers
 ```
 
-С его помощью можно писать Node независимо от Editor.
+Node API версионируется и стабильнее реализаций нод. Внутри нод допустимы
+большие изменения; контракт нод — нет.
 
 ---
 
-# 57. Node SDK должен быть стабильнее самих Nodes
+## 22. Аудио backend и ресемплинг
 
-Внутри:
+Backend — внешний мир за контрактом `core/api/audio_backend_api`:
 
 ```text
-Node implementation
+открытие устройства, start/stop, device enum,
+xrun-диагностика, latency
 ```
 
-можно делать большие изменения.
-
-Но:
+Если частота устройства не совпадает с частотой проекта:
 
 ```text
-Node API
+SRC включается за контрактом src_api (адаптер);
+latency SRC учитывается в компенсации задержек (PDC);
+SRC работает на предвыделенных буферах.
 ```
 
-должен версионироваться.
+Замена backend (PortAudio → miniaudio → JACK → PipeWire) не требует правок ядра.
 
-Например:
+---
+
+## 23. CLI и Editor
+
+CLI и Editor — равноправные клиенты Core. Первым классом идёт headless-режим:
+всё, что делает Editor, должно иметь CLI-путь.
+
+CLI:
+
+- не содержит бизнес-логику Core;
+- пригоден для автоматизации и AI (machine-readable output).
+
+Editor:
+
+- тонкий; не второй Core;
+- работает только через публичный API Core;
+- не копирует логику CLI и наоборот.
+
+GUI-библиотеки (Dear ImGui, Blend2D, NanoVG, Raylib) живут в `editor/`, а не в
+Core и не в `adapters/`.
+
+---
+
+## 24. Commons
+
+Commons — самый скучный слой: нейтральные утилиты.
 
 ```text
-EUT_NODE_API_1
-EUT_NODE_API_2
+math helpers, result/error types, strings, paths,
+маленькие контейнеры, id-генераторы, логирование
+```
+
+Commons никого не знает. Если модуль можно назвать конкретно — это не Commons.
+
+---
+## 25. Проект и состояние
+
+Два вида данных:
+
+```text
+Project data   — сохраняется: граф, ноды, параметры, секвенции, настройки
+Runtime data   — только в рантайме: pipeline, буферы, метрики, временные кэши
+```
+
+Правила:
+
+```text
+Project не зависит от Editor;
+Project не хранит runtime state;
+runtime state не сериализуется;
+формат проекта версионируется (§27).
 ```
 
 ---
 
-# 58. Версионирование
+## 26. Undo/Redo
 
-Обязательное правило:
+Undo/Redo — часть control layer, а не ядра.
+
+```text
+реализуется командами (command model);
+не снимает снимки runtime;
+живёт на control-path;
+не трогает audio thread напрямую.
+```
+
+---
+
+## 27. Версионирование
+
+Не смешиваются:
 
 ```text
 Project format version
 Core API version
+Core runtime version
 Node API version
 Plugin ABI version
+Adapter contract version
+Adapter implementation version
 CLI version
 ```
-
-не смешиваются.
 
 Например:
 
@@ -1753,1001 +607,287 @@ CLI version
 Project format: 3
 Node API: 2
 Core runtime: 5
+Adapter contract: 1
+Adapter impl: 4
+```
+
+Старый проект не должен ломаться без причины: нужен migration layer
+(`v1 → v2 → v3`).
+
+---
+
+## 28. Quality gates: тесты
+
+```text
+unit        — модули
+contract    — fake-адаптеры, без внешних библиотек
+integration — сборка графа и render
+realtime    — lock-free, отсутствие аллокаций, xruns
+```
+
+Правила:
+
+```text
+тесты контракта не требуют внешних библиотек;
+изменения Core сопровождаются тестами;
+архитектурные правила проверяются в CI (§29);
+регресс тестов — блокер.
 ```
 
 ---
 
-# 59. Backward compatibility
+## 29. Quality gates: архитектура и CI
 
-Core может развиваться.
-
-Но проект:
+Автопроверки в CI:
 
 ```text
-project_v1.eut
+Core импортирует Editor / CLI / Nodes / adapters  → FAIL
+adapters импортируют внутренности Core            → FAIL
+adapters импортируют adapters                      → FAIL
+Commons импортирует Core / Nodes / CLI / Editor    → FAIL
+имя внешней библиотеки встречается в ядре Core     → FAIL
 ```
 
-не должен внезапно перестать загружаться без понятной причины.
+Пример проверки изоляции:
 
-Нужен:
-
-```text
-migration layer
+```bash
+grep -rniE "portaudio|miniaudio|rtmidi|libremidi|lilv|vst3|sndfile|rubberband|soundtouch|samplerate|speexdsp|pocketfft|kiss" core/ \
+  | grep -v "core/api/" && exit 1 || true
 ```
 
-например:
+Сборка в CI:
 
 ```text
-v1 → v2
-v2 → v3
+ядро без адаптеров        → обязано быть зелёным
+ядро с fake-адаптерами    → обязано быть зелёным
+адаптеры (если есть lib)  → nim check + live-тесты
 ```
 
 ---
 
-# 60. CLI и Editor — равноправные клиенты Core
-
-Не должно быть:
+## 30. Quality gates: скорость и работоспособность
 
 ```text
-Editor — настоящий продукт
-CLI — урезанная игрушка
+1. бенчмарк до/после обязателен для hot-path;
+2. регресс по CPU / memory / latency — блокер;
+3. -ffast-math запрещён (детерминизм важнее скорости);
+4. sanitizers (ASan / UBSan / TSan) для realtime-кода;
+5. profiling before optimization;
+6. offline render использует тот же DSP, что realtime, и детерминирован.
 ```
 
-Наоборот:
-
-```text
-Core
- ↑
- ├── CLI
- └── Editor
-```
-
-Они используют один и тот же API.
+Ни одна оптимизация или библиотека не принимается без измерений.
 
 ---
 
-# 61. Headless-first
+## 31. Реестр адаптеров
 
-EUTERPIA должна уметь работать без GUI.
-
-Это даёт:
+Реестр — control-path объект с явным владельцем (не глобальный синглтон).
 
 ```text
-CI/CD
-AI workflows
-servers
-render farms
-automation
-scripts
-batch processing
-testing
+register(contract, name, factory)
+list(contract)   → [name …]
+select(contract, name)
+current(contract)→ name
 ```
 
-Editor должен быть опциональным frontend.
+Правила:
+
+```text
+регистрация — вне realtime;
+выбор: явное имя → приоритет платформы → первый доступный;
+смена адаптера: stop → close → open (без XRun);
+из audio-потока реестр не читается.
+```
+
+Клиенты (CLI/Editor) оперируют **именем** адаптера, а не его типом.
+
+---
+## 32. Изменяемость
+
+Каждый subsystem проектируется так, будто завтра его перепишут.
+
+```text
+WaveformCache v1 → v2       без изменения Editor API
+PortAudioBackend → PipeWireBackend
+GraphCompiler v1 → v2
+```
+
+Новые возможности появляются в Nodes / CLI / Editor / adapters, а не через
+разрушение фундаментальных структур ядра.
 
 ---
 
-# 62. AI-friendly architecture
-
-CLI должен позволять:
+## 33. Когда можно менять Core
 
 ```text
-создать проект
-найти node
-подключить node
-прочитать параметры
-изменить параметры
-запустить
-рендерить
-сохранить
-```
-
-без GUI.
-
-Это делает EUTERPIA пригодной для:
-
-```text
-AI agents
-shell scripts
-generators
-automation
-```
-
----
-
-# 63. AI не должен получать внутренние структуры Core
-
-AI работает через стабильный API:
-
-```text
-CLI commands
-Project format
-Node descriptors
-```
-
-а не через:
-
-```text
-изменение внутренних pointer
-редактирование runtime memory
-правку бинарных state
-```
-
----
-
-# 64. Editor должен быть тонким
-
-Чем меньше логики в Editor, тем лучше.
-
-Editor должен в основном делать:
-
-```text
-Input
- ↓
-Command
- ↓
-Core
- ↓
-State update
- ↓
-Render
-```
-
-а не:
-
-```text
-Input
- ↓
-Editor пытается самостоятельно изменить всё
-```
-
----
-
-# 65. Командная модель
-
-Очень желательно сделать единый command API:
-
-```text
-CreateNode
-DeleteNode
-Connect
-Disconnect
-SetParameter
-AddTrack
-RemoveTrack
-AddClip
-DeleteClip
-AddNote
-DeleteNote
-SetTransport
-```
-
-CLI и Editor вызывают одни и те же команды.
-
-Это автоматически унифицирует:
-
-```text
-Undo
-Redo
-CLI
-Editor
-Automation
-AI
-```
-
----
-
-# 66. Undo/Redo — часть control layer
-
-Undo/Redo не относится к DSP.
-
-Поэтому:
-
-```text
-Core realtime
-```
-
-не должен зависеть от Undo.
-
-Можно иметь:
-
-```text
-Control Core
-```
-
-и:
-
-```text
-Realtime Core
-```
-
-внутри архитектуры, если система вырастет.
-
----
-
-# 67. Подготовка к переписыванию
-
-Каждый модуль должен иметь возможность быть заменённым.
-
-Например:
-
-```text
-GraphCompiler v1
-        ↓
-GraphCompiler v2
-```
-
-при этом:
-
-```text
-Node API
-AudioEngine API
-Editor API
-CLI API
-```
-
-остаются прежними.
-
----
-
-# 68. Contract Tests
-
-Для каждого крупного API должны быть contract tests.
-
-Например:
-
-```text
-Transport contract
-Node contract
-Plugin contract
-Pipeline contract
-Project format contract
-CLI contract
-```
-
-Тогда новую реализацию можно проверить:
-
-```text
-old implementation
-new implementation
-```
-
-против одних и тех же тестов.
-
----
-
-# 69. Модуль считается хорошим, если его можно удалить
-
-Очень полезный критерий:
-
-> **Если модуль невозможно удалить без переписывания большого количества соседних модулей — он слишком связан.**
-
----
-
-# 70. Модуль считается плохим, если без него рушится всё
-
-Исключение:
-
-```text
-Core
-```
-
-Но даже Core должен быть максимально изолирован.
-
----
-
-# 71. Публичные API должны быть маленькими
-
-Лучше:
-
-```text
-10 понятных функций
-```
-
-чем:
-
-```text
-80 процедур,
-из которых пользователю нужны 7.
-```
-
-Каждая exported procedure должна отвечать на вопрос:
-
-> Кто её вызывает и зачем?
-
-Если ответа нет — export не нужен.
-
----
-
-# 72. Никаких скрытых глобальных состояний
-
-Запрещается:
-
-```text
-globalMidiManager
-globalAudioEngine
-globalCurrentProject
-globalEditorState
-globalNodeRegistry
-```
-
-без очень веской причины.
-
-Dependency должна быть явной:
-
-```text
-Engine
-Registry
-Transport
-Project
-```
-
-передаются через объекты/handles.
-
----
-
-# 73. Один владелец — один ресурс
-
-Например:
-
-```text
-PluginInstance
-```
-
-имеет одного владельца.
-
-```text
-AudioBackend
-```
-
-имеет одного владельца.
-
-```text
-Pipeline
-```
-
-имеет понятный lifecycle.
-
-Нельзя создавать систему, в которой неизвестно:
-
-```text
-кто уничтожит resource?
-```
-
----
-
-# 74. Lifecycle должен быть явным
-
-Большие объекты должны иметь:
-
-```text
-init
-start
-process
-stop
-destroy
-```
-
-или эквивалентную lifecycle-модель.
-
-Особенно:
-
-```text
-audio
-plugins
-workers
-MIDI
-devices
-```
-
----
-
-# 75. Thread ownership
-
-Для каждого объекта должно быть понятно:
-
-```text
-Control Thread
-Audio Thread
-Worker Thread
-MIDI Thread
-```
-
-Кто может читать?
-
-Кто может писать?
-
-Можно ли одновременно?
-
-Если документации нет — архитектура считается незавершённой.
-
----
-
-# 76. Thread-safe не означает realtime-safe
-
-Это разные вещи.
-
-Можно иметь:
-
-```text
-thread-safe
-```
-
-но всё ещё нельзя:
-
-```text
-audio callback
-```
-
-Например mutex technically thread-safe, но для realtime он запрещён.
-
----
-
-# 77. Determinism
-
-EUTERPIA должна стремиться к детерминированному DSP.
-
-Одинаковые:
-
-```text
-input
-project
-sample rate
-tempo
-parameters
-```
-
-должны давать одинаковый:
-
-```text
-output
-```
-
-где это разумно.
-
-Это особенно важно для:
-
-```text
-offline rendering
-tests
-AI generated projects
-```
-
----
-
-# 78. Offline render должен использовать тот же DSP
-
-Нельзя иметь:
-
-```text
-Realtime DSP
-```
-
-и полностью отдельный:
-
-```text
-Offline DSP
-```
-
-Они должны использовать один pipeline.
-
-Различаться может только:
-
-```text
-clock source
-output sink
-```
-
----
-
-# 79. Performance optimisation only after profiling
-
-Запрещается оптимизировать "на глаз".
-
-Сначала:
-
-```text
-profile
-measure
-identify bottleneck
-change
-measure again
-```
-
-Особенно в DSP.
-
----
-
-# 80. Красивый код важнее хитрого кода
-
-Предпочтение:
-
-```text
-понятный O(N)
-```
-
-вместо:
-
-```text
-магического lock-free шаблона на 300 строк
-```
-
-если это не доказанный bottleneck.
-
----
-
-# 81. Код должен быть скучно читаемым
-
-Хороший EUTERPIA-код должен позволять разработчику открыть файл через год и понять:
-
-```text
-что происходит
-кто вызывает
-кто владеет памятью
-где thread boundary
-где realtime boundary
-```
-
-без археологии.
-
----
-
-# 82. Запрещается "магия"
-
-Нежелательны:
-
-```text
-магические ID
-магические числа
-неочевидные глобальные состояния
-скрытые side effects
-неявное владение
-неявные conversions
-```
-
-Например:
-
-```text
-10000
-```
-
-не должен молча означать:
-
-```text
-PDC generated node ID
-```
-
-Должен существовать понятный механизм.
-
----
-
-# 83. Константы должны объяснять себя
-
-Плохо:
-
-```nim
-const Max = 256
-```
-
-Хорошо:
-
-```nim
-const MaxBlockFrames = 256
-```
-
-Или:
-
-```nim
-const DefaultPpq = 960
-```
-
----
-
-# 84. Один концепт — одно имя
-
-Нельзя называть одно и то же:
-
-```text
-samplePos
-samplePosition
-currentSample
-position
-```
-
-в разных модулях без причины.
-
-Нужно выбрать стандарт.
-
----
-
-# 85. Терминология EUTERPIA
-
-Предлагается зафиксировать:
-
-```text
-Frame   = один sample frame
-Sample  = один sample одного канала
-Block   = block frames
-Node    = processing unit
-Port    = input/output endpoint
-Event   = timestamped event
-Parameter = controllable numeric property
-Graph   = editable topology
-Pipeline = compiled executable graph
-Transport = musical clock
-Project = persistent user data
-Runtime = execution state
-```
-
----
-
-# 86. File structure
-
-Рекомендуемая структура проекта:
-
-```text
-EUTERPIA/
-│
-├── core/
-│   ├── base/
-│   ├── graph/
-│   ├── runtime/
-│   ├── transport/
-│   ├── realtime/
-│   ├── memory/
-│   ├── plugin/
-│   └── io/
-│
-├── nodes/
-│   ├── sdk/
-│   ├── builtin/
-│   │   ├── generators/
-│   │   ├── instruments/
-│   │   ├── filters/
-│   │   ├── dynamics/
-│   │   ├── effects/
-│   │   ├── mixing/
-│   │   └── utility/
-│   │
-│   └── extensions/
-│       ├── eut/
-│       └── clap/
-│
-├── cli/
-│   ├── commands/
-│   ├── formatting/
-│   └── main.nim
-│
-├── commons/
-│   ├── collections/
-│   ├── math/
-│   ├── errors/
-│   ├── logging/
-│   └── utilities/
-│
-├── editor/
-│   ├── canvas/
-│   ├── nodes/
-│   ├── timeline/
-│   ├── mixer/
-│   ├── inspector/
-│   ├── project/
-│   └── main.nim
-│
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   ├── realtime/
-│   ├── dsp/
-│   ├── cli/
-│   └── plugins/
-│
-├── docs/
-│
-└── tools/
-```
-
----
-
-# 87. Внутри Core
-
-Для роста проекта Core лучше сразу разделять логически.
-
-```text
-core/
-├── types/
-│   ├── audio_types
-│   ├── event_types
-│   ├── parameter_types
-│   └── node_types
-│
-├── graph/
-│   ├── graph
-│   ├── graph_validate
-│   ├── graph_compile
-│   ├── latency
-│   └── pipeline
-│
-├── realtime/
-│   ├── audio_engine
-│   ├── realtime_bus
-│   ├── scheduler
-│   └── epoch
-│
-├── transport/
-│   └── transport
-│
-├── memory/
-│   ├── pool
-│   ├── arena
-│   └── handles
-│
-└── plugin/
-    ├── plugin_api
-    └── plugin_registry
-```
-
----
-
-# 88. Core должен быть "boring"
-
-Это сознательный принцип.
-
-Core не должен постоянно меняться из-за новых фич.
-
-Новые возможности должны появляться преимущественно здесь:
-
-```text
-Nodes
-CLI
-Editor
-Adapters
-```
-
-а не через изменение фундаментальных структур.
-
----
-
-# 89. Когда разрешено менять Core
-
-Изменение Core разрешается, если:
-
-```text
-1. невозможно решить проблему выше Core;
+1. проблему нельзя решить выше Core;
 2. текущий API архитектурно ограничивает будущее;
 3. изменение улучшает фундамент, а не конкретную фичу;
 4. есть тесты;
-5. влияние на ABI/API документировано;
-6. рассмотрена возможность compatibility layer.
+5. влияние на ABI/API задокументировано;
+6. рассмотрена compatibility layer.
 ```
+
+Любое изменение Core имеет высокую цену принятия и проходит ревью отдельно.
 
 ---
 
-# 90. Что запрещается категорически
+## 34. Что запрещено категорически
 
 ```text
-❌ GUI зависимость в Core
-❌ Editor dependency в Core
-❌ CLI dependency в Core
-❌ Nodes dependency в Core
-❌ File I/O в realtime
-❌ allocation в realtime
-❌ locks в realtime
-❌ exceptions в realtime
+❌ GUI-зависимость в Core
+❌ Editor / CLI / Nodes зависимость в Core
+❌ сторонняя библиотека в ядре Core
+❌ импорт adapters из ядра Core
+❌ import одного адаптера другим
+❌ обязательная зависимость ядра от внешней библиотеки
+❌ File I/O / allocation / locks / exceptions в realtime
 ❌ graph analysis во время render
 ❌ seq pointer без lifetime guarantee
 ❌ глобальное состояние без крайней необходимости
 ❌ циклические зависимости
-❌ giant "utils" modules
-❌ giant manager classes
-❌ копирование одинаковой логики в CLI и Editor
+❌ giant utils / giant manager
+❌ копирование логики между CLI и Editor
 ❌ сериализация runtime state
-❌ plugin-specific код в Core
-❌ GUI-specific данные в Node
-❌ Node-specific knowledge в Core
-❌ случайное добавление dependency ради одной функции
+❌ Node-specific знание в Core
 ```
 
 ---
 
-# 91. Что поощряется
+## 35. Что поощряется
 
 ```text
-✓ маленькие модули
-✓ маленькие API
-✓ явное владение
-✓ стабильные interfaces
+✓ маленькие модули и API
+✓ явное владение и жизненный цикл
+✓ стабильные контракты
 ✓ immutable snapshots
-✓ handles
-✓ deterministic processing
-✓ preallocation
-✓ lock-free communication
-✓ contract tests
+✓ handles вместо сырых указателей
+✓ детерминированная обработка
+✓ предвыделение памяти
+✓ lock-free обмен
+✓ contract-тесты
+✓ бенчмарки и профилирование
 ✓ background workers
-✓ adapters
-✓ dependency inversion
-✓ headless operation
-✓ CLI automation
-✓ machine-readable output
-✓ profiling
-✓ документация архитектуры
+✓ adapters и dependency inversion
+✓ headless-работа
+✓ machine-readable вывод CLI
 ```
 
 ---
 
-# 92. Правило "трёх слоёв"
-
-При добавлении новой функциональности сначала определить:
+## 36. Чек-лист перед любым изменением
 
 ```text
-Это фундамент?
+1. К какому слою относится?
+2. Кто владеет состоянием?
+3. В каком потоке работает?
+4. Можно ли это протестировать отдельно?
+5. Можно ли это заменить?
+6. Увеличивает ли это связанность?
+7. Есть ли контракт (для внешнего мира)?
+8. Есть ли тесты и бенчмарк?
+9. Не нарушен ли realtime?
 ```
 
-Если да:
+Если связанность растёт — сначала ищем архитектурное решение, а не тащим
+зависимость.
+
+---
+## 37. C и Nim: правила интеграции
+
+Ядро пишется на Nim. C-компоненты подключаются только через адаптеры.
 
 ```text
-Core
+биндинги к C — через futhark / c2nim или ручные {.importc.};
+определения C-типов — только в адаптере;
+ABI-точные структуры — {.bycopy.};
+callback'и — {.cdecl, raises: [].};
+никакого C-кода в ядре;
+никаких C++ типов в публичном ABI (для C++ — тонкий C-фасад).
 ```
 
-Если это реализация Node:
-
-```text
-Nodes
-```
-
-Если это интерфейс управления:
-
-```text
-CLI
-```
-
-Если это визуализация:
-
-```text
-Editor
-```
-
-Если это действительно нейтральная вспомогательная функция:
-
-```text
-Commons
-```
-
-Если ответ:
-
-```text
-"ну это вроде подходит в Commons"
-```
-
-то почти наверняка это **не Commons**.
+Смешение C и Nim допускается и поощряется там, где Nim неудобен (SIMD, low-level),
+но граница всегда проходит по контракту.
 
 ---
 
-# 93. Правило зависимости
+## 38. Плагинные форматы
 
-Перед добавлением import разработчик должен спросить:
-
-> Может ли этот модуль существовать без нового import?
-
-Если да — dependency не добавляется.
-
-Если нет:
-
-> Является ли эта зависимость частью архитектурного контракта?
-
-Если нет:
-
-> Нужен ли adapter?
-
-Это должно стать привычкой проекта.
-
----
-
-# 94. Правило переписывания
-
-Каждый новый subsystem нужно проектировать так, будто завтра его придется полностью переписать.
-
-Например:
+Хостинг плагинов — внешний мир за контрактом `core/api/plugin_api`.
 
 ```text
-WaveformCache v1
+adapters/clap    CLAP (C-first, основной)
+adapters/lilv    LV2 (C, через Lilv)
+adapters/vst3    VST3 (C++ → тонкий C-bridge)
+adapters/eut     собственный формат EUT
 ```
 
-должен позволять заменить его на:
+Правила:
 
 ```text
-WaveformCache v2
-```
-
-без изменения Editor API.
-
-То же:
-
-```text
-PortAudioBackend
-```
-
-→
-
-```text
-PipeWireBackend
-```
-
-и:
-
-```text
-GraphCompiler v1
-```
-
-→
-
-```text
-GraphCompiler v2
+граф не знает о формате плагина;
+конвертация событий — внутри адаптера;
+состояние плагина сохраняется в проект;
+форматы опциональны (§11);
+проблемная лицензия — только опциональный адаптер.
 ```
 
 ---
 
-# 95. Правило "не распространяй implementation details"
+## 39. Transport и Sequencer
 
-Если Editor использует:
+Transport:
 
 ```text
-PipelineStep
-MemoryPool
-DelayCompensationData
+play / stop / pause / seek / tempo / loop;
+sample-accurate;
+состояние доступно realtime через POD-структуру.
 ```
 
-напрямую — это плохой знак.
-
-Editor должен использовать:
+Sequencer:
 
 ```text
-Core public API
-```
-
-а не внутренности.
-
-То же относится к CLI.
-
----
-
-# 96. Публичная архитектура
-
-Внешнему пользователю EUTERPIA желательно видеть:
-
-```text
-Project
-Graph
-Node
-Parameter
-Transport
-AudioEngine
-Renderer
-```
-
-а не:
-
-```text
-PipelineStep
-NetLifetime
-BufferEndSteps
-RetireItem
-PoolBlock
+работает на control-path;
+готовит события на блок заранее;
+не выполняет I/O в realtime.
 ```
 
 ---
 
-# 97. Private implementation должна оставаться private
+## 40. Метрики и наблюдаемость
 
-Если внутренняя структура перестаёт быть необходима другим модулям — она должна быть скрыта.
+Ядро отдаёт метрики на control-path (lock-free):
 
-Это делает Core устойчивым к переписыванию.
+```text
+peak / RMS по каналам
+CPU load
+xruns
+sample rate / buffer size
+transport state
+active voices
+graph version
+```
+
+Метрики не влияют на render и не аллоцируются в realtime. CLI и Editor читают их
+через публичный API.
 
 ---
 
-# 98. Документация — часть архитектуры
+## 41. Offline render
 
-Каждый крупный модуль должен иметь короткое описание:
+```text
+использует тот же CompiledPipeline и тот же DSP, что realtime;
+детерминирован (одинаковый вход → одинаковый выход);
+не ограничен realtime-запретами, но результат совпадает с realtime;
+live и offline не должны расходиться.
+```
+
+---
+
+## 42. Документация как архитектура
+
+Каждый крупный модуль описывает себя кратко:
 
 ```text
 Purpose
@@ -2759,200 +899,55 @@ Public API
 Lifecycle
 ```
 
-Например:
+Пример:
 
 ```text
 audio_engine
-Purpose:
-Realtime execution.
-
-Owns:
-sample clock, active pipeline.
-
-Depends on:
-Core graph/runtime.
-
-Thread:
-Audio.
-
-Realtime:
-YES.
+  Purpose:      realtime execution
+  Owns:         sample clock, active pipeline
+  Depends on:   Core graph/runtime
+  Thread:       audio
+  Realtime:     yes
 ```
+
+Архитектурные правила из §29 проверяются в CI, а не только описаны в README.
 
 ---
 
-# 99. Архитектурная документация должна быть тестируемой
-
-Например можно автоматически проверять:
+## 43. Итоговая архитектура
 
 ```text
-Core imports Editor → FAIL
-Core imports CLI → FAIL
-Core imports Nodes → FAIL
-Node imports Editor → FAIL
-Commons imports Core → FAIL
+                     USER
+                 /          \
+              CLI            Editor
+                 \          /
+                  Control API
+                       |
+              Core (ядро + core/api)
+                       |
+                    Node API
+                 /            \
+          Builtin Nodes     External Nodes
+          (DSP/Synth/FX)    (EUT / CLAP / LV2 / VST3)
+                       |
+              core/api контракты
+                       |
+                    adapters/
+                       |
+          audio/midi devices, files, DSP libs
 ```
 
-Архитектурные правила должны быть не только в README.
-
-Они должны проверяться CI.
+Commons — сбоку и нейтрален.
 
 ---
 
-# 100. Финальная философия EUTERPIA
+## 44. Итог
 
-EUTERPIA не должна становиться большим приложением.
+EUTERPIA должна быть не большой, а хорошо разделённой.
 
-Она должна оставаться:
+Маленькое ядро. Ясные контракты. Заменяемые адаптеры.
 
-```text
-маленьким Core
-+
-стабильные API
-+
-независимые Nodes
-+
-CLI
-+
-Editor
-+
-тонкие adapters
-```
-
-Главная цель:
-
-```text
-           EUTERPIA
-              │
-       ┌──────┴──────┐
-       │             │
-      Core          Nodes
-       │             │
-       └──────┬──────┘
-              │
-      ┌───────┴────────┐
-      │                │
-     CLI             Editor
-```
-
-При этом **Core никогда не превращается в зависимость от верхних слоёв**.
+Открытые библиотеки на C и Nim — да, но за контрактом `core/api/` и после
+проверки качества, скорости и работоспособности.
 
 ---
-
-# 101. Главный закон
-
-> **Core определяет правила.
-> Nodes реализуют возможности.
-> CLI предоставляет управление.
-> Editor предоставляет визуализацию.
-> Commons предоставляет только нейтральные инструменты.**
-
-И ещё один:
-
-> **Ни один слой не должен знать о внутреннем устройстве слоя выше него.**
-
-И самый важный:
-
-> **Если новое решение делает систему менее заменяемой — это плохое архитектурное решение, даже если сейчас оно быстрее или удобнее.**
-
----
-
-# 102. Целевая архитектура EUTERPIA
-
-В конечном итоге архитектура должна выглядеть так:
-
-```text
-                         USER
-                    ┌─────┴─────┐
-                    │           │
-                  CLI         Editor
-                    │           │
-                    └─────┬─────┘
-                          │
-                     Control API
-                          │
-                 ┌────────▼────────┐
-                 │      Core       │
-                 │                 │
-                 │ Graph            │
-                 │ Compiler         │
-                 │ Transport        │
-                 │ Parameters       │
-                 │ Events           │
-                 │ Runtime          │
-                 │ Scheduler        │
-                 │ Memory           │
-                 │ Plugin API       │
-                 └────────┬────────┘
-                          │
-                     Node API
-                          │
-              ┌───────────┴───────────┐
-              │                       │
-         Builtin Nodes          External Nodes
-              │                       │
-              ├── DSP                 ├── EUT
-              ├── Synth               └── CLAP
-              ├── FX
-              └── Utility
-                          │
-                    Audio Backend
-                          │
-                ┌─────────┴─────────┐
-                │                   │
-             Audio I/O           Devices
-```
-
-А `Commons` находится сбоку как **нейтральный фундаментальный набор инструментов**, который не знает ни про Core, ни про Nodes, ни про Editor:
-
-```text
-                 Commons
-               ↙   ↓   ↘
-             Core Nodes CLI/Editor
-```
-
-Причём использование Commons Core-ом должно быть минимальным.
-
----
-
-# 103. Итоговое правило разработки
-
-Перед тем как добавить код в EUTERPIA, нужно ответить на пять вопросов:
-
-```text
-1. К какому слою относится эта функциональность?
-
-2. Кто владеет её состоянием?
-
-3. В каком thread она работает?
-
-4. Может ли этот модуль быть переписан независимо?
-
-5. Увеличивает ли новая зависимость связанность проекта?
-```
-
-Если ответ на последний вопрос:
-
-```text
-Да
-```
-
-нужно сначала искать архитектурное решение.
-
----
-
-# EUTERPIA должна быть не большой, а хорошо разделённой.
-
-Не:
-
-```text
-"у нас 100 модулей"
-```
-
-а:
-
-```text
-"у нас 100 модулей, и каждый знает только необходимое ему количество других модулей."
-```
-
-Это и есть главный критерий качества EUTERPIA.
