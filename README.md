@@ -59,7 +59,7 @@ nodes/metronome.nim, nodes/mixer_console.nim — прикладные узлы
 adapters/portaudio/ — реализация audio_backend_api (libportaudio, dynlib)
 adapters/miniaudio/ — реализация audio_backend_api (miniaudio, вендорен в дерево)
 adapters/rtmidi/    — реализация midi_api (librtmidi, dynlib)
-adapters/clap/      — CLAP 1.2: ABI, хостинг за plugin_api
+adapters/clap/      — CLAP 1.2: ABI, хостинг за plugin_api, host extensions
 adapters/eut/       — собственный ABI EUT-плагинов за plugin_api
 adapters/reference/ — эталонный адаптер plugin_api (в памяти, для тестов)
 ```
@@ -138,9 +138,12 @@ Audio-поток не выполняет: аллокаций, блокирующ
 
 - #4 — метрика `xruns` не доходит до control plane;
 - #5 — Commons частично зависит от Core (`audio_file_io` → `wav_codec`);
-- #6, #7 — в CLAP-адаптере не реализованы host extensions (params/state/
-  gui/thread-check) и трансляция out-events: базовый контракт `plugin_api`
-  заполнен, расширения — отдельная задача;
+- #6, #7 — CLAP host extensions (params/state/gui/thread-check/latency)
+  и `request_callback`/`request_restart` реализованы в
+  `adapters/clap/clap_host_extensions.nim` и покрыты
+  `tests/unit/test_clap_host_extensions.nim`; остаётся mock-плагин,
+  сохранение состояния плагина в проекте и `clap-validator` (issue #53);
+  трансляция out-events — по-прежнему #7;
 - #8 — нет ресемплинга при несовпадении SR устройства и проекта;
 - #9 — `DspScheduler` не умеет менять граф без teardown пула воркеров;
 - #10 — FLAC/OGG/MP3/AIFF — заглушки;
