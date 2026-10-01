@@ -19,10 +19,10 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Аудио-бэкенды | ✅ PortAudio (`dynlib`) **и** miniaudio 0.11.25 (вендорен, #31) |
 | MIDI | ✅ `midi_api` + RtMidi-адаптер, SMF-кодек в Commons |
 | Входной тракт и запись | ✅ вход → ноды/рекордер, RT-кольцо → worker → WAV |
-| Хостинг плагинов | 🟡 `plugin_api` + CLAP 1.2 (host- и plugin-side расширения) + EUT; нет mock-плагина и состояния в проекте (#53) |
+| Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
-| Тесты | ✅ 231 unit-проверка + интеграционный набор; Core/Commons покрыты (#57) |
+| Тесты | ✅ 232 unit-проверки + интеграционный набор; Core/Commons покрыты (#57) |
 | CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты |
 
 ## Возможности
@@ -58,7 +58,7 @@ core/        — фундамент: runtime, граф, планировщик, 
 commons/     — нейтральные инструменты, не знающие о Core
 nodes/       — Node SDK и встроенные DSP-ноды
 adapters/    — PortAudio, miniaudio, RtMidi, CLAP, EUT (и эталонный)
-tests/       — unit-набор DSP/контрактов и интеграционный тест ядра
+tests/       — unit-набор DSP/контрактов, интеграционный тест и mock-плагин CLAP
 config.nims  — общие флаги сборки для всех точек входа
 MANIFEST.md  — архитектурный манифест
 ```
@@ -147,17 +147,18 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
       `param_registry`, `memory_pool`, `logger`, `undo_redo`,
       `waveform_cache`, `audio_file_io`, `transport`)
 - [x] #13 UBSan/ASan-цели: `nimble ubsan` / `nimble asan` + одноимённые CI-джобы
+- [x] #6 CLAP: host- и plugin-side расширения + сквозной mock-плагин и
+      состояние плагина в проекте (`nimble clapMock`, #53)
 - [x] TSan-джоб в CI и архитектурные guards (`core` не знает про форматы)
 
 ### Ближайшие шаги
 
-- [ ] #53 mock-плагин отдельным бинарём + состояние плагина в проекте (остаток #6)
+- [ ] #7 трансляция out-events и группировка аудиопортов CLAP
 - [ ] #4 метрика `xruns` доходит до control-plane
 
 ### Экосистема и бэкенды
 
 - [ ] #32 backend manager: выбор и hot-swap PortAudio ↔ miniaudio
-- [ ] #7 трансляция out-events и группировка аудиопортов CLAP
 - [ ] #39 LV2 (Lilv) и #40 VST3 (изолированный C-bridge) за `plugin_api`
 - [ ] #38 libremidi как MIDI-бэкенд (MIDI 1.0 + 2.0/UMP)
 - [ ] #8 ресемплинг при несовпадении SR; #10 FLAC/OGG/MP3/AIFF
@@ -224,6 +225,7 @@ nimble buildRelease    # release-сборка с LTO
 nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адаптера (#31)
 nimble ubsan           # unit-набор под UndefinedBehaviorSanitizer (#13)
 nimble asan            # unit-набор под AddressSanitizer (#13)
+nimble clapMock        # сборка mock CLAP-плагина + сквозной тест хостинга (#53)
 ```
 
 `nimble miniaudioSmoke` — единственная проверка, которая реально собирает
@@ -265,9 +267,13 @@ Audio-поток не выполняет: аллокаций, блокирующ
 - #6, #7 — CLAP host extensions (params/state/gui/thread-check/latency)
   и `request_callback`/`request_restart` реализованы в
   `adapters/clap/clap_host_extensions.nim` и покрыты
-  `tests/unit/test_clap_host_extensions.nim`; остаётся mock-плагин,
-  сохранение состояния плагина в проекте и `clap-validator` (issue #53);
-  трансляция out-events — по-прежнему #7;
+  `tests/unit/test_clap_host_extensions.nim`; сквозной путь
+  load → instantiate → process → params → state проверяется `nimble
+  clapMock` (`tests/mock/mock_clap_plugin.nim` + `tests/clap_mock_test.nim`,
+  джоб `clap` в CI), состояние плагина хранится в `core/project.nim`.
+  Остаётся трансляция out-events и группировка аудиопортов — #7. Прогон
+  официального `clap-validator` — ручной: он требует реальных `.clap` и
+  сети и в CI невозможен;
 - доступ к параметрам/состоянию/latency/аудио-портам ПЛАГИНА
   (plugin-side расширения) реализован в
   `adapters/clap/clap_plugin_extensions.nim` (#49) и покрыт
@@ -289,7 +295,8 @@ Audio-поток не выполняет: аллокаций, блокирующ
 аудиотракт), #28 (`midi_api`), #29 (`plugin_api`: CLAP/EUT за единым
 контрактом), #31 (miniaudio-бэкенд), #37 (единый `ring_buffer`),
 #12/#14 (CI, Logger вместо `echo`), #57 (тесты непокрытых модулей
-Core/Commons), #13 (UBSan/ASan-цели и CI-джобы).
+Core/Commons), #13 (UBSan/ASan-цели и CI-джобы), #6/#49/#53 (CLAP:
+host- и plugin-side расширения, mock-плагин и состояние в проекте).
 
 ## Входной тракт
 

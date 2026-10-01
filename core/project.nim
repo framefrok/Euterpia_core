@@ -138,12 +138,23 @@ type
     tracks*: seq[TrackFormat]
     automationLanes*: seq[AutomationLaneFormat]
 
+  PluginStateFormat* = object
+    ## Непрозрачный снимок состояния плагина, привязанный к узлу графа
+    ## (issue #53). Core не знает ни одного формата плагинов: здесь просто
+    ## байты, которые положил и заберёт адаптер (CLAP/EUT/…) на стороне
+    ## CLI/Editor. Блобы хранятся как массив байт, чтобы round-trip был
+    ## байт-в-байт (base64 в JSON был бы лишним слоем кодирования).
+    nodeId*: int
+    pluginId*: string
+    state*: seq[byte]
+
   ProjectFormat* = object
     format*: string
     version*: int
     metadata*: ProjectMetadata
     graph*: GraphFormat
     sequencer*: SequencerFormat
+    pluginStates*: seq[PluginStateFormat]
 
 # ============================================================================
 # JSON SERIALIZATION (Exception Safe)
@@ -267,6 +278,20 @@ proc toJson*(p: ProjectFormat): JsonNode =
   seqJson["automationLanes"] = lanesJson
   
   root["sequencer"] = seqJson
+
+  # Состояние плагинов: непрозрачные блобы, привязанные к узлам графа.
+  var statesJson = newJArray()
+  for ps in p.pluginStates:
+    var stJson = newJObject()
+    stJson["nodeId"] = %ps.nodeId
+    stJson["pluginId"] = %ps.pluginId
+    var bytesJson = newJArray()
+    for b in ps.state:
+      bytesJson.add(%int(b))
+    stJson["state"] = bytesJson
+    statesJson.add(stJson)
+  root["pluginStates"] = statesJson
+
   return root
 
 # ============================================================================
@@ -465,6 +490,19 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
               curve: safeInt(p, "curve")
             ))
         res.sequencer.automationLanes.add(lane)
+
+  let statesNode = root{"pluginStates"}
+  if statesNode != nil and statesNode.kind == JArray:
+    for s in statesNode:
+      var ps = PluginStateFormat(
+        nodeId: safeInt(s, "nodeId"),
+        pluginId: safeStr(s, "pluginId"))
+      let bytesNode = s{"state"}
+      if bytesNode != nil and bytesNode.kind == JArray:
+        for b in bytesNode:
+          if b != nil and b.kind == JInt:
+            ps.state.add(byte(int(b.num) and 0xFF))
+      res.pluginStates.add(ps)
 
   return ok[ProjectFormat](res)
 

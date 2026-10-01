@@ -560,6 +560,37 @@ proc clapHostContextOf*(api: ptr PluginApi; handle: PluginHandle): ptr ClapHostC
   if slot.isNil: nil else: slot.hostCtx
 
 # ----------------------------------------------------------------------------
+# Состояние инстанса для проекта (issue #53)
+#
+# Core не знает о плагинах, поэтому склейка «состояние плагина ↔ проект»
+# живёт на границе адаптера и CLI/Editor: адаптер даёт непрозрачный блоб,
+# проект хранит его рядом с id узла. Снимать/ставить — control-path.
+# ----------------------------------------------------------------------------
+
+proc saveInstanceState*(api: ptr PluginApi; handle: PluginHandle): seq[byte] =
+  ## Снимок состояния плагина (clap.state.save) в блоб для проекта.
+  ## Начинаем с небольшого буфера и удваиваем при переполнении: контракт
+  ## CLAP возвращает -1, если данные не влезли. Плагин без clap.state даёт
+  ## пустой блоб — это не ошибка.
+  var cap = 4096
+  while cap <= (1 shl 24):
+    result = newSeq[byte](cap)
+    let n = pluginStateSave(api, handle, addr result[0], cap)
+    if n >= 0:
+      result.setLen(n)
+      return
+    cap = cap * 2
+  result = newSeq[byte](0)
+
+proc loadInstanceState*(api: ptr PluginApi; handle: PluginHandle;
+                        blob: openArray[byte]): bool =
+  ## Восстановление состояния плагина из блоба проекта (clap.state.load).
+  ## Пустой блоб означает «состояния нет» — восстанавливать нечего.
+  if blob.len == 0:
+    return true
+  pluginStateLoad(api, handle, unsafeAddr blob[0], blob.len)
+
+# ----------------------------------------------------------------------------
 # Фабрика адаптера
 # ----------------------------------------------------------------------------
 
