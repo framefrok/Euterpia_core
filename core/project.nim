@@ -368,13 +368,22 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
   var res: ProjectFormat
   res.format = fmt
   res.version = ver
-  
+
+  # Дефолты метаданных совпадают с initTransport (48 кГц, 120 BPM, 4/4).
+  # Без этого проект без блока metadata — или без timeSignature внутри
+  # него — давал бы вырожденное состояние: tempo 0 обнуляет
+  # samplesPerQuarter(), размер 0/0 обнуляет beatsPerBar(), и таймлайн
+  # (BBT, loop) перестаёт двигаться. Тест #57 это фиксирует.
+  res.metadata.sampleRate = 48000.0f
+  res.metadata.tempo = 120.0f
+  res.metadata.timeSignature = TimeSignatureFormat(numerator: 4, denominator: 4)
+
   let metaNode = root{"metadata"}
   if metaNode != nil and metaNode.kind == JObject:
     res.metadata.name = safeStr(metaNode, "name")
     res.metadata.author = safeStr(metaNode, "author")
-    res.metadata.sampleRate = float32(safeFloat(metaNode, "sampleRate"))
-    res.metadata.tempo = float32(safeFloat(metaNode, "tempo"))
+    res.metadata.sampleRate = float32(safeFloat(metaNode, "sampleRate", 48000.0))
+    res.metadata.tempo = float32(safeFloat(metaNode, "tempo", 120.0))
     let tsNode = metaNode{"timeSignature"}
     if tsNode != nil and tsNode.kind == JObject:
       res.metadata.timeSignature.numerator = int32(safeInt(tsNode, "numerator", 4))
