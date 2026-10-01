@@ -57,11 +57,17 @@ nodes/metronome.nim, nodes/mixer_console.nim — прикладные узлы
 
 ```text
 adapters/portaudio/ — реализация audio_backend_api (libportaudio, dynlib)
+adapters/miniaudio/ — реализация audio_backend_api (miniaudio, вендорен в дерево)
 adapters/rtmidi/    — реализация midi_api (librtmidi, dynlib)
 adapters/clap/      — CLAP 1.2: ABI, хостинг за plugin_api
 adapters/eut/       — собственный ABI EUT-плагинов за plugin_api
 adapters/reference/ — эталонный адаптер plugin_api (в памяти, для тестов)
 ```
+
+Два аудио-бэкенда взаимозаменяемы: PortAudio подключается как внешняя
+`.so` через `dynlib`, miniaudio (single-header C, 0.11.25) линкуется в
+бинарник и не тянет ни одной внешней библиотеки. Core видит только
+`AudioBackendApi` и не знает, какой из них выбран (issue #31).
 
 Внешние плагины: **только CLAP** (`.clap`). Формат VST не поддерживается
 и не планируется (MANIFEST §8, §42).
@@ -80,16 +86,27 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
 Внешние библиотеки — опциональные, загружаются в рантайме через `dynlib`:
 
 ```text
-libportaudio   (аудио-устройства)
+libportaudio   (аудио-устройства, альтернатива miniaudio)
 librtmidi      (MIDI-устройства)
 ```
 
+miniaudio-бэкенд **не требует** внешних библиотек: `miniaudio.h`
+(0.11.25) вендорен в `adapters/miniaudio/` и компилируется вместе с
+адаптером.
+
 ```bash
-nimble test           # unit + integration
-nimble unit           # только unit-тесты DSP и контрактов
-nimble integration    # интеграционный тест ядра
-nimble buildRelease   # release-сборка с LTO
+nimble test            # unit + integration
+nimble unit            # только unit-тесты DSP и контрактов
+nimble integration     # интеграционный тест ядра
+nimble buildRelease    # release-сборка с LTO
+nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адаптера (#31)
 ```
+
+`nimble miniaudioSmoke` — единственная проверка, которая реально собирает
+и линкует C-шим miniaudio. Если устройства нет, печатается `SKIP`, но
+обязательно проверяется, что отсутствие устройства даёт код ошибки, а не
+падение; при наличии устройства проверяются enumeration, open/start/stop
+и рост `xrunCount` при искусственной перегрузке.
 
 Бинарники тестов кладутся в `build/` (каталог в `.gitignore`).
 
@@ -128,12 +145,17 @@ Audio-поток не выполняет: аллокаций, блокирующ
 - #9 — `DspScheduler` не умеет менять граф без teardown пула воркеров;
 - #10 — FLAC/OGG/MP3/AIFF — заглушки;
 - #11 — нет `DEBUG_ASSERT_REALTIME_SAFE`;
-- #13 — TSan-прогон есть в CI и блокирует merge; UBSan/ASan ещё нет.
+- #13 — TSan-прогон есть в CI и блокирует merge; UBSan/ASan ещё нет;
+- у miniaudio 0.11.25 нет публичного статуса драйвера/xrun-счётчика:
+  `xrunCount` считается адаптером как вызов рендера, не уложившийся в
+  длительность блока, плюс `interruption_began` (issue #31);
+- два аудио-бэкенда (PortAudio, miniaudio) пока выбираются вручную:
+  manager с hot-swap — issue #32.
 
 Закрыто в этой линии работ: #2 (`audio_backend_api`), #3 (входной
 аудиотракт), #28 (`midi_api`), #29 (`plugin_api`: CLAP/EUT за единым
-контрактом), #37 (единый `ring_buffer`), #12/#14 (CI, Logger вместо
-`echo`).
+контрактом), #31 (miniaudio-бэкенд), #37 (единый `ring_buffer`),
+#12/#14 (CI, Logger вместо `echo`).
 
 ## Входной тракт
 
