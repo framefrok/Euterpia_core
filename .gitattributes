@@ -1,0 +1,8 @@
+# .gitattributes
+#
+# Вендоренные сторонние single-header библиотеки.
+#
+# Не считаются «нашим» кодом (GitHub Linguist) и не раздувают diff при
+# обзоре PR: обновление версии — отдельная задача, а не построчная правка.
+
+adapters/miniaudio/miniaudio.h linguist-vendored
