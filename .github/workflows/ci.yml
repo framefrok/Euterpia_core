@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Основной прогон: unit + integration на трёх платформах.
+  # Флаги памяти и потоков берутся из config.nims, поэтому просто nimble test.
+  # ---------------------------------------------------------------------------
+  test:
+    name: unit + integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+
+      - name: Показать версию Nim
+        run: nim --version
+
+      - name: nimble test
+        run: nimble test
+
+  # ---------------------------------------------------------------------------
+  # Release-сборка с LTO: проверяет, что ядро собирается теми же флагами,
+  # с которыми оно будет поставляться (см. config.nims и euterpia.nimble).
+  # ---------------------------------------------------------------------------
+  release:
+    name: release build with LTO
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+
+      - name: nimble buildRelease
+        run: nimble buildRelease
+
+  # ---------------------------------------------------------------------------
+  # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool.
+  # Job пока НЕ блокирует merge (см. issue #13): сначала нужен первый зелёный
+  # прогон, после чего continue-on-error снимается.
+  # ---------------------------------------------------------------------------
+  tsan:
+    name: thread sanitizer (не блокирует merge)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+
+      - name: Сборка и прогон под TSan
+        run: |
+          mkdir -p build
+          nim c -r --hints:off \
+            --passC:-fsanitize=thread --passC:-g \
+            --passL:-fsanitize=thread \
+            --out:build/euterpia_unit_tests_tsan \
+            tests/unit/all_tests.nim
