@@ -27,6 +27,7 @@ import plugin_api
 import signal_types
 import node_interface
 import clap_host
+import clap_host_extensions
 
 {.push raises: [].}
 
@@ -37,6 +38,9 @@ type
   ClapSlot = object
     ## Состояние одного инстанса. POD; размещается в shared-куче.
     inst: ClapPluginInstance
+    ## host-side состояние (clap.host/params|state|gui|thread-check|latency).
+    hostCtx: ptr ClapHostContext
+    audioThreadMarked: bool
     maxBlock: int32
     audioIn: int32
     audioOut: int32
@@ -188,9 +192,14 @@ proc clapInstantiate(
     m.closeModule()
     return nil
 
-  # Хост-интерфейс плагина. Callback'и — заглушки; host-расширения
-  # (params/state/gui/thread-check) реализуются в #6.
+  # Хост-интерфейс плагина: базовые поля + host-расширения (#6).
   initHost(slot.inst.host)
+  slot.hostCtx = newClapHostContext()
+  if slot.hostCtx.isNil:
+    deallocShared(slot)
+    m.closeModule()
+    return nil
+  installClapHostExtensions(slot.inst.host, slot.hostCtx)
 
   let plugin = f.createPlugin(f, addr slot.inst.host, desc.id)
   if plugin.isNil:
@@ -218,6 +227,7 @@ proc clapDestroy(api: ptr PluginApi; handle: PluginHandle)
   if slot.isNil:
     return
   unloadClapPlugin(slot.inst)
+  freeClapHostContext(slot.hostCtx)
   deallocShared(slot)
 
 proc clapActivate(
@@ -271,6 +281,12 @@ proc clapProcess(
   let slot = slotOf(handle)
   if slot.isNil or ctx.isNil:
     return ppsError
+
+  # Первый вызов process — единственное место, где достоверно известно,
+  # какой поток является аудио-потоком (clap.thread-check).
+  if not slot.audioThreadMarked:
+    markAudioThread(slot.hostCtx)
+    slot.audioThreadMarked = true
 
   var evPorts: NodeEventPorts
   if not inEvents.isNil:
@@ -326,7 +342,33 @@ proc clapLatencyFrames(api: ptr PluginApi; handle: PluginHandle): int32
 
 proc clapOnMainThread(api: ptr PluginApi; handle: PluginHandle)
     {.cdecl, raises: [], gcsafe.} =
-  discard
+  ## Плагин звал `request_callback` — main-loop зовёт `on_main_thread`
+  ## столько раз, сколько запросов накопилось с прошлого раза.
+  let slot = slotOf(handle)
+  if slot.isNil or slot.inst.plugin.isNil:
+    return
+
+  let n = takeCallbackRequests(slot.hostCtx)
+  if n <= 0:
+    return
+
+  let callback = slot.inst.plugin.onMainThread
+  if callback.isNil:
+    return
+
+  var i = 0
+  while i < n:
+    callback(slot.inst.plugin)
+    inc i
+
+proc clapHostContextOf*(api: ptr PluginApi; handle: PluginHandle): ptr ClapHostContext =
+  ## Host-side состояние инстанса: флаги `rescan`/`state.markDirty`/
+  ## `latency.changed`/`request_restart`/`request_process`/`gui.*`.
+  ## Main-loop забирает их через `take*` из clap_host_extensions.
+  ##
+  ## Владелец указателя — адаптер; он валиден, пока жив инстанс.
+  let slot = slotOf(handle)
+  if slot.isNil: nil else: slot.hostCtx
 
 # ----------------------------------------------------------------------------
 # Фабрика адаптера

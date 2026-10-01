@@ -171,6 +171,9 @@ type
     reset*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [], gcsafe.}
     process*: proc(plugin: ptr ClapPlugin, process: ptr ClapProcess): int32 {.cdecl, raises: [], gcsafe.}
     getExtension*: proc(plugin: ptr ClapPlugin, id: cstring): pointer {.cdecl, raises: [], gcsafe.}
+    # `on_main_thread` — последнее поле clap_plugin_t (проверено по
+    # include/clap/plugin.h), поэтому порядок ABI соблюдён.
+    onMainThread*: proc(plugin: ptr ClapPlugin) {.cdecl, raises: [], gcsafe.}
 
   ClapPluginFactory* {.bycopy.} = object
     getPluginCount*: proc(factory: ptr ClapPluginFactory): uint32 {.cdecl, raises: [], gcsafe.}
