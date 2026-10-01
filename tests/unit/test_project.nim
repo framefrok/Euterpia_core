@@ -236,3 +236,39 @@ suite "project: ошибки":
     check not r.success
     check r.error.kind == pekIOError
 
+  test "не-объекты в массивах пропускаются, а не дают мусорные ноды (#75)":
+    let path = getTempDir() / "euterpia_junk_arrays.json"
+    # Повреждённый файл: в массивах объектов встречаются числа и null.
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "graph":{
+        "nodes":[42, {"id":1,"nodeType":"fx.gain"}, null, "x"],
+        "connections":[7, {}, null]
+      },
+      "sequencer":{
+        "tracks":[1, {"id":1,"name":"T","clips":[null, {"id":1,"notes":[9, {}]}]}],
+        "automationLanes":[null, {"paramId":1,"nodeId":1,"points":[3]}]
+      }}""")
+    defer: removeFile(path)
+
+    let r = loadProject(path)
+    check r.success
+    let p = r.value
+
+    # Не-объекты отброшены: раньше вместо них появлялись «мусорные» ноды
+    # с дефолтами (id: 0, nodeType: "").
+    check p.graph.nodes.len == 1
+    check p.graph.nodes[0].nodeType == "fx.gain"
+    check p.graph.nodes[0].id == 1
+
+    # Объект без нужных полей — валидный элемент с дефолтами, он остаётся.
+    check p.graph.connections.len == 1
+    check p.graph.connections[0].srcNodeId == 0
+
+    check p.sequencer.tracks.len == 1
+    check p.sequencer.tracks[0].clips.len == 1
+    # notes=[9, {}]: число отброшено, объект остался.
+    check p.sequencer.tracks[0].clips[0].notes.len == 1
+
+    check p.sequencer.automationLanes.len == 1
+    check p.sequencer.automationLanes[0].points.len == 0
+

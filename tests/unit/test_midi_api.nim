@@ -10,7 +10,7 @@
 #   3. конвертация MIDI -> RealtimeEvent воспроизводит прежнюю реализацию
 #      байт-в-байт (эталонные значения выписаны явно).
 
-import std/[unittest, atomics]
+import std/[unittest, atomics, math]
 import midi_api
 import midi_events
 import signal_types
@@ -350,3 +350,45 @@ suite "midi_events: конвертация":
     check q.events[2].kind == evCC
 
     fakeDestroy(api)
+
+# ==============================================================================
+# Клампы таймстампа (issue #77)
+# ==============================================================================
+
+suite "midi_events: кламп таймстампа до приведения (#77)":
+  test "«плохой» таймстамп клампится, а не даёт мусорный кадр":
+    var ev: RealtimeEvent
+    # Драйвер отдал время из другого источника: разница в миллионы секунд.
+    # Раньше здесь был int32(1e6 * 48000) — приведение вне диапазона int32
+    # (UB по стандарту C), и только потом клампы работали с мусором.
+    check midiToEvent(
+      MidiMessage(status: 0x90'u8, data1: 60'u8, data2: 100'u8,
+                  timestamp: 1.0e6),
+      0'u8, 48000.0, 0.0, ev)
+    check ev.frameOffset == uint32(MaxBlockSize - 1)
+
+    # Прошлое: ноль.
+    var past: RealtimeEvent
+    check midiToEvent(
+      MidiMessage(status: 0x90'u8, data1: 60'u8, data2: 100'u8,
+                  timestamp: -1.0e6),
+      0'u8, 48000.0, 0.0, past)
+    check past.frameOffset == 0'u32
+
+    # NaN (пустое время драйвера) -> предсказуемый ноль.
+    var nanEv: RealtimeEvent
+    check midiToEvent(
+      MidiMessage(status: 0x90'u8, data1: 60'u8, data2: 100'u8,
+                  timestamp: NaN),
+      0'u8, 48000.0, 0.0, nanEv)
+    check nanEv.frameOffset == 0'u32
+
+  test "нормальный таймстамп: поведение не изменилось":
+    var ev: RealtimeEvent
+    # Смещение ровно 64 кадра при 48 кГц.
+    check midiToEvent(
+      MidiMessage(status: 0x90'u8, data1: 60'u8, data2: 100'u8,
+                  timestamp: 64.0 / 48000.0),
+      0'u8, 48000.0, 0.0, ev)
+    check ev.frameOffset == 64'u32
+    check ev.kind == evNoteOn

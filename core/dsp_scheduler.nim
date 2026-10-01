@@ -18,7 +18,7 @@
 when not compileOption("threads"):
   {.error: "dsp_scheduler requires --threads:on".}
 
-import std/atomics
+import std/[atomics, tables, hashes]
 import node_interface
 
 const
@@ -54,7 +54,6 @@ type
     kind*: ResourceKind
     node*: int32
     port*: int32
-
   TaskDesc* = object
     task*: DspTask
     reads*: seq[ResourceRef]
@@ -127,11 +126,14 @@ proc eventResource*(node: int32, port: int32): ResourceRef {.inline.} =
 proc `==`*(a, b: ResourceRef): bool {.inline.} =
   a.kind == b.kind and a.node == b.node and a.port == b.port
 
-proc findResource(list: openArray[ResourceRef], r: ResourceRef): int =
-  for i in 0 ..< list.len:
-    if list[i] == r:
-      return i
-  return -1
+proc hash*(r: ResourceRef): Hash {.inline.} =
+  ## Хеш ресурса: нужен, чтобы `buildSchedule` искал писателя ресурса
+  ## за O(1), а не линейным проходом (issue #78).
+  var h: Hash = 0
+  h = h !& hash(ord(r.kind))
+  h = h !& hash(r.node)
+  h = h !& hash(r.port)
+  result = !$h
 
 # Fix 14: Hardware-assisted pause/yield primitives for spin-loops
 proc cpuRelax* {.inline, raises: [].} =
@@ -257,27 +259,28 @@ proc buildSchedule(
     outSchedule.offsets = newSeq[int32](executorCount)
     return true
 
-  var resources: seq[ResourceRef] = @[]
-  var writers: seq[int32] = @[]
+  # Ресурс -> индекс пишущей задачи. Раньше это были два параллельных
+  # списка с линейным поиском, что давало O((N·M)^2) на построение
+  # расписания; теперь O(1) на ресурс (issue #78).
+  var writers = initTable[ResourceRef, int32]()
 
   for i in 0 ..< taskCount:
     for w in descs[i].writes:
-      let idx = findResource(resources, w)
-      if idx < 0:
-        resources.add(w)
-        writers.add(i.int32)
-      else:
-        if writers[idx] != i.int32:
+      if writers.hasKey(w):
+        # Второй писатель того же ресурса — расписание невозможно.
+        if writers[w] != i.int32:
           return false
+      else:
+        writers[w] = i.int32
 
   var adj = newSeq[seq[int32]](taskCount)
   var indeg = newSeq[int32](taskCount)
 
   for i in 0 ..< taskCount:
     for r in descs[i].reads:
-      let idx = findResource(resources, r)
-      if idx >= 0:
-        let src = int(writers[idx])
+      let w = writers.getOrDefault(r, -1'i32)
+      if w >= 0:
+        let src = int(w)
         addEdge(adj, indeg, src, i)
 
   var current = newSeq[int32]()

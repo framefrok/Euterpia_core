@@ -128,11 +128,19 @@ proc alignedAlloc(size: int): pointer =
   return cast[pointer](alignedAddr)
 
 proc alignedDealloc(p: pointer) {.inline.} =
+  ## Освобождает ровно то, что вернул `alignedAlloc`.
+  ##
+  ## Принимает ТОЛЬКО результат `alignedAlloc`: заголовок с сырым указателем
+  ## лежит на `sizeof(pointer)` байт перед `p`. Чужой указатель — UB, поэтому
+  ## есть хотя бы дешёвая проверка заголовка (issue #80): нулевой указатель
+  ## означает, что освобождать нечего.
   if p == nil:
     return
 
   let header = uint(sizeof(pointer))
   let headerPtr = cast[ptr pointer](cast[uint](p) - header)
+  if headerPtr[] == nil:
+    return
   deallocShared(headerPtr[])
 
 # ==============================================================================

@@ -94,6 +94,15 @@ proc clipEvents*(q: ptr EventQueue, maxFrames: uint32) {.cdecl.} =
   q.count = writeIdx.int32
 
 proc findEventAtFrame*(q: ptr EventQueue, frame: uint32): int32 {.cdecl.} =
+  ## Индекс первого события, чей `frameOffset` НЕ РАНЬШЕ `frame`.
+  ##
+  ## Контракт (issue #80):
+  ##   * `>= 0` — индекс в `q.events[0 ..< q.count]`;
+  ##   * `-1` — событий не раньше `frame` нет (все раньше ИЛИ очередь пуста).
+  ##
+  ## Это позиция вставки по времени, а не «ошибка»: -1 здесь равнозначен
+  ## «все события уже в прошлом относительно кадра». Порядок событий
+  ## подразумевается отсортированным (`sortEvents`).
   for i in 0 ..< q.count:
     if q.events[i].frameOffset >= frame:
       return i.int32
