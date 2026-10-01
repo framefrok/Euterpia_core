@@ -5,7 +5,22 @@
 import std/[unittest, math]
 import sdk/node_api
 import builtin/dynamics/compressor
+import builtin/native/eut_native
 import unit/test_support
+
+proc compGainDbFor(detector: cint; threshold, ratio, makeupDb,
+                   inputLevel: float32; n = 8192): float32 =
+  ## Gain reduction ядра на постоянном входе — после сходимости детектора.
+  var c = newCompressor(1, detector, TestSampleRate)
+  compSetParams(addr c, threshold, ratio, 0.0f, 0.001f, 0.05f, makeupDb)
+
+  var buf = newSeq[float32](n)
+  for i in 0 ..< n:
+    buf[i] = inputLevel
+
+  compDetect(addr c, addr buf[0], n)
+  result = compGainDb(addr c)
+  freeCompressor(addr c)
 
 proc renderSineComp(amplitude, threshold, ratio: float32;
                     blocks: int): seq[float32] =
@@ -79,3 +94,27 @@ suite "compressor":
           phase += inc
     )
     check boosted[2048 .. ^1].rms() > plain[2048 .. ^1].rms() * 1.5f
+
+  # --- регрессии ядра (issues #25, #26) --------------------------------------
+
+  test "RMS-детектор измеряет мощность, а не смесь V и V² (#25)":
+    # Постоянный сигнал 0.354 (-9 дБ). Порог -30 дБ, ratio 4, knee 0:
+    # over = 21 дБ, GR = -(1 - 1/4) * 21 = -15.75 дБ.
+    # Со старым детектором (env смешивал V² и V) выходило около -9.2 дБ.
+    let gr = compGainDbFor(EutCompRms, -30.0f, 4.0f, 0.0f, 0.354f)
+    check abs(gr - (-15.75f)) < 0.6f
+
+  test "gainDb = 0 при сигнале ниже порога (#26)":
+    # -40 дБ вход, порог -12 дБ: подавления нет — метрика обязана быть 0,
+    # а не «уровень относительно порога» (-28 дБ).
+    let gr = compGainDbFor(EutCompPeak, -12.0f, 4.0f, 0.0f, 0.01f)
+    check abs(gr) < 0.01f
+
+  test "gainDb соответствует применённому gain и не зависит от makeup (#26)":
+    # Порог -30 дБ, ratio 4, вход 0.5 (-6 дБ): over = 24 дБ -> GR = -18 дБ.
+    let gr = compGainDbFor(EutCompPeak, -30.0f, 4.0f, 0.0f, 0.5f)
+    check abs(gr - (-18.0f)) < 0.6f
+
+    # makeup меняет звук, но не gain reduction: метрика должна совпадать.
+    let grMakeup = compGainDbFor(EutCompPeak, -30.0f, 4.0f, 6.0f, 0.5f)
+    check abs(grMakeup - gr) < 0.6f

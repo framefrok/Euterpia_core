@@ -31,6 +31,9 @@ void eut_osc_init(EutOscState *st, float sampleRate, float freq)
   if (st == NULL) return;
   st->phase = 0.0f;
   st->pulseWidth = 0.5f;
+  /* Правый канал стартует со сдвигом в полпериода: иначе расстройка
+     в центах звучит как «плавание» громкости, а не как расстройка. */
+  st->phaseR = 0.5f;
   eut_osc_set_freq(st, sampleRate, freq);
 }
 
@@ -54,6 +57,7 @@ void eut_osc_reset(EutOscState *st)
 {
   if (st == NULL) return;
   st->phase = 0.0f;
+  st->phaseR = 0.5f;
 }
 
 /* Один сэмпл осциллятора; фаза продвигается внутри. */
@@ -120,23 +124,23 @@ void eut_osc_render_stereo(EutOscState *st, int kind,
 {
   if (st == NULL || outL == NULL || outR == NULL || n <= 0) return;
 
-  /* Правый канал идёт на своём инкременте, но стартует со сдвигом
-     в полпериода: иначе расстройка в центах звучит как «плавание»
-     громкости, а не как расстройка. */
   const float ratio = powf(2.0f, detuneCents * (1.0f / 1200.0f));
   const float incL = st->inc;
   const float incR = eut_clampf(st->inc * ratio, 0.0f, EUT_OSC_MAX_HARM);
-
-  EutOscState tmp = *st;
-  const float phase0 = st->phase;
 
   for (int i = 0; i < n; ++i) {
     outL[i] = osc_sample(st, kind, incL) * gain;
   }
 
-  tmp.phase = phase0 + 0.5f;
-  if (tmp.phase >= 1.0f) tmp.phase -= 1.0f;
+  /* Правый канал хранит СВОЮ фазу в st->phaseR: пересоздавать её из phase0
+     каждый блок нельзя. При incR != incL фаза к концу блока уходит на
+     n*incR, а перезапуск от phase0 + 0.5 даёт на каждой границе скачок
+     n*(incR - incL), который накапливается — расстройка «уезжает» от
+     заданной и при малых центах пропадает совсем. */
+  EutOscState tmp = *st;
+  tmp.phase = st->phaseR;
   for (int i = 0; i < n; ++i) {
     outR[i] = osc_sample(&tmp, kind, incR) * gain;
   }
+  st->phaseR = tmp.phase;
 }

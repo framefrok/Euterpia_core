@@ -8,6 +8,7 @@
 import std/[unittest, math]
 import sdk/node_api
 import builtin/filters/svf
+import builtin/native/eut_native
 import unit/test_support
 
 const
@@ -70,3 +71,43 @@ suite "svf":
     check s.isFinite()
     # Q=10 даёт пик ~10, дальше затухание: 16 — щедрый, но конечный потолок.
     check s.peak() < 16.0f
+
+  # --- регрессии ядра (issue #21) --------------------------------------------
+
+  test "notch: глушит собственную частоту среза (#21)":
+    # Параметр resonance ноды — это k = 1/Q; resonance = 1.0 -> k = 1.
+    let s = renderSineSvf(3.0f, 1000.0f, 1.0f, 1000.0f, 8)
+    check s.isFinite()
+    check s[2048 .. ^1].rms() < 0.05f
+
+  test "notch: прозрачен далеко выше среза (#21)":
+    let s = renderSineSvf(3.0f, 1000.0f, 1.0f, 15000.0f, 8)
+    check s.isFinite()
+    check s[2048 .. ^1].peak() > 0.9f
+
+  test "блочный process и поточечный process_one идентичны (#21)":
+    var input: array[256, float32]
+    var phase = 0.0'f64
+    let inc = 2.0 * PI * 700.0 / float64(TestSampleRate)
+    for i in 0 ..< input.len:
+      input[i] = sin(phase).float32
+      phase += inc
+
+    var a = newSvf()
+    svfDesign(addr a, EutSvfNotch, TestSampleRate, 1000.0f, 1.0f)
+    var outBlock: array[256, float32]
+    svfProcess(addr a, EutSvfNotch, addr input[0], addr outBlock[0], input.len)
+
+    var b = newSvf()
+    svfDesign(addr b, EutSvfNotch, TestSampleRate, 1000.0f, 1.0f)
+    var outOne: array[256, float32]
+    for i in 0 ..< input.len:
+      outOne[i] = svfProcessOne(addr b, EutSvfNotch, input[i])
+
+    var maxDiff = 0.0'f32
+    for i in 0 ..< input.len:
+      maxDiff = max(maxDiff, abs(outBlock[i] - outOne[i]))
+    check maxDiff < 1.0e-4f
+
+    freeSvf(addr a)
+    freeSvf(addr b)
