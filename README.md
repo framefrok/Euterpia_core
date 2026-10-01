@@ -23,7 +23,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
 | Тесты | ✅ 280 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
-| CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты |
+| CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты; план CLI — #86 |
 
 ## Возможности
 
@@ -197,6 +197,24 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
       #52 miniaudio-сборка на Windows/macOS
 
 ### Интерфейс
+
+**CLI** — полноценный интерфейс управления (MANIFEST §19–21), tracking: #86.
+
+- [ ] #88 каркас: точка входа, диспетчер команд, human/`--json`, логгер,
+      exit-коды, CI-smoke
+- [ ] #89 проект: `init`, `project show/set/validate`
+- [ ] #90 граф: `node list/add/rm`, `connect/disconnect`, `param set/get`,
+      `graph check`
+- [ ] #91 offline-рендер в WAV: `render` (детерминизм + CI-проверка)
+- [ ] #92 живое воспроизведение: `device list`, `play` через
+      `backend_manager` (метрики, SIGINT)
+- [ ] #94 `record` (запись входа), #93 `midi` (list/monitor), #95 `plugin`
+      (scan/info + состояние плагина в проект)
+- [ ] #97 батч/REPL (`--script`), #96 справочник CLI и JSON-схемы
+- [ ] #87 sequencer player (Nodes) — зависимость: клипы проекта пока не
+      попадают в граф
+
+**Editor**:
 
 - [ ] #30 каркас Editor на Dear ImGui; #33 векторный рендерер таймлайна
       (Blend2D / NanoVG); #34 Raylib как альтернативный каркас окна
