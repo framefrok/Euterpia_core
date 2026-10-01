@@ -144,6 +144,13 @@ Audio-поток не выполняет: аллокаций, блокирующ
   `tests/unit/test_clap_host_extensions.nim`; остаётся mock-плагин,
   сохранение состояния плагина в проекте и `clap-validator` (issue #53);
   трансляция out-events — по-прежнему #7;
+- доступ к параметрам/состоянию/latency/аудио-портам ПЛАГИНА
+  (plugin-side расширения) реализован в
+  `adapters/clap/clap_plugin_extensions.nim` (#49) и покрыт
+  `tests/unit/test_clap_plugin_extensions.nim`; дублирующий
+  `clap_plugin_host.nim` удалён — в нём было две ошибки ABI
+  (`clap_istream`/`clap_ostream` были склеены в одну структуру, поля
+  `clap_audio_port_info` переставлены);
 - #8 — нет ресемплинга при несовпадении SR устройства и проекта;
 - #9 — `DspScheduler` не умеет менять граф без teardown пула воркеров;
 - #10 — FLAC/OGG/MP3/AIFF — заглушки;
