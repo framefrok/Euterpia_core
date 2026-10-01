@@ -106,12 +106,29 @@ jobs:
             exit 1
           fi
 
-      - name: Core знает только audio_backend_api, а не miniaudio (#31)
+      - name: Core знает только audio_backend_api, а не конкретную библиотеку (#31)
         run: |
-          # Только код, а не комментарии: audio_backend_api.nim перечисляет
-          # возможные бэкенды в прозе, и это допустимо.
+          # Проверяется КОД: символы конкретной библиотеки, а не проза.
           if grep -rnE "miniaudio\.[hc]|MINIAUDIO_IMPLEMENTATION|ma_[a-z0-9]+_" core/; then
-            echo "::error::miniaudio протёк в core/ (§8, §41)"
+            echo "::error::конкретная аудиобиблиотека протекла в core/ (§8, §41)"
+            exit 1
+          fi
+
+      - name: Core выбирает бэкенды по имени, а не по библиотеке (#32)
+        run: |
+          # Критерий приёмки #32 в исполняемом виде. Проверяются СИМВОЛЫ
+          # конкретных библиотек (ma_/Pa_/jack_/snd_/clap_entry): именно они
+          # означают реальную зависимость. Упоминание библиотеки в прозе —
+          # докстрока audio_backend_api.nim перечисляет бэкенды по §8 —
+          # зависимостью не является.
+          if grep -rnE "ma_[a-z0-9]+_|Pa_[A-Za-z]+\(|jack_[a-z]+_|snd_[a-z]+_|clap_entry" core/; then
+            echo "::error::символы конкретной аудиобиблиотеки протекли в core/ (#32)"
+            exit 1
+          fi
+          # И выбор бэкенда должен идти через реестр, а не через жёсткий
+          # import адаптера из Core.
+          if grep -rnE "import[[:space:]]+.*(audio_backend_portaudio|audio_backend_miniaudio|midi_backend_rtmidi)" core/; then
+            echo "::error::Core импортирует адаптер напрямую (§27, §93)"
             exit 1
           fi
 

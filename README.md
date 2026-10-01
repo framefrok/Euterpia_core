@@ -22,7 +22,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
-| Тесты | ✅ 247 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
+| Тесты | ✅ 256 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
 | CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты |
 
 ## Возможности
@@ -83,6 +83,7 @@ MANIFEST.md  — архитектурный манифест
 | `audio_backend_api` | контракт аудио-бэкенда (PortAudio — в `adapters/`) |
 | `midi_api`, `midi_events` | контракт MIDI-бэкенда и MIDI → `RealtimeEvent` (issue #28) |
 | `plugin_api` | контракт хостинга плагинов: CLAP/EUT/… — в `adapters/` (issue #29) |
+| `backend_registry`, `backend_manager` | выбор аудио-бэкенда по строковому имени и hot-swap `stop → close → open` (issue #32) |
 
 ### `nodes/` — реализации возможностей
 
@@ -154,10 +155,11 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
       CC/pitch bend/aftertouch/program change, клампы портов и каналов
 - [x] #4 метрика `xruns`: счётчик драйвера → `EngineMetric` (дельта за блок,
       монотонный тотал, битмаск флагов и отдельный счётчик входных xrun'ов)
+- [x] #32 реестр бэкендов (`backend_registry`) + менеджер с hot-swap
+      (`backend_manager`): Core выбирает бэкенд по имени
 
 ### Ближайшие шаги
 
-- [ ] #32 backend manager: выбор и hot-swap PortAudio ↔ miniaudio
 - [ ] #39 LV2 (Lilv) и #40 VST3 (изолированный C-bridge) за `plugin_api`
 
 ### Экосистема и бэкенды
@@ -292,8 +294,9 @@ Audio-поток не выполняет: аллокаций, блокирующ
   `xrunCount` считается C-шимом как вызов рендера, не уложившийся в
   длительность блока, плюс `interruption_began`, а адаптер превращает
   дельту этого счётчика в `cfg.reportStatus` (issue #31, #4);
-- два аудио-бэкенда (PortAudio, miniaudio) пока выбираются вручную:
-  manager с hot-swap — issue #32.
+- два аудио-бэкенда (PortAudio, miniaudio) выбираются через
+  `backend_registry`/`backend_manager`, но hot-swap перезапускает поток
+  (`stop → close → open`): бесшовное переключение «на лету» — #9.
 
 Закрыто в этой линии работ: #2 (`audio_backend_api`), #3 (входной
 аудиотракт), #28 (`midi_api`), #29 (`plugin_api`: CLAP/EUT за единым
@@ -302,7 +305,8 @@ Audio-поток не выполняет: аллокаций, блокирующ
 Core/Commons), #13 (UBSan/ASan-цели и CI-джобы), #6/#49/#53 (CLAP:
 host- и plugin-side расширения, mock-плагин и состояние в проекте),
 #7 (трансляция событий EventQueue ↔ CLAP и MIDI-out плагина),
-#4 (метрика xruns: счётчик драйвера → EngineMetric).
+#4 (метрика xruns: счётчик драйвера → EngineMetric),
+#32 (выбор аудио-бэкенда по имени и hot-swap).
 
 ## Входной тракт
 
@@ -339,6 +343,32 @@ Control-path дополнительно видит `engine.xrunCount()` — мо
 один в один, а miniaudio-шим отдаёт ординал, который адаптер переводит в
 бит. Весь путь — только атомики: в audio-потоке нет локов, аллокаций и
 логирования.
+
+## Бэкенды
+
+Выбор аудио-бэкенда — через реестр (issue #32). Core не знает ни одной
+библиотеки: `backend_registry` хранит пары «имя → фабрика/деструктор»,
+которые регистрирует ХОСТ (CLI/Editor/тест) для тех адаптеров, что он
+собрал сам. Реестр — явный объект с владельцем, а не глобальный синглтон
+(MANIFEST §72/§74).
+
+```nim
+var mgr = initBackendManager()
+discard mgr.registerBackend("first", createA, destroyA)
+discard mgr.registerBackend("second", createB, destroyB)
+
+# Приоритет → первый доступный. Сломанный адаптер пропускается.
+discard mgr.openPreferred(cfg, render, engineCtx, ["second", "first"])
+
+discard mgr.switchBackend("first", cfg, render, engineCtx)   # hot-swap
+mgr.closeBackend()
+```
+
+Переключение идёт строго на control-path и означает `stop → close → open`:
+audio-поток реестр не читает, а бесшовное переключение «на лету» — отдельная
+задача (#9). Сбой одного адаптера (нет библиотеки, не открылся) не мешает
+выбрать другой и не оставляет «висящий» поток. Критерий «в `core/` нет имён
+библиотек» проверяется CI-джобом `architecture` механически.
 
 ## Лицензия
 
