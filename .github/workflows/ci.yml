@@ -59,9 +59,12 @@ jobs:
         run: nimble buildRelease
 
   # ---------------------------------------------------------------------------
-  # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool.
+  # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool / ring_buffer.
   # Job пока НЕ блокирует merge (см. issue #13): сначала нужен первый зелёный
   # прогон, после чего continue-on-error снимается.
+  #
+  # Отдельно гоняется стресс ring_buffer (issue #37): миллион push/pop в
+  # двух потоках и два producers в MPSC. Это и есть TSan-цель для кольца.
   # ---------------------------------------------------------------------------
   tsan:
     name: thread sanitizer (не блокирует merge)

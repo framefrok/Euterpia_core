@@ -1,348 +1,254 @@
-#midi_io.nim
-import std/atomics
-import signal_types
+# midi_io.nim
+#
+# Нейтральный MIDI-инструмент Commons (issue #28).
+#
+# Что здесь было раньше (и почему это неправильно):
+#   1. загрузка внешней MIDI-библиотеки прямо в Commons — внешний мир
+#      проникал внутрь проекта (MANIFEST §42); её место — adapters/RtMidi;
+#   2. собственный SPSC-кольцевой буфер — дубль realtime-примитива
+#      (issue #37); теперь единственное кольцо живёт в core/ring_buffer.nim;
+#   3. импорт модуля типов сигналов Core — Commons знал про Core
+#      (MANIFEST §25/§26); трансляция MIDI -> RealtimeEvent переехала
+#      в core/midi_events.nim.
+#
+# После переноса устройств в `adapters/RtMidi` + `core/midi_api` здесь
+# остаётся ровно то, что и должно жить в Commons: чистый кодек
+# Standard MIDI File (SMF) без единой внешней зависимости и без Core.
+#
+# Поддерживается чтение/запись форматов 0 и 1, канальные сообщения
+# (Note On/Off, CC, Program Change, Pitch Bend, Aftertouch). Мета- и
+# SysEx-события при чтении корректно пропускаются (с потреблением длины),
+# при записи не порождаются.
 
 {.push raises: [].}
 
-when defined(windows):
-  const RtMidiLib = "rtmidi.dll"
-elif defined(macosx):
-  const RtMidiLib = "librtmidi.dylib"
-else:
-  const RtMidiLib = "librtmidi.so"
-
 type
-  RtMidiPtr = pointer
-  RtMidiInPtr = pointer
-  RtMidiOutPtr = pointer
-
-  MidiMessage* = object
-    status*: uint8
+  SmfEvent* {.bycopy.} = object
+    ## Одно канальное событие файла. POD, без внешних ссылок.
+    tick*: uint32      ## абсолютный тик от начала трека (в делениях division)
+    status*: uint8     ## байт статуса с каналом (0x9n, 0x8n, ...)
     data1*: uint8
     data2*: uint8
-    timestamp*: float64
-    portId*: int32
 
-  MidiDeviceType* = enum
-    mdInput
-    mdOutput
+  SmfTrack* = object
+    events*: seq[SmfEvent]
 
-  MidiDevice* = object
-    id*: int32
-    name*: string
-    deviceType*: MidiDeviceType
-    isOpen*: bool
-    channelFilter*: int32
+  SmfFile* = object
+    format*: uint16    ## 0 или 1
+    division*: uint16  ## ticks per quarter note (PPQ)
+    tracks*: seq[SmfTrack]
 
-  # Correct RtMidi C API callback signature
-  MidiInputCallback = proc(timeStamp: cdouble, message: ptr UncheckedArray[uint8], messageSize: csize_t, userData: pointer) {.cdecl.}
+# ==============================================================================
+# Примитивы чтения/записи
+# ==============================================================================
 
-{.pragma: rtmidi_import, importc, dynlib: RtMidiLib.}
+proc putU16BE(dst: var seq[byte]; v: uint16) {.inline.} =
+  dst.add byte((v shr 8) and 0xFF)
+  dst.add byte(v and 0xFF)
 
-proc rtmidi_in_create_default(): RtMidiInPtr {.rtmidi_import.}
-proc rtmidi_out_create_default(): RtMidiOutPtr {.rtmidi_import.}
-proc rtmidi_in_free(device: RtMidiInPtr) {.rtmidi_import.}
-proc rtmidi_out_free(device: RtMidiOutPtr) {.rtmidi_import.}
-proc rtmidi_get_port_count(device: RtMidiPtr): cuint {.rtmidi_import.}
-proc rtmidi_get_port_name(device: RtMidiPtr, portNumber: cuint, bufOut: cstring, bufLen: ptr cint): cint {.rtmidi_import.}
-proc rtmidi_open_port(device: RtMidiPtr, portNumber: cuint, portName: cstring) {.rtmidi_import.}
-proc rtmidi_close_port(device: RtMidiPtr) {.rtmidi_import.}
-proc rtmidi_in_set_callback(device: RtMidiInPtr, callback: MidiInputCallback, userData: pointer) {.rtmidi_import.}
-proc rtmidi_in_cancel_callback(device: RtMidiInPtr) {.rtmidi_import.}
-proc rtmidi_out_send_message(device: RtMidiOutPtr, message: ptr uint8, length: cint): cint {.rtmidi_import.}
-proc rtmidi_in_ignore_types(device: RtMidiInPtr, midiSysex: bool, midiTime: bool, midiSense: bool) {.rtmidi_import.}
+proc putU32BE(dst: var seq[byte]; v: uint32) {.inline.} =
+  dst.add byte((v shr 24) and 0xFF)
+  dst.add byte((v shr 16) and 0xFF)
+  dst.add byte((v shr 8) and 0xFF)
+  dst.add byte(v and 0xFF)
 
-const MidiRingBufferSize = 1024 # Must be power of 2 for fast modulo
+proc getU16BE(data: openArray[byte]; pos: var int): uint16 {.inline.} =
+  if pos + 1 >= data.len:
+    pos = data.len
+    return 0'u16
+  result = (uint16(data[pos]) shl 8) or uint16(data[pos + 1])
+  pos += 2
 
-type
-  MidiRingBuffer* = object
-    buffer: array[MidiRingBufferSize, MidiMessage]
-    writePos: Atomic[int]
-    readPos: Atomic[int]
+proc getU32BE(data: openArray[byte]; pos: var int): uint32 {.inline.} =
+  if pos + 3 >= data.len:
+    pos = data.len
+    return 0'u32
+  result =
+    (uint32(data[pos]) shl 24) or
+    (uint32(data[pos + 1]) shl 16) or
+    (uint32(data[pos + 2]) shl 8) or
+    uint32(data[pos + 3])
+  pos += 4
 
-proc initMidiRingBuffer*(rb: var MidiRingBuffer) =
-  rb.writePos.store(0, moRelaxed)
-  rb.readPos.store(0, moRelaxed)
+proc encodeVarLen*(value: uint32): seq[byte] =
+  ## Variable-length quantity SMF (7 бит на байт, старший бит — продолжение).
+  var buf: array[5, byte]
+  var count = 0
+  var v = value
+  buf[count] = byte(v and 0x7F)
+  inc count
+  v = v shr 7
+  while v > 0:
+    buf[count] = byte((v and 0x7F) or 0x80)
+    inc count
+    v = v shr 7
+  # байты собраны в обратном порядке
+  result = newSeq[byte](count)
+  for i in 0 ..< count:
+    result[i] = buf[count - 1 - i]
 
-proc pushMidiMessage*(rb: var MidiRingBuffer, msg: MidiMessage): bool {.inline.} =
-  let currentWrite = rb.writePos.load(moRelaxed)
-  let nextWrite = (currentWrite + 1) and (MidiRingBufferSize - 1)
-  if nextWrite == rb.readPos.load(moAcquire):
-    return false # Full
-  rb.buffer[currentWrite] = msg
-  rb.writePos.store(nextWrite, moRelease)
-  return true
+proc decodeVarLen*(data: openArray[byte]; pos: var int): uint32 =
+  ## Читает VLQ. При обрыве данных возвращает то, что успел прочитать,
+  ## и выставляет pos = data.len (вызывающий увидит конец файла).
+  result = 0'u32
+  var i = 0
+  while pos < data.len:
+    let b = data[pos]
+    inc pos
+    result = (result shl 7) or uint32(b and 0x7F)
+    inc i
+    if (b and 0x80) == 0:
+      return
+    if i >= 4:
+      return
 
-proc popMidiMessage*(rb: var MidiRingBuffer, msg: var MidiMessage): bool {.inline.} =
-  let currentRead = rb.readPos.load(moRelaxed)
-  if currentRead == rb.writePos.load(moAcquire):
-    return false # Empty
-  msg = rb.buffer[currentRead]
-  rb.readPos.store((currentRead + 1) and (MidiRingBufferSize - 1), moRelease)
-  return true
 
-type
-  MidiInputPort* = object
-    device: RtMidiInPtr
-    info: MidiDevice
-    ringBuffer: MidiRingBuffer
-    timeAccumulator: float64 # MIDI clock accumulator (seconds)
+# ==============================================================================
+# SMF: кодирование
+# ==============================================================================
 
-  MidiOutputPort* = object
-    device: RtMidiOutPtr
-    info: MidiDevice
+proc addAscii(dst: var seq[byte]; s: string) {.inline.} =
+  for ch in s:
+    dst.add byte(ord(ch))
 
-  MidiManager* = object
-    inputs: seq[MidiInputPort]
-    outputs: seq[MidiOutputPort]
-    sampleRate: float64
+proc channelEventLength(status: uint8): int {.inline.} =
+  ## 0 — не канальное сообщение (sys/meta), иначе число байтов данных.
+  case status and 0xF0'u8
+  of 0xC0'u8, 0xD0'u8: 1
+  of 0x80'u8, 0x90'u8, 0xA0'u8, 0xB0'u8, 0xE0'u8: 2
+  else: 0
 
-proc getPortName(device: RtMidiPtr, portNumber: cuint): string =
-  var bufLen: cint = 0
-  discard rtmidi_get_port_name(device, portNumber, nil, addr bufLen)
-  if bufLen > 0:
-    var buf = newString(bufLen)
-    discard rtmidi_get_port_name(device, portNumber, cstring(buf), addr bufLen)
-    result = buf
-    if result.len > 0 and result[^1] == '\0':
-      result.setLen(result.len - 1)
-  else:
-    result = ""
+proc encodeTrack(t: SmfTrack): seq[byte] =
+  var body: seq[byte] = @[]
+  var lastTick = 0'u32
 
-proc midiInputCallback(timeStamp: cdouble, message: ptr UncheckedArray[uint8], messageSize: csize_t, userData: pointer) {.cdecl.} =
-  let port = cast[ptr MidiInputPort](userData)
-  if port == nil: return
-  
-  # Accumulate delta time to get absolute seconds since port open
-  port.timeAccumulator += timeStamp
-  
-  if messageSize == 0 or message == nil: return
-  
-  let status: uint8 = message[0]
-  let data1: uint8 = if messageSize > 1 and status < 0xF0: message[1] else: 0'u8
-  let data2: uint8 = if messageSize > 2 and status < 0xF0: message[2] else: 0'u8
-  
-  # Convert Note On with velocity 0 to Note Off
-  var finalStatus: uint8 = status
-  var finalData2: uint8 = data2
-  if (status and 0xF0) == 0x90 and data2 == 0:
-    finalStatus = 0x80 or (status and 0x0F)
-    finalData2 = 0'u8
-    
-  var midiMsg = MidiMessage(
-    status: finalStatus,
-    data1: data1,
-    data2: finalData2,
-    timestamp: port.timeAccumulator,
-    portId: port.info.id
-  )
-  
-  discard port.ringBuffer.pushMidiMessage(midiMsg)
+  for ev in t.events:
+    let delta = if ev.tick >= lastTick: ev.tick - lastTick else: 0'u32
+    lastTick = ev.tick
 
-proc initMidiManager*(sampleRate: float64): MidiManager =
-  result.inputs = @[]
-  result.outputs = @[]
-  result.sampleRate = sampleRate
+    body.add encodeVarLen(delta)
+    body.add ev.status
+    let n = channelEventLength(ev.status)
+    if n >= 1: body.add ev.data1
+    if n >= 2: body.add ev.data2
 
-proc refreshDevices*(mgr: var MidiManager) =
-  for i in 0 ..< mgr.inputs.len:
-    if mgr.inputs[i].info.isOpen:
-      rtmidi_in_cancel_callback(mgr.inputs[i].device)
-      rtmidi_close_port(mgr.inputs[i].device)
-    rtmidi_in_free(mgr.inputs[i].device)
-    
-  for i in 0 ..< mgr.outputs.len:
-    if mgr.outputs[i].info.isOpen:
-      rtmidi_close_port(mgr.outputs[i].device)
-    rtmidi_out_free(mgr.outputs[i].device)
-    
-  mgr.inputs.setLen(0)
-  mgr.outputs.setLen(0)
-  
-  # Probe Inputs
-  let probeIn = rtmidi_in_create_default()
-  if probeIn != nil:
-    let count = rtmidi_get_port_count(probeIn)
-    for i in 0 ..< count:
-      let name = getPortName(probeIn, cuint(i))
-      # Create a dedicated RtMidiInPtr for each logical port to fix the single-handle bug
-      let dev = rtmidi_in_create_default()
-      if dev != nil:
-        var port: MidiInputPort
-        port.device = dev
-        port.info = MidiDevice(
-          id: int32(i),
-          name: name,
-          deviceType: mdInput,
-          isOpen: false,
-          channelFilter: -1
-        )
-        port.timeAccumulator = 0.0
-        initMidiRingBuffer(port.ringBuffer)
-        mgr.inputs.add(port)
-    rtmidi_in_free(probeIn)
-    
-  # Probe Outputs
-  let probeOut = rtmidi_out_create_default()
-  if probeOut != nil:
-    let count = rtmidi_get_port_count(probeOut)
-    for i in 0 ..< count:
-      let name = getPortName(probeOut, cuint(i))
-      let dev = rtmidi_out_create_default()
-      if dev != nil:
-        var port: MidiOutputPort
-        port.device = dev
-        port.info = MidiDevice(
-          id: int32(i),
-          name: name,
-          deviceType: mdOutput,
-          isOpen: false,
-          channelFilter: -1
-        )
-        mgr.outputs.add(port)
-    rtmidi_out_free(probeOut)
+  # End of Track: обязательное завершение любого MTrk-чанка.
+  body.add encodeVarLen(0)
+  body.add 0xFF'u8
+  body.add 0x2F'u8
+  body.add 0x00'u8
 
-proc openInput*(mgr: var MidiManager, deviceId: int32): bool =
-  if deviceId < 0 or deviceId >= int32(mgr.inputs.len):
-    return false
-  
-  let port = addr mgr.inputs[deviceId]
-  if port.info.isOpen: return true
-  
-  port.timeAccumulator = 0.0 
-  
-  rtmidi_open_port(port.device, cuint(deviceId), "Euterpia MIDI In")
-  rtmidi_in_ignore_types(port.device, true, true, true)
-  rtmidi_in_set_callback(port.device, midiInputCallback, cast[pointer](port))
-  port.info.isOpen = true
-  return true
+  result = @[]
+  result.addAscii("MTrk")
+  result.putU32BE(uint32(body.len))
+  result.add body
 
-proc openOutput*(mgr: var MidiManager, deviceId: int32): bool =
-  if deviceId < 0 or deviceId >= int32(mgr.outputs.len):
-    return false
-  
-  let port = addr mgr.outputs[deviceId]
-  if port.info.isOpen: return true
-  
-  rtmidi_open_port(port.device, cuint(deviceId), "Euterpia MIDI Out")
-  port.info.isOpen = true
-  return true
+proc encodeSmf*(f: SmfFile): seq[byte] =
+  ## Сериализует файл в байты SMF формата 0/1.
+  result = @[]
+  result.addAscii("MThd")
+  result.putU32BE(6'u32)
+  result.putU16BE(f.format)
+  result.putU16BE(uint16(min(f.tracks.len, 0xFFFF)))
+  result.putU16BE(f.division)
 
-proc closeInput*(mgr: var MidiManager, deviceId: int32) =
-  if deviceId < 0 or deviceId >= int32(mgr.inputs.len): return
-  let port = addr mgr.inputs[deviceId]
-  if port.info.isOpen:
-    rtmidi_in_cancel_callback(port.device)
-    rtmidi_close_port(port.device)
-    port.info.isOpen = false
+  for t in f.tracks:
+    result.add encodeTrack(t)
 
-proc closeOutput*(mgr: var MidiManager, deviceId: int32) =
-  if deviceId < 0 or deviceId >= int32(mgr.outputs.len): return
-  let port = addr mgr.outputs[deviceId]
-  if port.info.isOpen:
-    rtmidi_close_port(port.device)
-    port.info.isOpen = false
+# ==============================================================================
+# SMF: разбор
+# ==============================================================================
 
-proc pollMidiEvents*(mgr: var MidiManager, currentHostTimeSec: float64, output: ptr EventQueue) =
-  output.clearEvents()
-  
-  for i in 0 ..< mgr.inputs.len:
-    let port = addr mgr.inputs[i]
-    if not port.info.isOpen: continue
-    
-    var msg: MidiMessage
-    while port.ringBuffer.popMidiMessage(msg):
-      let status = msg.status and 0xF0
-      let channel = msg.status and 0x0F
-      
-      if port.info.channelFilter >= 0 and int32(channel) != port.info.channelFilter:
-        continue
-        
-      # Convert absolute MIDI time (seconds) to relative block frames
-      let timeDiffSec = msg.timestamp - currentHostTimeSec
-      var frameOffset = int32(timeDiffSec * mgr.sampleRate)
-      
-      # Clamp bounds
-      if frameOffset < 0: frameOffset = 0
-      if frameOffset >= MaxBlockSize: frameOffset = MaxBlockSize - 1
-      
-      var ev: RealtimeEvent
-      ev.frameOffset = uint32(frameOffset)
-      ev.subFrame = 0.0f
-      ev.port = uint8(i)
-      ev.channel = uint8(channel)
-      
-      case status
-      of 0x90:
-        ev.kind = evNoteOn
-        ev.data[0] = float32(msg.data1)
-        ev.data[1] = float32(msg.data2) / 127.0f
-        discard output.pushEvent(ev)
-      of 0x80:
-        ev.kind = evNoteOff
-        ev.data[0] = float32(msg.data1)
-        ev.data[1] = 0.0f
-        discard output.pushEvent(ev)
-      of 0xB0:
-        ev.kind = evCC
-        ev.data[0] = float32(msg.data1)
-        ev.data[1] = float32(msg.data2) / 127.0f
-        discard output.pushEvent(ev)
-      of 0xE0: # Pitch Bend
-        ev.kind = evPitchBend
-        let bend = (int32(msg.data2) shl 7) or int32(msg.data1)
-        ev.data[0] = float32(bend - 8192) / 8192.0f
-        discard output.pushEvent(ev)
-      of 0xD0: # Aftertouch
-        ev.kind = evAftertouch
-        ev.data[0] = float32(msg.data1) / 127.0f
-        discard output.pushEvent(ev)
-      of 0xC0: # Program Change
-        ev.kind = evProgramChange
-        ev.data[0] = float32(msg.data1)
-        discard output.pushEvent(ev)
+proc parseSmf*(data: openArray[byte]): tuple[ok: bool, file: SmfFile] =
+  ## Разбирает SMF. Возвращает ok=false на любом структурном нарушении —
+  ## ядро не падает на битом файле, а честно сообщает об ошибке.
+  result.ok = false
+
+  if data.len < 14:
+    return
+
+  if not (data[0] == byte(ord('M')) and data[1] == byte(ord('T')) and
+          data[2] == byte(ord('h')) and data[3] == byte(ord('d'))):
+    return
+
+  var pos = 4
+  let headerLen = int(getU32BE(data, pos))
+  if headerLen < 6:
+    return
+
+  let fmt = getU16BE(data, pos)
+  let nTracks = int(getU16BE(data, pos))
+  let division = getU16BE(data, pos)
+
+  # Заголовок может быть длиннее 6 байт — эти байты пропускаем.
+  pos = 8 + headerLen
+  if pos > data.len:
+    return
+
+  result.file.format = fmt
+  result.file.division = division
+  result.file.tracks = @[]
+
+  var trackIdx = 0
+  while trackIdx < nTracks and pos + 8 <= data.len:
+    if not (data[pos] == byte(ord('M')) and data[pos + 1] == byte(ord('T')) and
+            data[pos + 2] == byte(ord('r')) and data[pos + 3] == byte(ord('k'))):
+      break
+
+    pos += 4
+    let trkLen = int(getU32BE(data, pos))
+    let trackEnd = min(pos + trkLen, data.len)
+
+    var track = SmfTrack(events: @[])
+    var lastTick = 0'u32
+    var running: uint8 = 0'u8
+
+    while pos < trackEnd:
+      let delta = decodeVarLen(data, pos)
+      lastTick += delta
+
+      if pos >= trackEnd:
+        break
+
+      var status = data[pos]
+
+      if status < 0x80'u8:
+        # Running status: байт статуса не передан, используем предыдущий.
+        if running == 0'u8:
+          break
+        status = running
       else:
-        discard
-        
-  output.sortEvents()
+        inc pos
+        if status < 0xF0'u8:
+          running = status
 
-proc sendNoteOn*(mgr: var MidiManager, deviceId: int32, channel, note, velocity: uint8) =
-  if deviceId < 0 or deviceId >= int32(mgr.outputs.len): return
-  let port = addr mgr.outputs[deviceId]
-  if not port.info.isOpen: return
-  
-  var msg: array[3, uint8] = [0x90'u8 or (channel and 0x0F), note, velocity]
-  discard rtmidi_out_send_message(port.device, addr msg[0], 3)
+      if status >= 0xF0'u8:
+        # Meta (0xFF) / SysEx (0xF0, 0xF7): потребляем длину и пропускаем.
+        if status == 0xFF'u8:
+          if pos >= trackEnd:
+            break
+          inc pos  # meta type
+        let len = int(decodeVarLen(data, pos))
+        pos += len
+        continue
 
-proc sendNoteOff*(mgr: var MidiManager, deviceId: int32, channel, note: uint8) =
-  if deviceId < 0 or deviceId >= int32(mgr.outputs.len): return
-  let port = addr mgr.outputs[deviceId]
-  if not port.info.isOpen: return
-  
-  var msg: array[3, uint8] = [0x80'u8 or (channel and 0x0F), note, 0'u8]
-  discard rtmidi_out_send_message(port.device, addr msg[0], 3)
+      let n = channelEventLength(status)
+      if n == 0:
+        break
+      if pos + n > trackEnd:
+        # защита: не выходим за границы чанка
+        break
 
-proc sendCC*(mgr: var MidiManager, deviceId: int32, channel, cc, value: uint8) =
-  if deviceId < 0 or deviceId >= int32(mgr.outputs.len): return
-  let port = addr mgr.outputs[deviceId]
-  if not port.info.isOpen: return
-  
-  var msg: array[3, uint8] = [0xB0'u8 or (channel and 0x0F), cc, value]
-  discard rtmidi_out_send_message(port.device, addr msg[0], 3)
+      let d1 = data[pos]
+      let d2 = if n >= 2: data[pos + 1] else: 0'u8
+      pos += n
 
-proc destroyMidiManager*(mgr: var MidiManager) =
-  for i in 0 ..< mgr.inputs.len:
-    if mgr.inputs[i].info.isOpen:
-      rtmidi_in_cancel_callback(mgr.inputs[i].device)
-      rtmidi_close_port(mgr.inputs[i].device)
-    rtmidi_in_free(mgr.inputs[i].device)
-    
-  for i in 0 ..< mgr.outputs.len:
-    if mgr.outputs[i].info.isOpen:
-      rtmidi_close_port(mgr.outputs[i].device)
-    rtmidi_out_free(mgr.outputs[i].device)
-    
-  mgr.inputs.setLen(0)
-  mgr.outputs.setLen(0)
+      track.events.add SmfEvent(tick: lastTick, status: status, data1: d1, data2: d2)
+
+    pos = trackEnd
+    result.file.tracks.add track
+    inc trackIdx
+
+  result.ok = true
 
 {.pop.}

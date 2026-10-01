@@ -12,6 +12,9 @@
 
 import test_signal_types
 import test_native_abi
+import test_ring_buffer
+import test_midi_api
+import test_midi_smf
 import test_backend_contract
 import test_oscillator
 import test_biquad

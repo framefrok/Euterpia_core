@@ -14,6 +14,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 core/        — фундамент: runtime, граф, планировщик, память, IPC
 commons/     — нейтральные инструменты, не знающие о Core
 nodes/       — Node SDK, встроенные ноды, хосты плагинов
+adapters/    — адаптеры внешних библиотек (PortAudio, RtMidi)
 tests/       — unit-набор DSP/контрактов и интеграционный тест ядра
 config.nims  — общие флаги сборки для всех точек входа
 MANIFEST.md  — архитектурный манифест
@@ -27,7 +28,8 @@ MANIFEST.md  — архитектурный манифест
 | `graph_compiler` | сборка `CompiledPipeline`, PDC, отказ на циклах |
 | `compiled_pipeline` | неизменяемый объект графа: шаги, арены, версия |
 | `dsp_scheduler` | уровневый планировщик задач по воркерам |
-| `ipc_bus` | MPSC/SPSC очереди, `EngineCommand`, `EngineMetric` |
+| `ipc_bus` | MPSC/SPSC очереди поверх `ring_buffer`, `EngineCommand`, `EngineMetric` |
+| `ring_buffer` | единое lock-free кольцо SPSC/MPSC (issue #37) |
 | `memory_pool` | фиксированные пулы, generation-handle против ABA/double-free |
 | `transport`, `sequencer` | таймлайн, клипы, автоматизация |
 | `project` | сериализация проекта (не runtime) |
@@ -35,7 +37,8 @@ MANIFEST.md  — архитектурный манифест
 | `audio_buffer`, `signal_types`, `node_interface` | контракты буферов, событий, нод |
 | `param_registry`, `audio_params` | реестр параметров |
 | `wav_codec` | WAV read/write |
-| `audio_backend` | адаптер аудио-устройств (см. issue #2) |
+| `audio_backend_api` | контракт аудио-бэкенда (PortAudio — в `adapters/`) |
+| `midi_api`, `midi_events` | контракт MIDI-бэкенда и MIDI → `RealtimeEvent` (issue #28) |
 
 ### `nodes/` — реализации возможностей
 
@@ -54,8 +57,11 @@ nodes/metronome.nim, nodes/mixer_console.nim — прикладные узлы
 
 ### `commons/` — нейтральные инструменты
 
-`audio_file_io`, `midi_io`, `undo_redo`, `waveform_cache`.
-Commons не должен знать о Core — текущие отклонения отслеживаются в issue #5.
+`audio_file_io`, `midi_io` (нейтральный кодек Standard MIDI File),
+`undo_redo`, `waveform_cache`. Commons не должен знать о Core — остаточные
+отклонения (`audio_file_io` → `wav_codec`/`audio_buffer`) отслеживаются
+в issue #5. `midi_io` после развязки (issue #28) Core не знает:
+устройства MIDI живут в `adapters/rtmidi` за контрактом `core/midi_api`.
 
 ## Сборка и тесты
 
@@ -102,17 +108,18 @@ Audio-поток не выполняет: аллокаций, блокирующ
 
 Отслеживаются в issues репозитория:
 
-- #2 — PortAudio находится внутри `core/`, нет `audio_backend_api` и `adapters/`;
 - #3 — входного аудиотракта нет: `renderBlock` принимает только выход;
 - #4 — метрика `xruns` не доходит до control plane;
-- #5 — Commons зависит от Core;
+- #5 — Commons частично зависит от Core (`audio_file_io` → `wav_codec`);
 - #6, #7 — не реализованы host extensions CLAP и трансляция out-events;
 - #8 — нет ресемплинга при несовпадении SR устройства и проекта;
 - #9 — `DspScheduler` не умеет менять граф без teardown пула воркеров;
 - #10 — FLAC/OGG/MP3/AIFF — заглушки;
 - #11 — нет `DEBUG_ASSERT_REALTIME_SAFE`;
-- #13 — нет TSan-прогона;
-- #14 — в `core/` остались прямые `echo`.
+- #13 — TSan-прогон есть в CI, но пока не блокирует merge.
+
+Закрыто в этой линии работ: #2 (`audio_backend_api`), #28 (`midi_api`),
+#37 (единый `ring_buffer`), #12/#14 (CI, Logger вместо `echo`).
 
 ## Лицензия
 
