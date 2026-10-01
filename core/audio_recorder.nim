@@ -72,6 +72,14 @@ type
 
     state: Atomic[int32]
 
+    # Последнее НАМЕРЕНИЕ control plane по армированию этого трека (#61).
+    #
+    # Нужен потому, что состояние меняется синхронно (UI обязан видеть
+    # результат сразу), а команды worker'у идут асинхронно. Без этого флага
+    # устаревшая rcArm, обработанная после disarmTrack, возвращала rsArmed
+    # и «воскрешала» уже снятое армирование.
+    armRequested: Atomic[int32]
+
     # Запуск записи может быть отложен до нужного transport sample.
     startRequested: Atomic[int32]
     pendingStartSample: Atomic[int64]
@@ -954,7 +962,12 @@ proc processCommand(
       #
       # Если трек пишет или ещё закрывает старый файл — не армируем:
       # closePending означает, что канал освободится только после flush.
-      if (st == rsIdle or st == rsArmed) and
+      #
+      # `armRequested` отсекает устаревшую команду: если control plane уже
+      # снял армирование (disarmTrack), эта rcArm не должна возвращать
+      # rsArmed (#61).
+      if slot[].armRequested.load(moAcquire) == 1 and
+         (st == rsIdle or st == rsArmed) and
          not wl.fileOpen[idx] and not wl.closePending[idx]:
         clearRing(slot[].ring)
         clearPreRoll(slot[].preRoll)
@@ -984,7 +997,11 @@ proc processCommand(
     let n = int(core.trackCount.load(moAcquire))
     for i in 0 ..< n:
       let slot = addr core.tracks[i]
-      if loadState(slot[].state) == rsArmed and not wl.startPending[i]:
+      # `armRequested` — защита «в глубину»: даже если состояние почему-то
+      # осталось rsArmed, запись не стартует по инерции после disarmTrack (#61).
+      if loadState(slot[].state) == rsArmed and
+         slot[].armRequested.load(moAcquire) == 1 and
+         not wl.startPending[i]:
         armedIdx[armedCount] = i
         inc armedCount
 
@@ -1319,6 +1336,7 @@ proc addTrackRecorder*(
   slot.lastAudioState = rsIdle
 
   storeState(slot[].state, rsIdle)
+  slot[].armRequested.store(0, moRelease)
   slot[].droppedFrames.store(0'i64, moRelease)
   slot[].startRequested.store(0, moRelease)
   slot[].pendingStartSample.store(0'i64, moRelease)
@@ -1373,8 +1391,11 @@ proc armTrack*(rec: var AudioRecorder; trackId: int32) =
   let idx = findSlot(rec.core, trackId)
   if idx >= 0:
     let slot = addr rec.core.tracks[idx]
-    let st = loadState(slot[].state)
+    # Намерение фиксируется ДО синхронной смены состояния: worker, разбирая
+    # очередь, ориентируется на него, а не на порядок прихода команд (#61).
+    slot[].armRequested.store(1, moRelease)
 
+    let st = loadState(slot[].state)
     if st == rsIdle or st == rsArmed:
       storeState(slot[].state, rsArmed)
 
@@ -1395,6 +1416,8 @@ proc disarmTrack*(rec: var AudioRecorder; trackId: int32) =
   let idx = findSlot(rec.core, trackId)
   if idx >= 0:
     let slot = addr rec.core.tracks[idx]
+    slot[].armRequested.store(0, moRelease)
+
     let st = loadState(slot[].state)
 
     if st == rsArmed:
