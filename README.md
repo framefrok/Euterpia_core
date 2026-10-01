@@ -44,7 +44,7 @@ MANIFEST.md  — архитектурный манифест
 
 ```text
 nodes/sdk/            — node_api, node_registry, pipeline_builder, audio_buffers, dsp_units
-nodes/builtin/        — gain, pan, biquad, svf, delay, compressor, oscillator, noise
+nodes/builtin/        — io (input), gain, pan, biquad, svf, delay, compressor, oscillator, noise
 nodes/builtin/csrc/   — C-ядра DSP, собираются в ABI-совместимые дескрипторы
 nodes/clap_host.nim   — трансляция CLAP 1.2 → внутренние контракты
 nodes/plugin_host.nim — загрузка .clap, адаптер плагина как ноды
@@ -108,7 +108,6 @@ Audio-поток не выполняет: аллокаций, блокирующ
 
 Отслеживаются в issues репозитория:
 
-- #3 — входного аудиотракта нет: `renderBlock` принимает только выход;
 - #4 — метрика `xruns` не доходит до control plane;
 - #5 — Commons частично зависит от Core (`audio_file_io` → `wav_codec`);
 - #6, #7 — не реализованы host extensions CLAP и трансляция out-events;
@@ -116,10 +115,28 @@ Audio-поток не выполняет: аллокаций, блокирующ
 - #9 — `DspScheduler` не умеет менять граф без teardown пула воркеров;
 - #10 — FLAC/OGG/MP3/AIFF — заглушки;
 - #11 — нет `DEBUG_ASSERT_REALTIME_SAFE`;
-- #13 — TSan-прогон есть в CI, но пока не блокирует merge.
+- #13 — TSan-прогон есть в CI и блокирует merge; UBSan/ASan ещё нет.
 
-Закрыто в этой линии работ: #2 (`audio_backend_api`), #28 (`midi_api`),
-#37 (единый `ring_buffer`), #12/#14 (CI, Logger вместо `echo`).
+Закрыто в этой линии работ: #2 (`audio_backend_api`), #3 (входной
+аудиотракт), #28 (`midi_api`), #37 (единый `ring_buffer`), #12/#14 (CI,
+Logger вместо `echo`).
+
+## Входной тракт
+
+`AudioEngine.renderBlock(engine, driverIn, inputChannels, driverOut)`
+раскладывает interleaved-вход драйвера в planar-арену и публикует её в
+граф через `NodeProcessContext.input`:
+
+```text
+driverIn (interleaved) ──▶ input arena (planar) ──▶ ctx.input
+                                                    ├─▶ nodes/builtin/io/input.nim
+                                                    └─▶ recorder (TrackInputRouting)
+```
+
+Входной поток не отдаёт ноду-источник: `inputChannels == 0` (устройство
+без входов или offline-рендер) означает «тишина». Метрики `inputPeakL/R`
+считаются по сырому входу до нод, входные xrun'ы адаптер сообщает через
+`engine.noteInputStatus()`.
 
 ## Лицензия
 

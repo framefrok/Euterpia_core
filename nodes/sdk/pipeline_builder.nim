@@ -66,8 +66,14 @@ proc bindMasterProc(p: ptr CompiledPipeline; outBuf: ptr UncheckedArray[float32]
                     frames: int32) {.cdecl, raises: [].} =
   ## Вызывается Audio Engine перед каждым блоком.
   ##
-  ## Привязывает выход мастер-ноды прямо к буферу драйвера (zero-copy):
-  ## драйвер отдаёт interleaved stereo, поэтому stride = frames.
+  ## Привязывает выход мастер-ноды прямо к буферу драйвера (zero-copy).
+  ##
+  ## Раскладка драйверного буфера — INTERLEAVED stereo. Это кодируется
+  ## шагом между каналами: stride = 1 (соседние каналы лежат подряд).
+  ## Раньше здесь стояло stride = frames, а это для аудио-буферов означает
+  ## planar (см. nodes/sdk/audio_buffers.isPlanar: planar при stride >= frames),
+  ## из-за чего мастер писал L в первую половину буфера, а R во вторую —
+  ## то есть отдавал драйверу planar-раскладку вместо interleaved.
   let b = cast[ptr PipelineBinding](p.userData)
   if b.isNil or p.steps.isNil:
     return
@@ -79,7 +85,7 @@ proc bindMasterProc(p: ptr CompiledPipeline; outBuf: ptr UncheckedArray[float32]
   b.masterOut.data = cast[ptr UncheckedArray[float32]](outBuf)
   b.masterOut.channels = 2
   b.masterOut.frames = frames
-  b.masterOut.stride = frames
+  b.masterOut.stride = 1
   step.audio.outputs[0] = addr b.masterOut
 
 proc applyParamProc(p: ptr CompiledPipeline; nodeId: int32; paramId: uint32;

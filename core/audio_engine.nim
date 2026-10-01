@@ -2,10 +2,12 @@
 
 import
   std/math,
+  std/atomics,
   signal_types,
   ipc_bus,
   node_interface,
-  compiled_pipeline
+  compiled_pipeline,
+  audio_recorder
 
 {.pragma: rt, raises: [].}
 
@@ -16,6 +18,11 @@ const
 
   LocalRetireCapacity = 1024
   MaxPendingParams = 256
+
+  ## Верхняя граница входного тракта. Ядро работает с моно/стерео входом;
+  ## всё, что шире, микшируется до первых каналов. Такой же предел
+  ## используют стерео-ноды (maxChannels = 2 в descriptor'ах).
+  MaxInputChannels* = 2
 
   # Должно совпадать с твоим секвенсором/хостом.
   PpqResolution = 960.0
@@ -69,6 +76,29 @@ type
     # Небольшая очередь параметров, пришедших до появления пайплайна.
     pendingParams: array[MaxPendingParams, EngineCommand]
     pendingParamCount: int32
+
+    # =========================================================================
+    # Входной тракт (issue #3)
+    # =========================================================================
+    #
+    # Драйверный вход раскладывается в planar-арену, а не копируется в узлы.
+    # Арена выделяется один раз при создании движка: в audio-потоке не
+    # остаётся ни одной возможности что-то аллоцировать.
+    #
+    # inputBuffer — то, что видит граф через NodeProcessContext.input.
+    # channels == 0 означает «входа нет» (offline или устройство без входов).
+    inputBuffer: AudioBuffer
+    inputArena: ptr UncheckedArray[float32]
+    inputDeviceChannels: int32
+
+    # Диагностика входа: статус-флаги драйвера и счётчик xrun'ов.
+    # Пишется из audio callback через noteInputStatus, читается на control-path.
+    inputStatusFlags: Atomic[uint32]
+    inputXruns: Atomic[uint32]
+
+    # Опциональная маршрутизация входа: input -> TrackInputRouting -> AudioRecorder.
+    # Движок владеет только указателем; временем жизни рекордера владеет хост.
+    recorder: ptr AudioRecorder
 
 
 # ==============================================================================
@@ -265,6 +295,29 @@ proc createAudioEngine*(
   result.localRetireCount = 0
   result.pendingParamCount = 0
 
+  # Входной тракт: арена на MaxInputChannels каналов по MaxBlockSize кадров.
+  # allocShared0 даёт нулевую память, то есть «тишину по умолчанию».
+  result.inputArena = cast[ptr UncheckedArray[float32]](
+    allocShared0(
+      sizeof(float32) * MaxInputChannels * signal_types.MaxBlockSize
+    )
+  )
+
+  if result.inputArena == nil:
+    deallocShared(cast[pointer](result))
+    return nil
+
+  result.inputBuffer = AudioBuffer(
+    data: result.inputArena,
+    channels: 0,
+    frames: 0,
+    stride: int32(signal_types.MaxBlockSize)
+  )
+  result.inputDeviceChannels = 0
+  result.inputStatusFlags.store(0'u32, moRelaxed)
+  result.inputXruns.store(0'u32, moRelaxed)
+  result.recorder = nil
+
   initSharedPool(result.sharedPool)
 
   initMpscQueue(result.toAudio)
@@ -316,6 +369,14 @@ proc destroyAudioEngine*(engine: ptr AudioEngine) =
   # Активный пайплайн.
   if engine.activePipeline != nil:
     destroyPipeline(engine.activePipeline)
+
+  if engine.inputArena != nil:
+    deallocShared(cast[pointer](engine.inputArena))
+    engine.inputArena = nil
+
+  # Рекордер движку не принадлежит: хост обязан вызвать detachRecorder
+  # до уничтожения AudioRecorder.
+  engine.recorder = nil
 
   deallocShared(engine)
 
@@ -557,12 +618,159 @@ proc computeStereoMetrics(
 
 
 # ==============================================================================
+# Входной тракт (issue #3)
+# ==============================================================================
+
+proc clearInputArena(
+  engine: ptr AudioEngine;
+  frames: int32
+) {.rt.} =
+  ## Обнуляет используемую часть арены входа.
+  ##
+  ## Чистим именно «срез» frames на каждом канале, а не первые N float'ов
+  ## подряд: буфер planar, канал ch начинается со смещения ch * MaxBlockSize.
+  let stride = int32(signal_types.MaxBlockSize)
+
+  var ch: int32 = 0
+  while ch < int32(MaxInputChannels):
+    let dst = cast[ptr UncheckedArray[float32]](
+      addr engine.inputArena[int(ch) * int(stride)]
+    )
+    var f: int32 = 0
+    while f < frames:
+      dst[int(f)] = 0.0f
+      inc f
+    inc ch
+
+proc publishInput(
+  engine: ptr AudioEngine;
+  driverIn: ptr UncheckedArray[float32];
+  inputChannels: int32;
+  frames: int32
+) {.rt.} =
+  ## Публикация входного блока в граф.
+  ##
+  ## Без входа (driverIn == nil, inputChannels <= 0 или offline) арена
+  ## обнуляется: ноды получают тишину, а не мусор прошлого блока.
+  ## Указатель ctx.input всегда валиден; «входа нет» выражается channels == 0.
+  clearInputArena(engine, frames)
+
+  let stride = int32(signal_types.MaxBlockSize)
+
+  var chans = inputChannels
+  if chans < 0:
+    chans = 0
+  if chans > int32(MaxInputChannels):
+    chans = int32(MaxInputChannels)
+
+  if not driverIn.isNil and chans > 0:
+    var ch: int32 = 0
+    while ch < chans:
+      let dst = cast[ptr UncheckedArray[float32]](
+        addr engine.inputArena[int(ch) * int(stride)]
+      )
+      var f: int32 = 0
+      while f < frames:
+        dst[int(f)] = driverIn[int(f) * int(chans) + int(ch)]
+        inc f
+      inc ch
+    engine.inputDeviceChannels = chans
+  else:
+    chans = 0
+    engine.inputDeviceChannels = 0
+
+  engine.inputBuffer.data = engine.inputArena
+  engine.inputBuffer.channels = chans
+  engine.inputBuffer.frames = frames
+  engine.inputBuffer.stride = stride
+
+proc computeInputMetrics(
+  buf: AudioBuffer;
+  frames: int32;
+  m: var EngineMetric
+) {.rt.} =
+  ## Пики входа — по сырому драйверному буферу, до нод.
+  m.inputPeakL = 0.0f
+  m.inputPeakR = 0.0f
+
+  if buf.data.isNil or buf.channels <= 0 or frames <= 0:
+    return
+
+  let stride = if buf.stride > 0: buf.stride else: frames
+
+  let c0 = cast[ptr UncheckedArray[float32]](addr buf.data[0])
+  var f: int32 = 0
+  while f < frames:
+    let a = c0[int(f)]
+    let aa = if a < 0.0f: -a else: a
+    if aa > m.inputPeakL:
+      m.inputPeakL = aa
+    inc f
+
+  if buf.channels > 1:
+    let c1 = cast[ptr UncheckedArray[float32]](addr buf.data[int(stride)])
+    f = 0
+    while f < frames:
+      let a = c1[int(f)]
+      let aa = if a < 0.0f: -a else: a
+      if aa > m.inputPeakR:
+        m.inputPeakR = aa
+      inc f
+
+# ==============================================================================
+# Control-path входного тракта
+# ==============================================================================
+
+proc setInputChannels*(engine: ptr AudioEngine; channels: int32) =
+  ## Сколько входных каналов у открытого устройства (0 — входа нет).
+  ## Control-path: вызывается хостом при open/close потока.
+  if engine == nil:
+    return
+  engine.inputDeviceChannels =
+    if channels < 0: 0
+    elif channels > int32(MaxInputChannels): int32(MaxInputChannels)
+    else: channels
+
+proc noteInputStatus*(engine: ptr AudioEngine; statusFlags: uint32) {.cdecl.} =
+  ## Realtime-safe: адаптер сообщает статус драйвера (paInputOverflow и др.).
+  ## Только атомарные операции — логирование запрещено.
+  if engine == nil or statusFlags == 0'u32:
+    return
+  discard engine.inputStatusFlags.fetchAdd(statusFlags, moRelaxed)
+  discard engine.inputXruns.fetchAdd(1'u32, moRelaxed)
+
+proc inputXrunCount*(engine: ptr AudioEngine): uint32 =
+  if engine == nil:
+    return 0
+  engine.inputXruns.load(moRelaxed)
+
+proc attachRecorder*(engine: ptr AudioEngine; rec: ptr AudioRecorder) =
+  ## Маршрутизация входного тракта в рекордер (issue #3).
+  ##
+  ## Движок вызывает rec.recordBlock(driverIn, transportFrame) каждый блок.
+  ## Временем жизни рекордера владеет хост: перед его уничтожением обязателен
+  ## detachRecorder.
+  if engine == nil:
+    return
+  engine.recorder = rec
+
+proc detachRecorder*(engine: ptr AudioEngine) =
+  if engine == nil:
+    return
+  engine.recorder = nil
+
+proc hasRecorder*(engine: ptr AudioEngine): bool {.inline.} =
+  engine != nil and not engine.recorder.isNil
+
+# ==============================================================================
 # Main block renderer
 # ==============================================================================
 
 proc renderBlockInternal(
   engine: ptr AudioEngine;
+  driverIn: ptr UncheckedArray[float32];
   driverOut: ptr UncheckedArray[float32];
+  inputChannels: int32;
   offline: bool;
   lastBlock: bool;
   forceAdvance: bool
@@ -584,12 +792,26 @@ proc renderBlockInternal(
 
   let transportActive = engine.transport.playing or forceAdvance
 
+  # Входной тракт: раскладываем драйверный вход в арену ДО рендера графа,
+  # чтобы input-ноды увидели актуальный блок. Offline-путь передаёт driverIn
+  # == nil, поэтому вход = тишина (pfOffline при этом сохраняется).
+  publishInput(engine, driverIn, inputChannels, frames)
+
+  # Маршрутизация входа в рекордер. Только realtime-путь и только при
+  # реально подключённом входе.
+  if not offline and not engine.recorder.isNil and not driverIn.isNil and
+      inputChannels > 0:
+    engine.recorder[].recordBlock(driverIn, engine.transport.frame)
+
   # Всегда очищаем мастер-выход.
   clearStereoBuffer(driverOut, frames)
 
   if transportActive and engine.activePipeline != nil:
     var ctx: NodeProcessContext
     setupContext(engine, ctx, offline, lastBlock, transportActive)
+    # Публикация входа в граф (issue #3).
+    ctx.input = addr engine.inputBuffer
+    ctx.inputChannels = engine.inputBuffer.channels
     processPipeline(engine, ctx, driverOut, frames)
 
   if engine.firstBlockPending and transportActive:
@@ -619,6 +841,8 @@ proc renderBlockInternal(
     metric.graphVersion = 0
 
   computeStereoMetrics(driverOut, frames, metric)
+  computeInputMetrics(engine.inputBuffer, frames, metric)
+  metric.inputXruns = engine.inputXruns.load(moRelaxed)
 
   if not engine.fromAudioMetrics.push(metric):
     inc engine.droppedMetrics
@@ -636,11 +860,32 @@ proc renderBlockInternal(
 
 proc renderBlock*(
   engine: ptr AudioEngine;
+  driverIn: ptr UncheckedArray[float32];
+  inputChannels: int32;
   driverOut: ptr UncheckedArray[float32]
 ) {.cdecl, rt.} =
+  ## Realtime-вход: драйвер отдаёт interleaved input и output одного блока.
   renderBlockInternal(
     engine,
+    driverIn,
     driverOut,
+    inputChannels,
+    offline = false,
+    lastBlock = false,
+    forceAdvance = false
+  )
+
+
+proc renderBlock*(
+  engine: ptr AudioEngine;
+  driverOut: ptr UncheckedArray[float32]
+) {.cdecl, rt.} =
+  ## Совместимый путь без входа: вход = тишина (устройство без входов).
+  renderBlockInternal(
+    engine,
+    nil,
+    driverOut,
+    0'i32,
     offline = false,
     lastBlock = false,
     forceAdvance = false
@@ -684,7 +929,9 @@ proc renderOffline*(
 
       renderBlockInternal(
         engine,
+        nil,
         dst,
+        0'i32,
         offline = true,
         lastBlock = isLast,
         forceAdvance = true
@@ -696,7 +943,9 @@ proc renderOffline*(
       # Финальный неполный блок.
       renderBlockInternal(
         engine,
+        nil,
         scratch,
+        0'i32,
         offline = true,
         lastBlock = true,
         forceAdvance = true

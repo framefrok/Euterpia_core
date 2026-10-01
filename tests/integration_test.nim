@@ -478,6 +478,22 @@ proc runCoreIntegrationTest() =
   doAssert energy == 0.0f, "silent render must be zero"
   echo "   Silent render OK"
 
+  # Входной тракт (issue #3): блок с драйверным входом на пустом графе
+  # обязан остаться тишиной и не уронить движок.
+  engine.setInputChannels(2)
+  var inBuf2: array[256, float32]
+  for i in 0 ..< 256:
+    inBuf2[i] = sin(2.0f * PI * float32(i) / 48.0f) * 0.25f
+  engine.renderBlock(
+    cast[ptr UncheckedArray[float32]](addr inBuf2[0]),
+    2'i32,
+    cast[ptr UncheckedArray[float32]](addr outBuf2[0])
+  )
+  energy = 0.0f
+  for i in 0 ..< 256: energy += abs(outBuf2[i])
+  doAssert energy == 0.0f, "graph-less input render must be silent"
+  echo "   Input-path render OK"
+
   doAssert engine.postPlay(), "postPlay failed"
   engine.renderBlock(cast[ptr UncheckedArray[float32]](addr outBuf2[0]))
   doAssert engine.currentFrame() == 128, "transport must advance after play"
