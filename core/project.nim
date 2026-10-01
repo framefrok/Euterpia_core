@@ -67,7 +67,7 @@ type
 
   NodeFormat* = object
     id*: int
-    nodeType*: string         # ID для NodeFactory (например, "clap.com.my synth")
+    nodeType*: string         # ID для NodeFactory (например, "fx.gain")
     name*: string
     audioInCount*: int
     audioOutCount*: int

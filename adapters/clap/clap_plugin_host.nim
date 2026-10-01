@@ -1,5 +1,5 @@
 # ============================================================
-# EUTERPIA CLAP Host — plugin_host.nim
+# EUTERPIA CLAP Host — adapters/clap/clap_plugin_host.nim
 # ============================================================
 #
 # Architecture:
@@ -22,7 +22,7 @@
 # ============================================================
 
 import std/dynlib
-import ../core/node_interface
+import ../../core/node_interface
 
 # ============================================================
 # CLAP Constants
@@ -557,13 +557,11 @@ proc loadPlugin*(host: var PluginHost; path: string): int32 =
   ## Returns plugin-slot index or -1 on failure.
   let lib = loadLib(path)
   if lib == nil:
-    echo "[ClapHost] failed to load library: ", path
     return -1
 
   # clap_entry is a **global struct**, not a function.
   let symAddr = lib.symAddr(CLAP_PLUGIN_ENTRY_SYMBOL)
   if symAddr == nil:
-    echo "[ClapHost] symbol '", CLAP_PLUGIN_ENTRY_SYMBOL, "' not found in: ", path
     unloadLib(lib)
     return -1
 
@@ -571,12 +569,12 @@ proc loadPlugin*(host: var PluginHost; path: string): int32 =
 
   # entry.init() receives the plugin path (C string), NOT the host API.
   if not entry.init(cstring(path)):
-    echo "[ClapHost] entry.init() failed for: ", path
     unloadLib(lib)
     return -1
 
-  let count = entry.getPluginCount()
-  echo "[ClapHost] loaded '", path, "' — ", count, " plugin(s)"
+  # Число плагинов в модуле отдаётся наружу через plugin_api (pluginCount),
+  # а не логируется здесь: адаптер не пишет в stdout (§6, §43).
+  discard entry.getPluginCount()
 
   host.plugins.add(PluginInstance(
     library:      lib,
@@ -631,7 +629,6 @@ proc instantiatePlugin*(host: var PluginHost;
   # Теперь inst (ptr PluginInstance) корректно передается в queryExtensions
   inst.queryExtensions()
 
-  echo "[ClapHost] instantiated: ", desc.name
   result = true
 
 proc activatePlugin*(host: var PluginHost;
