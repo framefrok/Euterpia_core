@@ -13,6 +13,7 @@
 #   в момент фактического старта записи.
 
 import std/[os, times, atomics, locks]
+import rt_guard
 
 const
   MaxRecordTracks* = 32
@@ -1534,116 +1535,120 @@ proc recordBlock*(
   ## - копировать сэмплы в заранее выделенные кольца;
   ## - переводить состояния трека по заранее запрошенным командам.
 
-  if rec.core.isNil or inputBuffer.isNil:
-    return
+  # Realtime-guard (issue #11): recordBlock — RT-путь записи. Копирование
+  # в кольцо обязано остаться без аллокаций; guard ловит регрессию,
+  # которая иначе проявилась бы только как щелчок на записи.
+  rtScope():
+    if rec.core.isNil or inputBuffer.isNil:
+      return
 
-  let core = rec.core
-  let blockSize = int(core.blockSize)
-  if blockSize <= 0:
-    return
+    let core = rec.core
+    let blockSize = int(core.blockSize)
+    if blockSize <= 0:
+      return
 
-  let stride = max(1, int(core.inputChannels))
-  let count = int(core.trackCount.load(moAcquire))
+    let stride = max(1, int(core.inputChannels))
+    let count = int(core.trackCount.load(moAcquire))
 
-  for i in 0 ..< count:
-    let slot = addr core.tracks[i]
+    for i in 0 ..< count:
+      let slot = addr core.tracks[i]
 
-    if slot.blockBuffer.isNil:
-      continue
+      if slot.blockBuffer.isNil:
+        continue
 
-    var st = loadState(slot[].state)
-    let ch = max(1, int(slot.routing.channels))
+      var st = loadState(slot[].state)
+      let ch = max(1, int(slot.routing.channels))
 
-    # Если запрошен старт и текущий блок пересекает или превышает целевую точку,
-    # выполняем сэмпл-точный старт.
-    if st == rsArmed and slot[].startRequested.load(moAcquire) != 0:
-      let startAt = slot[].pendingStartSample.load(moRelaxed)
-      if currentSample + int64(blockSize) > startAt:
-        slot[].startRequested.store(0, moRelease)
+      # Если запрошен старт и текущий блок пересекает или превышает целевую точку,
+      # выполняем сэмпл-точный старт.
+      if st == rsArmed and slot[].startRequested.load(moAcquire) != 0:
+        let startAt = slot[].pendingStartSample.load(moRelaxed)
+        if currentSample + int64(blockSize) > startAt:
+          slot[].startRequested.store(0, moRelease)
 
-        # Сколько сэмплов блока реально «до старта».
-        var beforeStart = int64(blockSize)
-        if startAt > currentSample:
-          beforeStart = startAt - currentSample
-        else:
-          beforeStart = 0
+          # Сколько сэмплов блока реально «до старта».
+          var beforeStart = int64(blockSize)
+          if startAt > currentSample:
+            beforeStart = startAt - currentSample
+          else:
+            beforeStart = 0
 
-        let beforeSamples = int(beforeStart) * ch
-        let afterSamples  = (blockSize - int(beforeStart)) * ch
+          let beforeSamples = int(beforeStart) * ch
+          let afterSamples  = (blockSize - int(beforeStart)) * ch
 
-        if beforeSamples > 0:
-          let n = fillBlockBuffer(slot, inputBuffer, stride, int(beforeStart))
-          if n > 0:
-            pushPreRoll(
-              slot[].preRoll,
-              cast[ptr UncheckedArray[float32]](addr slot.blockBuffer[0]),
-              n
+          if beforeSamples > 0:
+            let n = fillBlockBuffer(slot, inputBuffer, stride, int(beforeStart))
+            if n > 0:
+              pushPreRoll(
+                slot[].preRoll,
+                cast[ptr UncheckedArray[float32]](addr slot.blockBuffer[0]),
+                n
+              )
+
+          var droppedPreRoll = 0
+          let flushedSamples = flushPreRoll(slot[].preRoll, slot[].ring, ch, droppedPreRoll)
+
+          if droppedPreRoll > 0:
+            discard slot[].droppedFrames.fetchAdd(int64(droppedPreRoll div ch), moRelaxed)
+
+          let flushedFrames = int64(flushedSamples) div int64(ch)
+
+          var actualStart = startAt - flushedFrames
+          if actualStart < 0:
+            actualStart = 0
+
+          slot[].actualStartSample.store(actualStart, moRelease)
+          slot[].startSampleValid.store(1, moRelease)
+
+          storeState(slot[].state, rsRecording)
+          st = rsRecording
+          slot[].lastAudioState = rsRecording
+
+          if afterSamples > 0:
+            # Заполняем blockBuffer для второй половины блока
+            let n = fillBlockBufferAt(
+              slot,
+              inputBuffer,
+              stride,
+              int(beforeStart),
+              blockSize
             )
+            if n > 0:
+              let written = writeRing(
+                slot[].ring,
+                cast[ptr UncheckedArray[float32]](addr slot.blockBuffer[0]),
+                n
+              )
+              if written < n:
+                discard slot[].droppedFrames.fetchAdd(int64((n - written) div ch), moRelaxed)
 
-        var droppedPreRoll = 0
-        let flushedSamples = flushPreRoll(slot[].preRoll, slot[].ring, ch, droppedPreRoll)
+          continue   # этот блок уже полностью обработан
 
-        if droppedPreRoll > 0:
-          discard slot[].droppedFrames.fetchAdd(int64(droppedPreRoll div ch), moRelaxed)
+      # Реакция на смену состояния.
+      if st != slot[].lastAudioState:
+        if st == rsArmed:
+          clearPreRoll(slot[].preRoll)
+        slot[].lastAudioState = st
 
-        let flushedFrames = int64(flushedSamples) div int64(ch)
-
-        var actualStart = startAt - flushedFrames
-        if actualStart < 0:
-          actualStart = 0
-
-        slot[].actualStartSample.store(actualStart, moRelease)
-        slot[].startSampleValid.store(1, moRelease)
-
-        storeState(slot[].state, rsRecording)
-        st = rsRecording
-        slot[].lastAudioState = rsRecording
-
-        if afterSamples > 0:
-          # Заполняем blockBuffer для второй половины блока
-          let n = fillBlockBufferAt(
-            slot,
-            inputBuffer,
-            stride,
-            int(beforeStart),
-            blockSize
-          )
-          if n > 0:
-            let written = writeRing(
-              slot[].ring,
-              cast[ptr UncheckedArray[float32]](addr slot.blockBuffer[0]),
-              n
-            )
-            if written < n:
-              discard slot[].droppedFrames.fetchAdd(int64((n - written) div ch), moRelaxed)
-
-        continue   # этот блок уже полностью обработан
-
-    # Реакция на смену состояния.
-    if st != slot[].lastAudioState:
+      # Собственно приём аудио.
       if st == rsArmed:
-        clearPreRoll(slot[].preRoll)
-      slot[].lastAudioState = st
+        let samples = fillBlockBuffer(slot, inputBuffer, stride, blockSize)
+        if samples > 0:
+          pushPreRoll(
+            slot[].preRoll,
+            cast[ptr UncheckedArray[float32]](addr slot.blockBuffer[0]),
+            samples
+          )
 
-    # Собственно приём аудио.
-    if st == rsArmed:
-      let samples = fillBlockBuffer(slot, inputBuffer, stride, blockSize)
-      if samples > 0:
-        pushPreRoll(
-          slot[].preRoll,
-          cast[ptr UncheckedArray[float32]](addr slot.blockBuffer[0]),
-          samples
-        )
-
-    elif st == rsRecording:
-      let samples = fillBlockBuffer(slot, inputBuffer, stride, blockSize)
-      if samples > 0:
-        let written = writeRing(
-          slot[].ring,
-          cast[ptr UncheckedArray[float32]](addr slot.blockBuffer[0]),
-          samples
-        )
-        if written < samples:
-          discard slot[].droppedFrames.fetchAdd(int64((samples - written) div ch), moRelaxed)
+      elif st == rsRecording:
+        let samples = fillBlockBuffer(slot, inputBuffer, stride, blockSize)
+        if samples > 0:
+          let written = writeRing(
+            slot[].ring,
+            cast[ptr UncheckedArray[float32]](addr slot.blockBuffer[0]),
+            samples
+          )
+          if written < samples:
+            discard slot[].droppedFrames.fetchAdd(int64((samples - written) div ch), moRelaxed)
 
     # rsIdle и rsPaused не принимают новые сэмплы.
