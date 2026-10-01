@@ -92,3 +92,28 @@ task miniaudioSmoke, "Сборка TU miniaudio и smoke-прогон адапт
   buildLog "miniaudio smoke"
   exec "nim c -r --hints:off --out:build/miniaudio_smoke tests/miniaudio_smoke.nim"
 
+# ---------------------------------------------------------------------------
+# Санитайзеры (issue #13). Прогоняют тот же unit-набор, что и CI-джобы
+# ubsan/asan, — цель для локального воспроизведения падений.
+#
+# ВАЖНО: у каждого санитайзера СВОЙ --nimcache. При общем кэше объектные
+# файлы перемешиваются, и линковка падает на символах «чужого» санитайзера
+# (__asan_report_store4 в UBSan-прогоне и наоборот). По этой же причине
+# прогоны нельзя запускать параллельно в одном каталоге сборки.
+# ---------------------------------------------------------------------------
+task ubsan, "Unit-набор под UndefinedBehaviorSanitizer (#13)":
+  mkDir buildDir
+  buildLog "unit tests under UBSan"
+  exec "nim c -r --hints:off --nimcache:build/nc_ubsan " &
+    "--passC:-fsanitize=undefined --passC:-fno-sanitize-recover=all " &
+    "--passL:-fsanitize=undefined --out:build/unit_ubsan tests/unit/all_tests.nim"
+
+task asan, "Unit-набор под AddressSanitizer (#13)":
+  mkDir buildDir
+  buildLog "unit tests under ASan"
+  # detect_leaks=0: ядро намеренно держит shared-арены (memory_pool,
+  # audio-арены пайплайна) на весь срок жизни процесса.
+  exec "ASAN_OPTIONS=detect_leaks=0 nim c -r --hints:off --nimcache:build/nc_asan " &
+    "--passC:-fsanitize=address --passC:-fno-omit-frame-pointer " &
+    "--passL:-fsanitize=address --out:build/unit_asan tests/unit/all_tests.nim"
+

@@ -32,3 +32,11 @@ import test_compressor
 import test_delay
 import test_graph_compiler
 import test_recorder
+import test_sequencer
+import test_project
+import test_param_registry
+import test_memory_pool
+import test_logger
+import test_undo_redo
+import test_waveform_cache
+import test_audio_file_io

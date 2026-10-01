@@ -145,3 +145,59 @@ jobs:
             --passL:-fsanitize=thread \
             --out:build/euterpia_unit_tests_tsan \
             tests/unit/all_tests.nim
+
+  # ---------------------------------------------------------------------------
+  # UBSan: неопределённое поведение на том же unit-наборе (issue #13).
+  #
+  # Прогон вынесен в nimble-цель `nimble ubsan`, чтобы у локального
+  # воспроизведения и CI был один и тот же запуск. `-fno-sanitize-recover=all`
+  # превращает любое срабатывание в ненулевой код возврата — иначе UBSan
+  # печатает предупреждение и продолжает, и job остаётся зелёным.
+  #
+  # ВАЖНО: у каждого санитайзера свой `--nimcache`. При общем кэше объектные
+  # файлы перемешиваются, и линковка падает на символах «чужого» санитайзера
+  # (__asan_report_store4 в UBSan-прогоне и наоборот). Санитайзер-джобы не
+  # должны делить кэш ни с чем и не должны запускаться параллельно.
+  #
+  # Про IFUNC (target_clones) в C-ядрах: он отключается только по
+  # __SANITIZE_THREAD__, а у GCC нет макроса для UBSan, поэтому здесь
+  # SIMD-диспетчеризация остаётся включённой. Прогон зелёный; если UBSan
+  # начнёт падать на резолверах — добавить явный -DEUT_NO_SIMD_DISPATCH.
+  # ---------------------------------------------------------------------------
+  ubsan:
+    name: undefined behavior sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.12'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: nimble ubsan
+        run: nimble ubsan
+
+  # ---------------------------------------------------------------------------
+  # ASan: выход за границы и use-after-free (issue #13).
+  #
+  # `nimble asan` выставляет detect_leaks=0 намеренно: ядро держит
+  # shared-арены (memory_pool, audio-арены пайплайна) на весь срок жизни
+  # процесса, и LeakSanitizer считал бы их утечками. Проверяются именно
+  # переполнения/висячие ссылки — ASan дал доказательство дефекта #64
+  # (OOB-чтение gainCurve в компрессоре).
+  # ---------------------------------------------------------------------------
+  asan:
+    name: address sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.12'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: nimble asan
+        run: nimble asan
+

@@ -15,14 +15,14 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Область | Состояние |
 |---|---|
 | Ядро: runtime, граф, планировщик, память, IPC | ✅ `nimble test` (unit + integration) |
-| Realtime-дисциплина | ✅ TSan-джоб блокирует merge; UBSan/ASan прогоны чистые (#13) |
+| Realtime-дисциплина | ✅ TSan-джоб (блокирует merge), UBSan и ASan-джобы в CI (#13) |
 | Аудио-бэкенды | ✅ PortAudio (`dynlib`) **и** miniaudio 0.11.25 (вендорен, #31) |
 | MIDI | ✅ `midi_api` + RtMidi-адаптер, SMF-кодек в Commons |
 | Входной тракт и запись | ✅ вход → ноды/рекордер, RT-кольцо → worker → WAV |
 | Хостинг плагинов | 🟡 `plugin_api` + CLAP 1.2 (host- и plugin-side расширения) + EUT; нет mock-плагина и состояния в проекте (#53) |
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
-| Тесты | 🟡 150 unit-проверок + интеграционный набор; часть Core/Commons без тестов (#57) |
+| Тесты | ✅ 231 unit-проверка + интеграционный набор; Core/Commons покрыты (#57) |
 | CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты |
 
 ## Возможности
@@ -143,14 +143,15 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
 - [x] #64 компрессор: кривая gain покрывает весь блок, убран OOB (PR #65)
 - [x] #43 инвалидация кэша C-ядер при правке `eut_dsp.h` (хеш заголовка в имени объекта)
 - [x] #12 CI-матрица, LICENSE, шаблоны; #14 `Logger` вместо `echo` в Core
+- [x] #57 unit-тесты на непокрытые модули (`sequencer`, `project`,
+      `param_registry`, `memory_pool`, `logger`, `undo_redo`,
+      `waveform_cache`, `audio_file_io`, `transport`)
+- [x] #13 UBSan/ASan-цели: `nimble ubsan` / `nimble asan` + одноимённые CI-джобы
 - [x] TSan-джоб в CI и архитектурные guards (`core` не знает про форматы)
 
 ### Ближайшие шаги
 
 - [ ] #53 mock-плагин отдельным бинарём + состояние плагина в проекте (остаток #6)
-- [ ] #57 unit-тесты на непокрытые модули (`transport`, `sequencer`, `project`,
-      `param_registry`, `memory_pool`, `undo_redo`, `waveform_cache`, `audio_file_io`)
-- [ ] #13 UBSan/ASan-цели в CI (прогоны уже чистые — приведены в issue)
 - [ ] #4 метрика `xruns` доходит до control-plane
 
 ### Экосистема и бэкенды
@@ -221,6 +222,8 @@ nimble unit            # только unit-тесты DSP и контракто�
 nimble integration     # интеграционный тест ядра
 nimble buildRelease    # release-сборка с LTO
 nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адаптера (#31)
+nimble ubsan           # unit-набор под UndefinedBehaviorSanitizer (#13)
+nimble asan            # unit-набор под AddressSanitizer (#13)
 ```
 
 `nimble miniaudioSmoke` — единственная проверка, которая реально собирает
@@ -276,7 +279,6 @@ Audio-поток не выполняет: аллокаций, блокирующ
 - #9 — `DspScheduler` не умеет менять граф без teardown пула воркеров;
 - #10 — FLAC/OGG/MP3/AIFF — заглушки;
 - #11 — нет `DEBUG_ASSERT_REALTIME_SAFE`;
-- #13 — TSan-прогон есть в CI и блокирует merge; UBSan/ASan ещё нет;
 - у miniaudio 0.11.25 нет публичного статуса драйвера/xrun-счётчика:
   `xrunCount` считается адаптером как вызов рендера, не уложившийся в
   длительность блока, плюс `interruption_began` (issue #31);
@@ -286,7 +288,8 @@ Audio-поток не выполняет: аллокаций, блокирующ
 Закрыто в этой линии работ: #2 (`audio_backend_api`), #3 (входной
 аудиотракт), #28 (`midi_api`), #29 (`plugin_api`: CLAP/EUT за единым
 контрактом), #31 (miniaudio-бэкенд), #37 (единый `ring_buffer`),
-#12/#14 (CI, Logger вместо `echo`).
+#12/#14 (CI, Logger вместо `echo`), #57 (тесты непокрытых модулей
+Core/Commons), #13 (UBSan/ASan-цели и CI-джобы).
 
 ## Входной тракт
 
