@@ -23,6 +23,7 @@ switch("path", "adapters/portaudio")
 switch("path", "adapters/clap")
 switch("path", "adapters/eut")
 switch("path", "adapters/reference")
+switch("path", "adapters/miniaudio")
 switch("path", "tests")
 
 # ----------------------------------------------------------------------------
@@ -64,6 +65,10 @@ switch("mm", "orc")
 # ----------------------------------------------------------------------------
 switch("passC", "-fno-strict-aliasing")
 switch("passC", "-fno-math-errno")
+
+# miniaudio (adapters/miniaudio, issue #31): путь к вендоренному заголовку.
+# Нужен, когда TU шима компилируется не из своего каталога.
+switch("passC", "-Iadapters/miniaudio")
 
 when defined(release) or defined(danger):
   switch("passC", "-O3")
