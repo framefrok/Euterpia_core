@@ -39,6 +39,7 @@ MANIFEST.md  — архитектурный манифест
 | `wav_codec` | WAV read/write |
 | `audio_backend_api` | контракт аудио-бэкенда (PortAudio — в `adapters/`) |
 | `midi_api`, `midi_events` | контракт MIDI-бэкенда и MIDI → `RealtimeEvent` (issue #28) |
+| `plugin_api` | контракт хостинга плагинов: CLAP/EUT/… — в `adapters/` (issue #29) |
 
 ### `nodes/` — реализации возможностей
 
@@ -46,10 +47,20 @@ MANIFEST.md  — архитектурный манифест
 nodes/sdk/            — node_api, node_registry, pipeline_builder, audio_buffers, dsp_units
 nodes/builtin/        — io (input), gain, pan, biquad, svf, delay, compressor, oscillator, noise
 nodes/builtin/csrc/   — C-ядра DSP, собираются в ABI-совместимые дескрипторы
-nodes/clap_host.nim   — трансляция CLAP 1.2 → внутренние контракты
-nodes/plugin_host.nim — загрузка .clap, адаптер плагина как ноды
-nodes/eut_plugin.nim  — собственный ABI EUT-плагинов
 nodes/metronome.nim, nodes/mixer_console.nim — прикладные узлы
+```
+
+Хостинг плагинов живёт НЕ здесь: форматы (CLAP, EUT, в будущем LV2/VST3)
+подключаются за контрактом `core/plugin_api` из `adapters/` (issue #29).
+
+### `adapters/` — реализации контрактов Core
+
+```text
+adapters/portaudio/ — реализация audio_backend_api (libportaudio, dynlib)
+adapters/rtmidi/    — реализация midi_api (librtmidi, dynlib)
+adapters/clap/      — CLAP 1.2: ABI, хостинг за plugin_api
+adapters/eut/       — собственный ABI EUT-плагинов за plugin_api
+adapters/reference/ — эталонный адаптер plugin_api (в памяти, для тестов)
 ```
 
 Внешние плагины: **только CLAP** (`.clap`). Формат VST не поддерживается
@@ -110,7 +121,9 @@ Audio-поток не выполняет: аллокаций, блокирующ
 
 - #4 — метрика `xruns` не доходит до control plane;
 - #5 — Commons частично зависит от Core (`audio_file_io` → `wav_codec`);
-- #6, #7 — не реализованы host extensions CLAP и трансляция out-events;
+- #6, #7 — в CLAP-адаптере не реализованы host extensions (params/state/
+  gui/thread-check) и трансляция out-events: базовый контракт `plugin_api`
+  заполнен, расширения — отдельная задача;
 - #8 — нет ресемплинга при несовпадении SR устройства и проекта;
 - #9 — `DspScheduler` не умеет менять граф без teardown пула воркеров;
 - #10 — FLAC/OGG/MP3/AIFF — заглушки;
@@ -118,8 +131,9 @@ Audio-поток не выполняет: аллокаций, блокирующ
 - #13 — TSan-прогон есть в CI и блокирует merge; UBSan/ASan ещё нет.
 
 Закрыто в этой линии работ: #2 (`audio_backend_api`), #3 (входной
-аудиотракт), #28 (`midi_api`), #37 (единый `ring_buffer`), #12/#14 (CI,
-Logger вместо `echo`).
+аудиотракт), #28 (`midi_api`), #29 (`plugin_api`: CLAP/EUT за единым
+контрактом), #37 (единый `ring_buffer`), #12/#14 (CI, Logger вместо
+`echo`).
 
 ## Входной тракт
 
