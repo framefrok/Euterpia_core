@@ -126,6 +126,8 @@ type
 
     render: AudioRenderProc
     engineCtx: pointer
+    ## Приёмник xrun'ов для движка (issue #4). Задаётся хостом в конфиге.
+    reportStatus: AudioStatusProc
     log: Logger
 
     requestedInputChannels: int32
@@ -172,6 +174,9 @@ proc maTrampoline(
         inc i
     return
 
+  let xrunsBefore = if mb.dev.isNil: 0'u64 else:
+    uint64(eut_ma_device_xruns(mb.dev))
+
   r(
     mb.engineCtx,
     driverIn,
@@ -180,6 +185,24 @@ proc maTrampoline(
     inputChannels.int32,
     outputChannels.int32
   )
+
+  # Отчёт о xrun'ах движку (issue #4). C-шим инкрементирует счётчик либо
+  # синхронно после возврата из render (блок не уложился в свой бюджет),
+  # либо из notification-callback (interruption_began) — во втором случае
+  # дельту «подберёт» следующий блок. Всё на атомиках: логирования нет.
+  if not mb.reportStatus.isNil and not mb.dev.isNil:
+    let xrunsAfter = uint64(eut_ma_device_xruns(mb.dev))
+    if xrunsAfter > xrunsBefore:
+      let lastFlag = int(eut_ma_device_last_flag(mb.dev))
+      # Шим отдаёт ОРДИНАЛ AudioStreamFlag (0..3), а контракт приёмника —
+      # битмаск, поэтому переводим в бит.
+      let flags =
+        if lastFlag >= 0 and lastFlag < 32: 1'u32 shl lastFlag
+        else: statusFlagMask(asfOutputUnderflow)
+      var pending = xrunsAfter - xrunsBefore
+      while pending > 0:
+        mb.reportStatus(mb.engineCtx, flags)
+        dec pending
 
 # ==============================================================================
 # Таблица методов (control-path)
@@ -247,6 +270,7 @@ proc maOpen(
 
   mb.render = render
   mb.engineCtx = engineCtx
+  mb.reportStatus = cfg.reportStatus
   mb.requestedSampleRate = cfg.sampleRate
   mb.requestedInputChannels = cfg.inputChannels
   mb.requestedOutputChannels = cfg.outputChannels
@@ -312,6 +336,7 @@ proc maClose(api: ptr AudioBackendApi) {.cdecl, raises: [], gcsafe.} =
     eut_ma_device_close(mb.dev)
     mb.dev = nil
   mb.opened = false
+  mb.reportStatus = nil
 
 proc maIsRunning(api: ptr AudioBackendApi): bool
     {.cdecl, raises: [], gcsafe.} =

@@ -118,6 +118,8 @@ type
     stream: PaStream
     render: AudioRenderProc
     engineCtx: pointer
+    ## Приёмник xrun'ов для движка (issue #4). Задаётся хостом в конфиге.
+    reportStatus: AudioStatusProc
 
     log: Logger
 
@@ -168,6 +170,11 @@ proc paCallback(
   if (statusFlags and paStatusMask) != culong(0):
     discard pb.xruns.fetchAdd(1'u64, moRelaxed)
     discard pb.lastStatusFlags.fetchOr(uint64(statusFlags), moRelaxed)
+    # Отчёт движку (issue #4). Нативные флаги PortAudio (1,2,4,8) совпадают
+    # с битмаском AudioStreamFlag один в один, поэтому маскируем и передаём
+    # как есть. Атомики в движке — RT-safe, логирования здесь нет.
+    if not pb.reportStatus.isNil:
+      pb.reportStatus(pb.engineCtx, uint32(statusFlags and paStatusMask))
 
   let render = pb.render
   if render.isNil:
@@ -294,6 +301,7 @@ proc paOpen(
 
   pb.render = render
   pb.engineCtx = engineCtx
+  pb.reportStatus = cfg.reportStatus
   pb.sampleRate = cfg.sampleRate
   pb.requestedInputChannels = cfg.inputChannels
   pb.requestedOutputChannels = cfg.outputChannels
@@ -379,6 +387,7 @@ proc paClose(api: ptr AudioBackendApi) {.cdecl, raises: [], gcsafe.} =
   pb.opened = false
   pb.render = nil
   pb.engineCtx = nil
+  pb.reportStatus = nil
   pb.requestedInputChannels = 0
   pb.requestedOutputChannels = 0
 

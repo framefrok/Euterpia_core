@@ -22,7 +22,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
-| Тесты | ✅ 243 unit-проверки + интеграционный набор; Core/Commons покрыты (#57) |
+| Тесты | ✅ 247 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
 | CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты |
 
 ## Возможности
@@ -152,15 +152,16 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
 - [x] TSan-джоб в CI и архитектурные guards (`core` не знает про форматы)
 - [x] #7 трансляция событий `EventQueue` ↔ CLAP: out-events, MIDI для
       CC/pitch bend/aftertouch/program change, клампы портов и каналов
+- [x] #4 метрика `xruns`: счётчик драйвера → `EngineMetric` (дельта за блок,
+      монотонный тотал, битмаск флагов и отдельный счётчик входных xrun'ов)
 
 ### Ближайшие шаги
 
-- [ ] #4 метрика `xruns` доходит до control-plane
+- [ ] #32 backend manager: выбор и hot-swap PortAudio ↔ miniaudio
+- [ ] #39 LV2 (Lilv) и #40 VST3 (изолированный C-bridge) за `plugin_api`
 
 ### Экосистема и бэкенды
 
-- [ ] #32 backend manager: выбор и hot-swap PortAudio ↔ miniaudio
-- [ ] #39 LV2 (Lilv) и #40 VST3 (изолированный C-bridge) за `plugin_api`
 - [ ] #38 libremidi как MIDI-бэкенд (MIDI 1.0 + 2.0/UMP)
 - [ ] #8 ресемплинг при несовпадении SR; #10 FLAC/OGG/MP3/AIFF
 - [ ] #36 `fft_api`; #35 `stretch_api` (time-stretch / pitch-shift)
@@ -263,7 +264,6 @@ Audio-поток не выполняет: аллокаций, блокирующ
 
 Отслеживаются в issues репозитория:
 
-- #4 — метрика `xruns` не доходит до control plane;
 - #5 — Commons частично зависит от Core (`audio_file_io` → `wav_codec`);
 - CLAP (#6, #7, #49): host extensions (params/state/gui/thread-check/latency)
   и `request_callback`/`request_restart` реализованы в
@@ -289,8 +289,9 @@ Audio-поток не выполняет: аллокаций, блокирующ
 - #10 — FLAC/OGG/MP3/AIFF — заглушки;
 - #11 — нет `DEBUG_ASSERT_REALTIME_SAFE`;
 - у miniaudio 0.11.25 нет публичного статуса драйвера/xrun-счётчика:
-  `xrunCount` считается адаптером как вызов рендера, не уложившийся в
-  длительность блока, плюс `interruption_began` (issue #31);
+  `xrunCount` считается C-шимом как вызов рендера, не уложившийся в
+  длительность блока, плюс `interruption_began`, а адаптер превращает
+  дельту этого счётчика в `cfg.reportStatus` (issue #31, #4);
 - два аудио-бэкенда (PortAudio, miniaudio) пока выбираются вручную:
   manager с hot-swap — issue #32.
 
@@ -300,7 +301,8 @@ Audio-поток не выполняет: аллокаций, блокирующ
 #12/#14 (CI, Logger вместо `echo`), #57 (тесты непокрытых модулей
 Core/Commons), #13 (UBSan/ASan-цели и CI-джобы), #6/#49/#53 (CLAP:
 host- и plugin-side расширения, mock-плагин и состояние в проекте),
-#7 (трансляция событий EventQueue ↔ CLAP и MIDI-out плагина).
+#7 (трансляция событий EventQueue ↔ CLAP и MIDI-out плагина),
+#4 (метрика xruns: счётчик драйвера → EngineMetric).
 
 ## Входной тракт
 
@@ -316,8 +318,27 @@ driverIn (interleaved) ──▶ input arena (planar) ──▶ ctx.input
 
 Входной поток не отдаёт ноду-источник: `inputChannels == 0` (устройство
 без входов или offline-рендер) означает «тишина». Метрики `inputPeakL/R`
-считаются по сырому входу до нод, входные xrun'ы адаптер сообщает через
-`engine.noteInputStatus()`.
+считаются по сырому входу до нод.
+
+## Xrun'ы
+
+Xrun'ы драйвера доходят до control-plane (issue #4). Адаптер вызывает
+`cfg.reportStatus` из audio callback (обычно это `engine.noteStatus`), а
+движок публикует в `EngineMetric`:
+
+- `xruns` — сколько xrun'ов было ЗА ЭТОТ блок (дельта, а не тотал);
+- `driverStatusFlags` — накопленный битмаск «какие именно» (бит N ==
+  ординал `AudioStreamFlag`: input/output × underflow/overflow) — так
+  UI/CLI отличает input-overflow от output-underflow, не зная нативных
+  констант драйвера;
+- `inputXruns` — отдельный счётчик входных xrun'ов (`noteInputStatus`).
+
+Control-path дополнительно видит `engine.xrunCount()` — монотонный тотал.
+
+Флаги PortAudio (`paInputUnderflow`=0x1 …) уже совпадают с этой битмаской
+один в один, а miniaudio-шим отдаёт ординал, который адаптер переводит в
+бит. Весь путь — только атомики: в audio-потоке нет локов, аллокаций и
+логирования.
 
 ## Лицензия
 

@@ -61,6 +61,19 @@ type
     defaultLowOutputLatency*: float64
     isDefault*: bool
 
+  AudioStatusProc* = proc(engineCtx: pointer; statusFlags: uint32)
+    {.cdecl, raises: [].}
+    ## Realtime-safe приёмник статуса драйвера (issue #4).
+    ##
+    ## Вызывается адаптером из audio callback при обнаружении xrun'а.
+    ## `statusFlags` — БИТМАСК, в котором бит N соответствует ординалу
+    ## `AudioStreamFlag` N (см. `statusFlagMask`). Конвенция выбрана так,
+    ## чтобы нативные флаги PortAudio (`paInputUnderflow`=0x1 …) совпадали
+    ## с ней один в один, а miniaudio-шим отдавал ординал 0..3.
+    ##
+    ## Обязан быть без аллокаций, локов и логирования: обычно это
+    ## `engine.noteStatus`.
+
   AudioStreamConfig* = object
     ## Параметры открываемого потока.
     sampleRate*: float64
@@ -71,6 +84,9 @@ type
     outputDevice*: int32
     suggestedInputLatency*: float64   ## 0.0 == выбрать адаптивно
     suggestedOutputLatency*: float64
+    ## Куда адаптер сообщает xrun'ы. `nil` — статус не сообщается
+    ## (движок тогда остаётся с нулевым счётчиком, как раньше).
+    reportStatus*: AudioStatusProc
 
   AudioRenderProc* = proc(
     engineCtx: pointer;
@@ -140,6 +156,11 @@ type
 
     latencyFrames*: proc(api: ptr AudioBackendApi): int32
       {.cdecl, raises: [], gcsafe.}
+
+proc statusFlagMask*(flag: AudioStreamFlag): uint32 {.inline.} =
+  ## Бит статуса драйвера для данного вида xrun'а. Один бит — один ординал
+  ## `AudioStreamFlag` (issue #4).
+  1'u32 shl ord(flag)
 
 # ==============================================================================
 # Nil-safe обёртки (control-path)
