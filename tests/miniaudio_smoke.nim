@@ -81,6 +81,18 @@ proc main() =
   if api.isNil:
     fail("createMiniaudioBackend вернул nil")
 
+  # Критерий приёмки #31: таблица методов заполнена целиком — ни один proc
+  # для открытого устройства не nil (nil-safe обёртки иначе молча съели бы
+  # опечатку).
+  if api.init.isNil or api.shutdown.isNil or api.open.isNil or
+     api.start.isNil or api.stop.isNil or api.close.isNil or
+     api.isRunning.isNil or api.deviceCount.isNil or api.deviceInfo.isNil or
+     api.xrunCount.isNil or api.latencyFrames.isNil:
+    fail("таблица методов AudioBackendApi заполнена не полностью")
+
+  if backendNameOf(api) != "miniaudio":
+    fail("backendNameOf != miniaudio")
+
   let ierr = backendInit(api, nil)
   if ierr != abeOk:
     # Отсутствие звуковой подсистемы — не падение и не провал теста.
