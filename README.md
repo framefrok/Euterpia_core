@@ -22,7 +22,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Хостинг плагинов | 🟡 `plugin_api` + CLAP 1.2 (host- и plugin-side расширения) + EUT; нет mock-плагина и состояния в проекте (#53) |
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
-| Тесты | 🟡 149 unit-проверок + интеграционный набор; часть Core/Commons без тестов (#57) |
+| Тесты | 🟡 150 unit-проверок + интеграционный набор; часть Core/Commons без тестов (#57) |
 | CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты |
 
 ## Возможности
@@ -139,6 +139,7 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
 - [x] #6 CLAP host-расширения (`params|state|gui|thread-check|latency`, `request_*`)
 - [x] #49 `param*`/`state*`/`latencyFrames` CLAP через `clap_plugin_extensions`
 - [x] #58 BBT-конверсия учитывает знаменатель размера (PR #59)
+- [x] #61 `audio_recorder`: устаревшая `rcArm` не откатывает `disarm` (PR #62)
 - [x] #12 CI-матрица, LICENSE, шаблоны; #14 `Logger` вместо `echo` в Core
 - [x] TSan-джоб в CI и архитектурные guards (`core` не знает про форматы)
 
