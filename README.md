@@ -15,14 +15,14 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Область | Состояние |
 |---|---|
 | Ядро: runtime, граф, планировщик, память, IPC | ✅ `nimble test` (unit + integration) |
-| Realtime-дисциплина | ✅ TSan-джоб (блокирует merge), UBSan и ASan-джобы в CI (#13) |
+| Realtime-дисциплина | ✅ TSan-джоб (блокирует merge), UBSan/ASan-джобы, аудит `gcsafe` (#16) |
 | Аудио-бэкенды | ✅ PortAudio (`dynlib`) **и** miniaudio 0.11.25 (вендорен, #31) |
 | MIDI | ✅ `midi_api` + RtMidi-адаптер, SMF-кодек в Commons |
 | Входной тракт и запись | ✅ вход → ноды/рекордер, RT-кольцо → worker → WAV |
 | Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
-| Тесты | ✅ 278 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
+| Тесты | ✅ 280 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
 | CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты |
 
 ## Возможности
@@ -169,6 +169,12 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
       float→int; `buildSchedule` на `Table` (O(N·M)); единая точка создания
       пайплайна (`newCompiledPipeline`); контракт `findEventAtFrame` и
       guard в `alignedDealloc`
+- [x] #16 gcsafe-аудит audio-пути: прагма `rt` = `raises: []` + `gcsafe`,
+      callback-типы помечены `gcsafe`, guard в CI и вызов из потока
+      (`test_realtime_gcsafe`)
+- [x] #84 `waveform_cache`: гонка данных (reader трогал `entry.state`/`data`
+      без лока) — доступ переведён на `waveformReady`/`waveformSnapshot`;
+      найдена прогоном TSan в рамках #16
 
 ### Ближайшие шаги
 
@@ -274,6 +280,35 @@ Audio-поток не выполняет: аллокаций, блокирующ
 Обмен между control- и audio-плоскостями — только через lock-free очереди
 `ipc_bus` и предвыделенные пулы `memory_pool` (MANIFEST §9, §10, §43, §44).
 
+### Дисциплина проверяется компилятором (`gcsafe`)
+
+`core/audio_engine.nim` объявляет прагму реального времени:
+
+```nim
+{.pragma: rt, raises: [], gcsafe.}
+```
+
+Всё, что помечено `{.rt.}`, обязано не бросать исключений И не трогать
+глобальное GC-состояние. Callback-типы аудио-пути (`ProcessProc`,
+`PipelineRenderProc`, `BindMasterProc`, `ApplyParamProc`,
+`PipelineDestroyProc`, `AudioRenderProc`, `AudioStatusProc`, `DspTaskProc`,
+`NodeProcessProc`) помечены `gcsafe`, и через них компилятор видит косвенные
+вызовы в audio-потоке (issue #16).
+
+Что это даёт: попытка, например, тронуть глобальный `seq` из `renderBlock`
+теперь не компилируется:
+
+```text
+Error: 'badRt' is not GC-safe as it accesses 'gGcSeq'
+       which is a global using GC'ed memory
+```
+
+CI-джоб `architecture` следит, чтобы из прагмы `rt` и из типов не пропал
+`gcsafe`, и запрещает `cast(gcsafe)` (это была бы заглушка вместо
+доказательства). `tests/unit/test_realtime_gcsafe.nim` вызывает аудио-путь
+**из отдельного потока** — Nim разрешает такое только для `gcsafe`, поэтому
+факт сборки этого теста и есть компиляторное доказательство.
+
 ### Единственное исключение: аварийная утилизация пайплайна
 
 Если control-plane перестал разбирать очередь утилизации и заполнены ОБА
@@ -283,6 +318,8 @@ Audio-поток не выполняет: аллокаций, блокирующ
 графа без единого `pollReclamation`), цена — один `deallocShared`, а
 альтернатива — неограниченная тихая утечка арен пайплайна. Факт фиксируется
 счётчиком `droppedRetirementsCount()`, который читает control-plane.
+`destroyPipeline` при этом `gcsafe`, поэтому исключение не ломает проверку
+из предыдущего раздела.
 
 ## Выравнивание задержек (PDC)
 
@@ -341,7 +378,9 @@ host- и plugin-side расширения, mock-плагин и состояни
 #72 (PDC: per-frame кольцо для стерео), #73 (утилизация пайплайнов без
 утечки), #74 (renderBlock прерывается по stopFlag), #75–#80 (надёжность
 парсера проекта, WAV-заголовок, кламп MIDI-таймстампа, Table в
-buildSchedule, единая точка создания пайплайна).
+buildSchedule, единая точка создания пайплайна),
+#16 (gcsafe-аудит audio-пути: дисциплина проверяется компилятором),
+#84 (гонка данных в waveform_cache, найдена TSan).
 
 ## Входной тракт
 

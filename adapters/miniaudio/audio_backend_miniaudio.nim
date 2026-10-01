@@ -154,7 +154,7 @@ proc maTrampoline(
   frames: cint;
   inputChannels: cint;
   outputChannels: cint
-) {.cdecl, raises: [].} =
+) {.cdecl, raises: [], gcsafe.} =
   ## Выполняется в аудио-потоке miniaudio.
   ##
   ## Запрещено: аллокации, локи, файловый I/O, логирование.

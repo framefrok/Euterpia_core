@@ -114,7 +114,59 @@ jobs:
             exit 1
           fi
 
-      - name: Core выбирает бэкенды по имени, а не по библиотеке (#32)
+      - name: Realtime-путь проверяется компилятором на gcsafe (#16)
+        run: |
+          # Прагма `rt` — это контракт realtime-пути: `raises: []` + `gcsafe`.
+          # Если из неё пропадёт `gcsafe`, вся проверка GC-чистоты audio-пути
+          # молча выключится (ровно та проблема, из-за которой заводился #16).
+          if ! grep -qE '\{\.pragma: rt,[^}]*gcsafe' core/audio_engine.nim; then
+            echo "::error::прагма rt потеряла gcsafe: RT-путь перестал проверяться (#16)"
+            exit 1
+          fi
+          # cast(gcsafe) — заглушка вместо доказательства, запрещён.
+          if grep -rn "cast(gcsafe)" --include=*.nim .; then
+            echo "::error::cast(gcsafe) запрещён: нужен настоящий аудит (#16)"
+            exit 1
+          fi
+          # Callback-типы аудио-пути обязаны быть gcsafe: именно через них
+          # компилятор видит косвенные вызовы в audio-потоке.
+          python3 - <<'PY'
+          import sys
+
+          NEED = {
+              "core/node_interface.nim": ["ProcessProc"],
+              "core/compiled_pipeline.nim": ["PipelineRenderProc", "BindMasterProc",
+                                             "ApplyParamProc", "PipelineDestroyProc"],
+              "core/audio_backend_api.nim": ["AudioRenderProc", "AudioStatusProc"],
+              "core/dsp_scheduler.nim": ["DspTaskProc"],
+              "nodes/sdk/node_api.nim": ["NodeProcessProc"],
+          }
+
+          bad = []
+          for path, types in NEED.items():
+              lines = open(path, encoding="utf-8").read().split("\n")
+              for t in types:
+                  ok = False
+                  for i, line in enumerate(lines):
+                      if not line.strip().startswith(t + "*"):
+                          continue
+                      chunk = []
+                      for j in range(i, min(i + 30, len(lines))):
+                          chunk.append(lines[j])
+                          if "{." in lines[j]:
+                              ok = "gcsafe" in "\n".join(chunk)
+                              break
+                      break
+                  if not ok:
+                      bad.append(path + ":" + t)
+
+          if bad:
+              print("::error::callback-типы без gcsafe: " + ", ".join(bad))
+              sys.exit(1)
+          print("ok: callback-типы аудио-пути помечены gcsafe")
+          PY
+
+
         run: |
           # Критерий приёмки #32 в исполняемом виде. Проверяются СИМВОЛЫ
           # конкретных библиотек (ma_/Pa_/jack_/snd_/clap_entry): именно они

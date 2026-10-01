@@ -157,7 +157,7 @@ proc paCallback(
   timeInfo: pointer,
   statusFlags: culong,
   userData: pointer
-): cint {.cdecl.} =
+): cint {.cdecl, gcsafe.} =
   ## Выполняется в аудио-потоке.
   ##
   ## Запрещено: аллокации, локи, файловый I/O, логирование.

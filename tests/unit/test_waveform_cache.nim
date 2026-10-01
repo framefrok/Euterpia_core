@@ -33,11 +33,13 @@ proc writeWav(path: string; frames, channels: int; isFloat: bool;
   enc.writeFrames(cast[ptr UncheckedArray[float32]](addr buf[0]), int32(frames))
   enc.close()
 
-proc waitReady(entry: WaveformCacheEntry; timeoutMs = 5000): bool =
+proc waitReady(cache: WaveformCache; entry: WaveformCacheEntry;
+               timeoutMs = 5000): bool =
+  ## Ждём готовности через СИНХРОНИЗИРОВАННЫЙ аксессор: прямой доступ к
+  ## `entry.state` из другого потока — гонка данных (issue #84, TSan).
   let deadline = epochTime() + float(timeoutMs) / 1000.0
   while epochTime() < deadline:
-    if entry.state == wsReady: return true
-    if entry.state == wsFailed: return false
+    if cache.waveformReady(entry): return true
     sleep(1)
   false
 
@@ -123,14 +125,14 @@ suite "waveform_cache: вытеснение":
     # Держим p1 — он не должен быть вытеснен.
     let held = cache.getWaveform(p1, 8)
     check held != nil
-    check held.state == wsReady
+    check cache.waveformReady(held)
 
     cache.saveWaveformToCache(p3, data)      # вытесняет p2 (refCount == 0)
     check cache.getCacheSize() == 2
 
     # p1 выжил: get отдаёт ту же готовую запись, а не pending.
     let held2 = cache.getWaveform(p1, 8)
-    check held2.state == wsReady
+    check cache.waveformReady(held2)
 
     cache.releaseWaveform(held2)
     cache.releaseWaveform(held)
@@ -161,22 +163,25 @@ suite "waveform_cache: асинхронная генерация":
     let cache = initWaveformCache(dir, 8)
     let entry = cache.getWaveform(path, 8)
     check entry != nil
-    check waitReady(entry)
+    check waitReady(cache, entry)
 
-    check entry.state == wsReady
-    check entry.data.numPoints == 8
-    check entry.data.channels == 1
-    check entry.data.sampleRate == 48000
-    check entry.data.totalFrames == 1024
+    # Только КОПИЯ под локом: прямой доступ к entry.data из другого потока —
+    # гонка данных (нашёл TSan, issue #84).
+    var wf: WaveformData
+    check cache.waveformSnapshot(entry, wf)
+    check wf.numPoints == 8
+    check wf.channels == 1
+    check wf.sampleRate == 48000
+    check wf.totalFrames == 1024
 
     # Первый блок целиком отрицательный, последний — целиком положительный.
-    check entry.data.minValues[0] < -0.9f
-    check entry.data.maxValues[0] < -0.7f
-    check entry.data.maxValues[7] > 0.9f
-    check entry.data.minValues[7] > 0.7f
+    check wf.minValues[0] < -0.9f
+    check wf.maxValues[0] < -0.7f
+    check wf.maxValues[7] > 0.9f
+    check wf.minValues[7] > 0.7f
     # RMS заполнен и ненулевой (внутри ±1).
-    check entry.data.rmsValues[0] > 0.7f
-    check entry.data.rmsValues[7] > 0.7f
+    check wf.rmsValues[0] > 0.7f
+    check wf.rmsValues[7] > 0.7f
 
     cache.releaseWaveform(entry)
     cache.destroy()

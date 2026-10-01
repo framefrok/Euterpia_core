@@ -62,7 +62,7 @@ type
     isDefault*: bool
 
   AudioStatusProc* = proc(engineCtx: pointer; statusFlags: uint32)
-    {.cdecl, raises: [].}
+    {.cdecl, raises: [], gcsafe.}
     ## Realtime-safe приёмник статуса драйвера (issue #4).
     ##
     ## Вызывается адаптером из audio callback при обнаружении xrun'а.
@@ -95,13 +95,16 @@ type
     frames: int32;
     inputChannels: int32;
     outputChannels: int32
-  ) {.cdecl, raises: [].}
+  ) {.cdecl, raises: [], gcsafe.}
     ## Контракт рендера блока.
     ##
-    ## Сознательно БЕЗ `gcsafe`: ядро пока не доказывает GC-чистоту
-    ## realtime-пути (индиректные вызовы ProcessProc / PipelineRenderProc
-    ## не помечены gcsafe). Включить прагму можно будет после аудита —
-    ## см. issue про gcsafe-аудит audio-пути.
+    ## Обязан быть GC-safe: вызывается из audio callback драйвера
+    ## (issue #16). Компилятор проверяет это по прагме `gcsafe`.
+    ##
+    ## `gcsafe` (issue #16): аудит realtime-пути выполнен, и теперь
+    ## компилятор ДОКАЗЫВАЕТ, что рендер не трогает глобальное
+    ## GC-состояние. Всё, что помечено `{.rt.}` в `core/audio_engine.nim`,
+    ## проверяется на `raises: []` и `gcsafe` одновременно.
     ##
     ## `driverIn` уже присутствует в контракте, хотя входной тракт ещё не
     ## реализован (issue #3): адаптеру не придётся менять ABI, когда вход

@@ -36,6 +36,7 @@ import test_graph_compiler
 import test_pdc
 import test_scheduler_stop
 import test_engine_retire
+import test_realtime_gcsafe
 import test_recorder
 import test_sequencer
 import test_project

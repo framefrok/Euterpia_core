@@ -237,7 +237,7 @@ proc engineRender(
   frames: int32;
   inputChannels: int32;
   outputChannels: int32
-) {.cdecl, raises: [].} =
+) {.cdecl, raises: [], gcsafe.} =
   ## Мост «контракт бэкенда -> AudioEngine».
   ##
   ## Ровно это и делает продакшн-код: адаптер не знает про AudioEngine,

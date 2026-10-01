@@ -25,13 +25,13 @@ type
     p: ptr CompiledPipeline;
     outBuf: ptr UncheckedArray[float32];
     frames: int32
-  ) {.cdecl, raises: [].}
+  ) {.cdecl, raises: [], gcsafe.}
 
   BindMasterProc* = proc(
     p: ptr CompiledPipeline;
     outBuf: ptr UncheckedArray[float32];
     frames: int32
-  ) {.cdecl, raises: [].}
+  ) {.cdecl, raises: [], gcsafe.}
 
   ApplyParamProc* = proc(
     p: ptr CompiledPipeline;
@@ -39,11 +39,11 @@ type
     paramId: uint32;
     value: float32;
     normalized: bool
-  ) {.cdecl, raises: [].}
+  ) {.cdecl, raises: [], gcsafe.}
 
   PipelineDestroyProc* = proc(
     p: ptr CompiledPipeline
-  ) {.cdecl, raises: [].}
+  ) {.cdecl, raises: [], gcsafe.}
 
   DelayCompensationData* = object
     delayFrames*: int
