@@ -34,6 +34,7 @@ proc buildLog(title: string) =
 proc checkAdapters() =
   buildLog "adapters type-check"
   exec "nim check --hints:off adapters/portaudio/audio_backend_portaudio.nim"
+  exec "nim check --hints:off adapters/rtmidi/midi_backend_rtmidi.nim"
 
 # Флаги потоков и memory manager задаются в config.nims, чтобы они
 # были одинаковыми при любой точке входа (unit, integration, CLI).

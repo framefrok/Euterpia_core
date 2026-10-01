@@ -49,8 +49,26 @@ extern "C" {
  * а на macOS (Mach-O) тот же признак отсутствует. Признак __ELF__
  * выставлен ровно там, где IFUNC реально работает (Linux/BSD).
  */
+/*
+ * Под ThreadSanitizer IFUNC-резолверы исполняются динамическим загрузчиком
+ * до готовности рантайма санитайзера, и TSan на них падает SIGSEGV
+ * (проверено на прогоне tests/unit/all_tests.nim). Для инструментальных
+ * сборок SIMD-диспетчеризацию выключаем: скалярная версия корректна,
+ * а цель таких прогонов — гонки, а не скорость.
+ */
+#if defined(__SANITIZE_THREAD__)
+  #define EUT_UNDER_TSAN 1
+#elif defined(__has_feature)
+  #if __has_feature(thread_sanitizer)
+    #define EUT_UNDER_TSAN 1
+  #endif
+#endif
+#ifndef EUT_UNDER_TSAN
+  #define EUT_UNDER_TSAN 0
+#endif
+
 #if (defined(__x86_64__) || defined(_M_X64)) && defined(__ELF__) && \
-    (defined(__GNUC__) || defined(__clang__))
+    (defined(__GNUC__) || defined(__clang__)) && !EUT_UNDER_TSAN
   #define EUT_TARGET_CLONES __attribute__((target_clones("avx2", "default")))
   #define EUT_HAS_SIMD_DISPATCH 1
 #else

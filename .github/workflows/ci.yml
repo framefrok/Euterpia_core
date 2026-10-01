@@ -59,14 +59,19 @@ jobs:
         run: nimble buildRelease
 
   # ---------------------------------------------------------------------------
-  # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool.
-  # Job пока НЕ блокирует merge (см. issue #13): сначала нужен первый зелёный
-  # прогон, после чего continue-on-error снимается.
+  # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool / ring_buffer.
+  #
+  # Прогон гоняет весь unit-набор, включая стресс ring_buffer (issue #37):
+  # миллион push/pop в двух потоках и два producers в MPSC.
+  #
+  # Job блокирует merge. Чтобы он мог работать, SIMD-диспетчеризация
+  # (target_clones/IFUNC) в C-ядрах отключается под санитайзером — см.
+  # nodes/builtin/csrc/eut_dsp.h. IFUNC-резолверы исполняются загрузчиком
+  # до готовности рантайма TSan и роняли процесс SIGSEGV.
   # ---------------------------------------------------------------------------
   tsan:
-    name: thread sanitizer (не блокирует merge)
+    name: thread sanitizer
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

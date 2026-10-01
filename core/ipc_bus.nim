@@ -1,5 +1,16 @@
 # ipc_bus.nim
+#
+# Очереди control <-> audio поверх канонического кольца Core (issue #37).
+#
+# Раньше MpscQueue/SpscQueue были здесь собственной реализацией на атомиках.
+# Теперь это ТОНКИЕ ОБЁРТКИ над core/ring_buffer.nim: одна memory-модель на
+# всё ядро, никаких расхождений в порядке acquire/release.
 import std/atomics
+import ring_buffer
+
+# Имена push/pop/size/isEmpty живут в ring_buffer и реэкспортируются:
+# для вызывающей стороны API очередей не меняется (engine.toAudio.push(...)).
+export ring_buffer
 
 # Если твой компилятор ругается, что атомарные операции могут поднимать
 # Exception, закомментируй эту строку. В актуальных версиях Nim std/atomics
@@ -7,8 +18,6 @@ import std/atomics
 {.push raises: [].}
 
 const
-  CacheLine = 64
-
   SharedBlockSize* = 4096
   SharedBlockCount* = 64
 
@@ -67,26 +76,15 @@ type
     activeVoices*: int32
     graphVersion*: uint64
 
-  # Multi-Producer Single-Consumer queue.
-  # Подходит для пути UI -> Audio, где отправителей может быть несколько.
-  # Инвариант: потоки-производители не должны принудительно уничтожаться (pthread_cancel)
-  # во время исполнения push, чтобы избежать бесконечного Head-of-Line ожидания слота.
-  MpscQueue*[T; Size: static[int]] = object
-    buffer: array[Size, T]
-    ready: array[Size, Atomic[uint8]]
-    head: Atomic[uint64]
-    pad1: array[CacheLine, byte]
-    tail: Atomic[uint64]
-    pad2: array[CacheLine, byte]
+  # Multi-Producer Single-Consumer queue: путь UI/control -> Audio,
+  # отправителей может быть несколько. Обёртка над MpscRingBuffer
+  # (core/ring_buffer.nim). Инвариант «producers не уничтожаются
+  # принудительно внутри push» унаследован из ring_buffer.
+  MpscQueue*[T; Size: static[int]] = MpscRingBuffer[T, Size]
 
-  # Single-Producer Single-Consumer queue.
-  # Подходит для пути Audio -> UI, где отправитель один.
-  SpscQueue*[T; Size: static[int]] = object
-    buffer: array[Size, T]
-    head: Atomic[uint64]
-    pad1: array[CacheLine, byte]
-    tail: Atomic[uint64]
-    pad2: array[CacheLine, byte]
+  # Single-Producer Single-Consumer queue: путь Audio -> UI,
+  # отправитель один. Обёртка над SpscRingBuffer (core/ring_buffer.nim).
+  SpscQueue*[T; Size: static[int]] = SpscRingBuffer[T, Size]
 
   SharedBlock* = object
     data*: array[SharedBlockSize, byte]
@@ -97,106 +95,17 @@ type
     blocks*: array[SharedBlockCount, SharedBlock]
 
 # ==============================================================================
-# MPSC queue: UI/control threads -> audio thread
+# Инициализация очередей
 # ==============================================================================
+#
+# push/pop/size/isEmpty реэкспортированы из ring_buffer и работают с
+# алиасами напрямую — отдельной реализации здесь больше нет.
 
 proc initMpscQueue*[T; Size: static[int]](q: var MpscQueue[T, Size]) =
-  q.head.store(0'u64, moRelaxed)
-  q.tail.store(0'u64, moRelaxed)
-  for i in 0 ..< Size:
-    q.ready[i].store(0'u8, moRelaxed)
-
-proc push*[T; Size: static[int]](
-    q: var MpscQueue[T, Size],
-    item: T
-): bool {.inline.} =
-  var t = q.tail.load(moRelaxed)
-
-  while true:
-    let h = q.head.load(moAcquire)
-
-    # Защита от underflow: если поток был вытеснен планировщиком и consumer
-    # успел продвинуть head дальше локального снимка t (t < h), вычисление
-    # (t - h) даст огромное беззнаковое число (~2^64). В этом случае снимок t
-    # гарантированно устарел: обновляем его из актуального tail и повторяем.
-    if t < h:
-      t = q.tail.load(moRelaxed)
-      continue
-
-    if (t - h) >= uint64(Size):
-      # Очередь заполнена. В realtime-системе команду отбрасываем,
-      # чтобы не блокировать вызывающий поток.
-      return false
-
-    if q.tail.compareExchangeWeak(t, t + 1, moRelaxed, moRelaxed):
-      break
-
-  let idx = int(t mod uint64(Size))
-  q.buffer[idx] = item
-  # Публикация слота: moRelease гарантирует, что запись в buffer[idx]
-  # станет видна Consumer'у строго до или одновременно с ready[idx] == 1.
-  q.ready[idx].store(1'u8, moRelease)
-  return true
-
-proc pop*[T; Size: static[int]](
-    q: var MpscQueue[T, Size],
-    item: var T
-): bool {.inline.} =
-  let h = q.head.load(moRelaxed)
-  let idx = int(h mod uint64(Size))
-
-  # Если производитель захватил слот, но ещё не успел записать данные в buffer,
-  # pop мгновенно возвращает false без блокировки аудиопотока.
-  if q.ready[idx].load(moAcquire) == 0'u8:
-    return false
-
-  item = q.buffer[idx]
-
-  # Замечание по порядку памяти (Ошибка 20):
-  # moRelaxed для ready[idx] абсолютно корректен, так как последующая запись
-  # q.head.store(..., moRelease) служит односторонним барьером: она гарантирует,
-  # что и чтение buffer[idx], и сброс ready[idx] в 0 станут глобально видимыми
-  # до того, как Producer увидит обновлённый head. Сам Consumer читает ready[idx]
-  # только в рамках этого же потока через полный круг (Size шагов).
-  q.ready[idx].store(0'u8, moRelaxed)
-  q.head.store(h + 1, moRelease)
-  return true
-
-# ==============================================================================
-# SPSC queue: audio thread -> UI
-# ==============================================================================
+  q.initRing()
 
 proc initSpscQueue*[T; Size: static[int]](q: var SpscQueue[T, Size]) =
-  q.head.store(0'u64, moRelaxed)
-  q.tail.store(0'u64, moRelaxed)
-
-proc push*[T; Size: static[int]](
-    q: var SpscQueue[T, Size],
-    item: T
-): bool {.inline.} =
-  let t = q.tail.load(moRelaxed)
-  let h = q.head.load(moAcquire)
-
-  if (t - h) >= uint64(Size):
-    return false
-
-  q.buffer[int(t mod uint64(Size))] = item
-  q.tail.store(t + 1, moRelease)
-  return true
-
-proc pop*[T; Size: static[int]](
-    q: var SpscQueue[T, Size],
-    item: var T
-): bool {.inline.} =
-  let h = q.head.load(moRelaxed)
-  let t = q.tail.load(moAcquire)
-
-  if h >= t:
-    return false
-
-  item = q.buffer[int(h mod uint64(Size))]
-  q.head.store(h + 1, moRelease)
-  return true
+  q.initRing()
 
 # ==============================================================================
 # Shared pool для крупных данных
