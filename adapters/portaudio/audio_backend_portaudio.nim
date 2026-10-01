@@ -87,15 +87,18 @@ proc Pa_IsStreamActive(stream: PaStream): PaError {.pa_import.}
 proc Pa_GetErrorText(errorCode: PaError): cstring {.pa_import.}
 
 const
-  paFloat32: PaSampleFormat = 0x00000001'u64
-  paNoFlag: culong = 0'u64
+  # Явные преобразования, а не суффиксы 'u64/'u32: culong на Windows —
+  # 32 бита, на Linux — 64. Суффикс фиксировал бы ширину и ломал одну из
+  # платформ (nim check: type mismatch PaSampleFormat/culong, issue #12 CI).
+  paFloat32 = PaSampleFormat(0x00000001)
+  paNoFlag = culong(0)
 
-  paInputUnderflow: culong = 0x00000001'u64
-  paInputOverflow: culong = 0x00000002'u64
-  paOutputUnderflow: culong = 0x00000004'u64
-  paOutputOverflow: culong = 0x00000008'u64
+  paInputUnderflow = culong(0x00000001)
+  paInputOverflow = culong(0x00000002)
+  paOutputUnderflow = culong(0x00000004)
+  paOutputOverflow = culong(0x00000008)
 
-  paStatusMask: culong =
+  paStatusMask =
     paInputUnderflow or paInputOverflow or paOutputUnderflow or paOutputOverflow
 
   DefaultAdaptiveLatency = 0.01
@@ -162,7 +165,7 @@ proc paCallback(
   if pb.isNil:
     return 0
 
-  if (statusFlags and paStatusMask) != 0'u64:
+  if (statusFlags and paStatusMask) != culong(0):
     discard pb.xruns.fetchAdd(1'u64, moRelaxed)
     discard pb.lastStatusFlags.fetchOr(uint64(statusFlags), moRelaxed)
 
