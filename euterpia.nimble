@@ -11,7 +11,6 @@
 version       = "0.2.0"
 author        = "EUTERPIA"
 description   = "EUTERPIA DAW core: audio runtime, graph compiler, realtime scheduler, node SDK, builtin DSP"
-license       = "MIT"
 srcDir        = "core"
 
 requires "nim >= 2.0.0"
