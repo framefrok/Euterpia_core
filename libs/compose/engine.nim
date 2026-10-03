@@ -1,0 +1,60 @@
+# libs/compose/engine.nim
+#
+# Рендер проекта ПРЯМО ИЗ КОДА (issue #300): собрать сцену и посчитать WAV,
+# не прибегая к `build.sh` и CLI. Это те же шаги, что делает `cli/cmd_render`:
+#   `loadScene` (nodes/builtin/scene_loader) → `renderToWav` (core/offline_render).
+#
+# Почему это в библиотеке, а не в CLI: композиция — это программа на Nim;
+# ей естественно и строить проект, и получать звук одной командой
+# (`nim r generate.nim` → `.eut` + `.notes` + `.wav`). CLI остаётся для
+# ручной работы и CI.
+#
+# Слой: верхний (libs), поверх Core и Nodes.
+
+import project
+import sdk/node_registry
+import builtin/builtin_registry
+import builtin/scene_loader
+import offline_render
+import compose/song
+
+type
+  RenderResult* = object
+    ok*: bool
+    error*: string
+    path*: string
+    seconds*: float64
+
+proc renderProject*(proj: ProjectFormat; wavPath: string; tempo: float64;
+                    tailSeconds: float64 = 2.0; blockSize: int32 = 512;
+                    bits: int32 = 16): RenderResult =
+  ## Считает проект в WAV. Пайплайн собирается заново и освобождается здесь —
+  ## вызывающему остаётся только файл и отчёт.
+  var reg = initNodeRegistry()
+  discard registerBuiltinNodes(reg)
+
+  let sr = if proj.metadata.sampleRate > 0.0f32: proj.metadata.sampleRate
+           else: 48000.0f32
+  var scene = loadScene(reg, proj, -1, int32(sr))
+  if not scene.ok:
+    result.error = scene.error
+    return
+  defer: destroyScene(scene)
+
+  let scoreSeconds = sceneSeconds(scene, tempo)
+  var opts = defaultRenderOptions(int32(sr), blockSize, scoreSeconds + tailSeconds)
+  opts.bitsPerSample = bits
+  opts.tempo = tempo
+  opts.automation = scene.automation
+
+  let rep = renderToWav(wavPath, scene.pipeline, opts)
+  result.ok = rep.ok
+  result.error = rep.error
+  result.path = rep.path
+  result.seconds = rep.seconds
+
+proc render*(arr: Arrangement; wavPath: string; tailSeconds: float64 = 2.0;
+             blockSize: int32 = 512; bits: int32 = 16): RenderResult =
+  ## Рендер раскладки из `compose/song`.
+  renderProject(buildProject(arr), wavPath, float64(arr.tempo), tailSeconds,
+                blockSize, bits)
