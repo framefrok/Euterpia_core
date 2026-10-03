@@ -78,4 +78,17 @@ else:
   # идут через doAssert на стороне Nim.
   switch("passC", "-O1")
 
+# ----------------------------------------------------------------------------
+# Realtime-guard (issue #11, MANIFEST §45)
+#
+# `rtGuardEnabled` включает core/rt_guard: thread-local пометку audio-потока
+# и проверки запрещённых операций. В release НЕ включается: `rtAssert*`
+# и `inRealtimeContext` компилируются в константу, overhead = 0.
+#
+# ВНИМАНИЕ: release-сборка НЕ включает guard намеренно. Проверки должны
+# быть бесплатными в горячем пути, а не «дешёвыми».
+# ----------------------------------------------------------------------------
+when not defined(release) and not defined(danger):
+  switch("define", "rtGuardEnabled")
+
 

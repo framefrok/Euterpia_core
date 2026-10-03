@@ -20,6 +20,7 @@ when not compileOption("threads"):
 
 import std/[atomics, tables, hashes]
 import node_interface
+import rt_guard
 
 const
   MaxWorkerThreads* = 8
@@ -551,44 +552,47 @@ proc renderBlock*(
     discard sh.abortedBlocks.fetchAdd(1'u64, moRelaxed)
     return
 
-  # Инвариант владения: планировщик нельзя разбирать во время рендера.
-  discard sh.inRender.fetchAdd(1'i32, moAcquireRelease)
-  defer:
-    discard sh.inRender.fetchAdd(-1'i32, moAcquireRelease)
+  # Realtime-guard (issue #11): главный поток исполняет уровни сам,
+  # поэтому он тоже audio-поток. Ранние `return` выше — до входа в scope.
+  rtScope():
+    # Инвариант владения: планировщик нельзя разбирать во время рендера.
+    discard sh.inRender.fetchAdd(1'i32, moAcquireRelease)
+    defer:
+      discard sh.inRender.fetchAdd(-1'i32, moAcquireRelease)
 
-  # Fix 15: 1. Reset level to -1 before publishing new command block
-  sh.currentLevel.store(-1'i32, moRelease)
-  sh.currentCtx.store(ctx, moRelease)
-  let blockId = sh.commandBlock.load(moRelaxed) + 1'u64
-  sh.commandBlock.store(blockId, moRelease)
+    # Fix 15: 1. Reset level to -1 before publishing new command block
+    sh.currentLevel.store(-1'i32, moRelease)
+    sh.currentCtx.store(ctx, moRelease)
+    let blockId = sh.commandBlock.load(moRelaxed) + 1'u64
+    sh.commandBlock.store(blockId, moRelease)
 
-  let stride = sh.levelCount + 1
+    let stride = sh.levelCount + 1
 
-  var level = 0
-  while level < sh.levelCount:
-    # Fix 15: 2. Explicitly authorize workers to enter this specific level
-    sh.currentLevel.store(level.int32, moRelease)
+    var level = 0
+    while level < sh.levelCount:
+      # Fix 15: 2. Explicitly authorize workers to enter this specific level
+      sh.currentLevel.store(level.int32, moRelease)
 
-    let start = sh.levelOffsets[level]
-    let finish = sh.levelOffsets[level + 1]
+      let start = sh.levelOffsets[level]
+      let finish = sh.levelOffsets[level + 1]
 
-    var p = start
-    while p < finish:
-      runTask(sh, sh.flatTasks[p], ctx)
-      inc p
+      var p = start
+      while p < finish:
+        runTask(sh, sh.flatTasks[p], ctx)
+        inc p
 
-    # Fix 15: 3. Wait for all workers to complete this exact level
-    let target = blockId * uint64(stride) + uint64(level + 1)
+      # Fix 15: 3. Wait for all workers to complete this exact level
+      let target = blockId * uint64(stride) + uint64(level + 1)
 
-    var w = 0
-    while w < s.workerCount:
-      while sh.workerProgress[w].load(moAcquire) < target:
-        # Запрос остановки пришёл во время ожидания: выходим, иначе тут
-        # будет вечный spin (issue #74).
-        if sh.stopFlag.load(moAcquire) != 0'u8:
-          discard sh.abortedBlocks.fetchAdd(1'u64, moRelaxed)
-          return
-        cpuRelax()
-      inc w
+      var w = 0
+      while w < s.workerCount:
+        while sh.workerProgress[w].load(moAcquire) < target:
+          # Запрос остановки пришёл во время ожидания: выходим, иначе тут
+          # будет вечный spin (issue #74).
+          if sh.stopFlag.load(moAcquire) != 0'u8:
+            discard sh.abortedBlocks.fetchAdd(1'u64, moRelaxed)
+            return
+          cpuRelax()
+        inc w
 
-    inc level
+      inc level

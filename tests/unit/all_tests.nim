@@ -35,6 +35,7 @@ import test_delay
 import test_graph_compiler
 import test_pdc
 import test_scheduler_stop
+import test_rt_guard
 import test_engine_retire
 import test_realtime_gcsafe
 import test_recorder

@@ -58,6 +58,61 @@ jobs:
       - name: nimble buildRelease
         run: nimble buildRelease
 
+  # -----------------------------------------------------------------------
+  # Realtime-guard (issue #11): оба режима сборки должны быть зелёными.
+  #
+  # `nimble test` собирает unit-набор в debug — там `rtGuardEnabled` включён
+  # (config.nims), и `rtAssert*` реально падают на нарушении. Этот джоб
+  # закрывает вторую половину критерия приёмки: в release те же проверки
+  # обязаны компилироваться в пустоту, то есть НЕ ронять процесс и НЕ
+  # растить счётчики. Без отдельного джоба опечатка в `when defined(...)`
+  # тихо выключила бы guard в release и никто бы не заметил: тесты в debug
+  # продолжали бы проходить.
+  # -----------------------------------------------------------------------
+  rtguard:
+    name: realtime guard (debug + release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.12'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Debug — guard включён и ловит нарушения
+        run: |
+          mkdir -p build
+          nim c -r --hints:off --out:build/rtguard_debug \
+            tests/unit/all_tests.nim
+
+      - name: Release — guard скомпилирован в пустоту
+        run: |
+          nim c -r --hints:off -d:release --out:build/rtguard_release \
+            tests/unit/all_tests.nim
+
+      - name: Guard действительно выключен в release
+        run: |
+          # Проверка на уровне строк бинаря. Маркер EUT_RT_GUARD_VIOLATION
+          # существует ТОЛЬКО в текстах doAssert, а они компилируются лишь
+          # при rtGuardEnabled. Раньше здесь искалась подстрока "rt_guard:",
+          # но она присутствует и в release — как часть имени символа
+          # `atmtest_rt_guarddotnim_Init000`, то есть проверка была бы
+          # всегда зелёной и ничего не проверяла.
+          if strings build/rtguard_release | grep -q "EUT_RT_GUARD_VIOLATION"; then
+            echo "::error::rt_guard попал в release-сборку: overhead должен быть 0 (#11)"
+            exit 1
+          fi
+          echo "ok: rt_guard вырезан из release"
+
+      - name: Guard включён в debug по умолчанию
+        run: |
+          if ! strings build/rtguard_debug | grep -q "EUT_RT_GUARD_VIOLATION"; then
+            echo "::error::rt_guard выключен в debug: нарушения не ловятся (#11)"
+            exit 1
+          fi
+          echo "ok: rt_guard активен в debug"
+
   # ---------------------------------------------------------------------------
   # miniaudio-бэкенд (issue #31): здесь РЕАЛЬНО собирается и линкуется TU
   # miniaudio (adapters/miniaudio/miniaudio_impl.c, вендоренный 0.11.25).

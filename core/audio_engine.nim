@@ -7,7 +7,8 @@ import
   ipc_bus,
   node_interface,
   compiled_pipeline,
-  audio_recorder
+  audio_recorder,
+  rt_guard
 
 ## Прагма realtime-пути: собрана из двух требований контракта (MANIFEST §9/§10).
 ## `raises: []` — никаких исключений в audio-потоке;
@@ -861,84 +862,87 @@ proc renderBlockInternal(
   if frames <= 0:
     return
 
-  inc engine.blockIndex
+  # Realtime-guard (issue #11): весь блок считается audio-потоком. Любая
+  # аллокация/лок/IO ниже падает в debug-сборке, а не проявляется xrun'ом.
+  rtScope():
+    inc engine.blockIndex
 
-  # Пытаемся освободить локальный retirement перед началом блока.
-  flushLocalRetire(engine)
+    # Пытаемся освободить локальный retirement перед началом блока.
+    flushLocalRetire(engine)
 
-  applyCommands(engine)
+    applyCommands(engine)
 
-  let transportActive = engine.transport.playing or forceAdvance
+    let transportActive = engine.transport.playing or forceAdvance
 
-  # Входной тракт: раскладываем драйверный вход в арену ДО рендера графа,
-  # чтобы input-ноды увидели актуальный блок. Offline-путь передаёт driverIn
-  # == nil, поэтому вход = тишина (pfOffline при этом сохраняется).
-  publishInput(engine, driverIn, inputChannels, frames)
+    # Входной тракт: раскладываем драйверный вход в арену ДО рендера графа,
+    # чтобы input-ноды увидели актуальный блок. Offline-путь передаёт driverIn
+    # == nil, поэтому вход = тишина (pfOffline при этом сохраняется).
+    publishInput(engine, driverIn, inputChannels, frames)
 
-  # Маршрутизация входа в рекордер. Только realtime-путь и только при
-  # реально подключённом входе.
-  if not offline and not engine.recorder.isNil and not driverIn.isNil and
-      inputChannels > 0:
-    engine.recorder[].recordBlock(driverIn, engine.transport.frame)
+    # Маршрутизация входа в рекордер. Только realtime-путь и только при
+    # реально подключённом входе.
+    if not offline and not engine.recorder.isNil and not driverIn.isNil and
+        inputChannels > 0:
+      engine.recorder[].recordBlock(driverIn, engine.transport.frame)
 
-  # Всегда очищаем мастер-выход.
-  clearStereoBuffer(driverOut, frames)
+    # Всегда очищаем мастер-выход.
+    clearStereoBuffer(driverOut, frames)
 
-  if transportActive and engine.activePipeline != nil:
-    var ctx: NodeProcessContext
-    setupContext(engine, ctx, offline, lastBlock, transportActive)
-    # Публикация входа в граф (issue #3).
-    ctx.input = addr engine.inputBuffer
-    ctx.inputChannels = engine.inputBuffer.channels
-    processPipeline(engine, ctx, driverOut, frames)
+    if transportActive and engine.activePipeline != nil:
+      var ctx: NodeProcessContext
+      setupContext(engine, ctx, offline, lastBlock, transportActive)
+      # Публикация входа в граф (issue #3).
+      ctx.input = addr engine.inputBuffer
+      ctx.inputChannels = engine.inputBuffer.channels
+      processPipeline(engine, ctx, driverOut, frames)
 
-  if engine.firstBlockPending and transportActive:
-    engine.firstBlockPending = false
+    if engine.firstBlockPending and transportActive:
+      engine.firstBlockPending = false
 
-  var metric: EngineMetric
+    var metric: EngineMetric
 
-  metric.peakL = 0.0f
-  metric.peakR = 0.0f
-  metric.rmsL = 0.0f
-  metric.rmsR = 0.0f
-  metric.cpuLoad = 0.0f
-  metric.sampleRate = float64(engine.transport.sampleRate)
-  metric.bufferSize = uint32(engine.blockSize)
+    metric.peakL = 0.0f
+    metric.peakR = 0.0f
+    metric.rmsL = 0.0f
+    metric.rmsR = 0.0f
+    metric.cpuLoad = 0.0f
+    metric.sampleRate = float64(engine.transport.sampleRate)
+    metric.bufferSize = uint32(engine.blockSize)
 
-  if transportActive:
-    metric.transportState = ord(tsPlaying).uint8
-  else:
-    metric.transportState = ord(tsStopped).uint8
+    if transportActive:
+      metric.transportState = ord(tsPlaying).uint8
+    else:
+      metric.transportState = ord(tsStopped).uint8
 
-  metric.activeVoices = 0
+    metric.activeVoices = 0
 
-  if engine.activePipeline != nil:
-    metric.graphVersion = engine.activePipeline.graphVersion
-  else:
-    metric.graphVersion = 0
+    if engine.activePipeline != nil:
+      metric.graphVersion = engine.activePipeline.graphVersion
+    else:
+      metric.graphVersion = 0
 
-  computeStereoMetrics(driverOut, frames, metric)
-  computeInputMetrics(engine.inputBuffer, frames, metric)
-  metric.inputXruns = engine.inputXruns.load(moRelaxed)
+    computeStereoMetrics(driverOut, frames, metric)
+    computeInputMetrics(engine.inputBuffer, frames, metric)
+    metric.inputXruns = engine.inputXruns.load(moRelaxed)
 
-  # Xrun'ы (issue #4). Адаптер сообщил их через cfg.reportStatus ДО вызова
-  # render, поэтому exchange здесь забирает ровно этот блок и обнуляет
-  # накопитель. Это только атомики: RT-путь чист.
-  metric.xruns = engine.pendingXruns.exchange(0'u32, moRelaxed)
-  metric.driverStatusFlags = engine.driverStatusFlags.load(moRelaxed)
+    # Xrun'ы (issue #4). Адаптер сообщил их через cfg.reportStatus ДО вызова
+    # render, поэтому exchange здесь забирает ровно этот блок и обнуляет
+    # накопитель. Это только атомики: RT-путь чист.
+    metric.xruns = engine.pendingXruns.exchange(0'u32, moRelaxed)
+    metric.driverStatusFlags = engine.driverStatusFlags.load(moRelaxed)
 
-  if not engine.fromAudioMetrics.push(metric):
-    inc engine.droppedMetrics
+    if not engine.fromAudioMetrics.push(metric):
+      inc engine.droppedMetrics
 
-  if transportActive:
-    engine.transport.frame += int64(frames)
-    if engine.transport.loopEnabled:
-      let ls = engine.transport.loopStartFrame
-      let le = engine.transport.loopEndFrame
-      if le > ls and engine.transport.frame >= le:
-        engine.transport.frame = ls + ((engine.transport.frame - ls) mod (le - ls))
+    if transportActive:
+      engine.transport.frame += int64(frames)
+      if engine.transport.loopEnabled:
+        let ls = engine.transport.loopStartFrame
+        let le = engine.transport.loopEndFrame
+        if le > ls and engine.transport.frame >= le:
+          engine.transport.frame = ls + ((engine.transport.frame - ls) mod (le - ls))
 
-  engine.frameSnapshot = engine.transport.frame
+    engine.frameSnapshot = engine.transport.frame
 
 
 proc renderBlock*(
