@@ -21,7 +21,12 @@ import
   mixing/gain,
   mixing/pan,
   dynamics/compressor,
-  effects/delay
+  effects/delay,
+  instruments/organ,
+  instruments/piano,
+  instruments/guitar,
+  instruments/drums,
+  sequencer/notes
 
 type
   BuiltinNodeId* = enum
@@ -29,7 +34,9 @@ type
     bnOscillator, bnNoise,
     bnBiquad, bnSvf,
     bnGain, bnPan,
-    bnCompressor, bnDelay
+    bnCompressor, bnDelay,
+    bnOrgan, bnPiano, bnGuitar, bnDrums,
+    bnNotes
 
   ## Порядок ниже совпадает с порядком нод в реестре и используется
   ## инструментами (CLI/Editor) для выборки по индексу.
@@ -43,7 +50,9 @@ const
     bnOscillator, bnNoise,
     bnBiquad, bnSvf,
     bnGain, bnPan,
-    bnCompressor, bnDelay
+    bnCompressor, bnDelay,
+    bnOrgan, bnPiano, bnGuitar, bnDrums,
+    bnNotes
   ]
 
 proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
@@ -57,6 +66,11 @@ proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
   of bnPan:         getPanDesc()
   of bnCompressor:  getCompDesc()
   of bnDelay:       getDelayDesc()
+  of bnOrgan:       getOrganDesc()
+  of bnPiano:       getPianoDesc()
+  of bnGuitar:      getGuitarDesc()
+  of bnDrums:       getDrumsDesc()
+  of bnNotes:       getNotesDesc()
 
 proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   case id
@@ -69,6 +83,11 @@ proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   of bnPan:         getPanFactory()
   of bnCompressor:  getCompFactory()
   of bnDelay:       getDelayFactory()
+  of bnOrgan:       getOrganFactory()
+  of bnPiano:       getPianoFactory()
+  of bnGuitar:      getGuitarFactory()
+  of bnDrums:       getDrumsFactory()
+  of bnNotes:       getNotesFactory()
 
 proc registerBuiltinNodes*(reg: var NodeRegistry): int =
   ## Регистрирует все builtin-ноды. Возвращает число зарегистрированных:
