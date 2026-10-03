@@ -136,8 +136,9 @@ arr.add(organ, genOrgan())
 
 Идентификаторы нод «из коробки»: `euterpia.organ`, `euterpia.piano`,
 `euterpia.guitar`, `euterpia.drums`, `euterpia.flute`, `euterpia.bagpipe`,
-`euterpia.strings`, `euterpia.bell`, `euterpia.mix`; полный список и
-параметры — в **[instruments.md](instruments.md)**.
+`euterpia.strings`, `euterpia.bell`, `euterpia.harp`, `euterpia.harpsichord`,
+`euterpia.recorder`, `euterpia.brass`, `euterpia.timpani`, `euterpia.choir`,
+`euterpia.mix`; полный список и параметры — в **[instruments.md](instruments.md)**.
 
 ## Развитие материала
 

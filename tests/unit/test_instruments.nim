@@ -27,6 +27,11 @@ import builtin/instruments/flute
 import builtin/instruments/bagpipe
 import builtin/instruments/strings
 import builtin/instruments/bell
+import builtin/instruments/plucked
+import builtin/instruments/recorder
+import builtin/instruments/brass
+import builtin/instruments/timpani
+import builtin/instruments/choir
 
 const
   Sr = 48000.0'f32
@@ -255,6 +260,110 @@ suite "инструменты: C-движки (eut_inst.c)":
     check late < early
     freeBell(addr g)
 
+  test "щипковые, свирель, медь, литавры и хор отдают звук":
+    var l, r: array[512, float32]
+
+    block:
+      var g = newPluck(4, Sr)
+      check g.isReady
+      check pluckInitAt(addr g, 44100.0f)
+      pluckSet(addr g, 0.6f, 0.7f, 0.4f, 0.4f, 200.0f, 0.0f, 0.8f)
+      pluckNoteOn(addr g, 60, 0.9f)
+      var peak = 0.0f
+      for b in 0 ..< 8:
+        for i in 0 ..< l.len: l[i] = 0.0f
+        pluckProcess(addr g, addr l[0], addr l[0], 1, l.len)
+        for i in 0 ..< l.len: peak = max(peak, abs(l[i]))
+      check peak > 1e-3f
+      pluckAllOff(addr g)
+      freePluck(addr g)
+
+    block:
+      var g = newRecorder(4, Sr)
+      check g.isReady
+      recorderSet(addr g, 0.6f, 0.3f, 5.0f, 0.0f, 0.8f)
+      recorderNoteOn(addr g, 72, 0.9f)
+      var peak = 0.0f
+      for b in 0 ..< 8:
+        for i in 0 ..< l.len: l[i] = 0.0f
+        recorderProcess(addr g, addr l[0], addr l[0], 1, l.len)
+        for i in 0 ..< l.len: peak = max(peak, abs(l[i]))
+      check peak > 1e-3f
+      recorderAllOff(addr g)
+      freeRecorder(addr g)
+
+    block:
+      var g = newBrass(4, Sr)
+      check g.isReady
+      brassSet(addr g, 0.55f, 0.35f, 6.0f, 0.0f, 0.8f)
+      brassNoteOn(addr g, 60, 0.9f)
+      var peak = 0.0f
+      for b in 0 ..< 8:
+        for i in 0 ..< l.len: l[i] = 0.0f
+        brassProcess(addr g, addr l[0], addr l[0], 1, l.len)
+        for i in 0 ..< l.len: peak = max(peak, abs(l[i]))
+      check peak > 1e-3f
+      brassAllOff(addr g)
+      freeBrass(addr g)
+
+    block:
+      var g = newTimpani(4, Sr)
+      check g.isReady
+      timpaniSet(addr g, 1.0f, 1.0f, 0.5f, 0.0f, 0.8f)
+      timpaniNoteOn(addr g, 45, 1.0f)
+      var early = 0.0f
+      for b in 0 ..< 12:
+        for i in 0 ..< l.len: l[i] = 0.0f
+        timpaniProcess(addr g, addr l[0], addr l[0], 1, l.len)
+        if b < 6:
+          for i in 0 ..< l.len: early = max(early, abs(l[i]))
+      check early > 1e-3f
+      freeTimpani(addr g)
+
+    block:
+      var g = newChoir(4, Sr)
+      check g.isReady
+      choirSet(addr g, 0.0f, 0.5f, 9.0f, 0.0f, 0.8f)
+      choirNoteOn(addr g, 60, 0.9f)
+      var peak = 0.0f
+      for b in 0 ..< 16:
+        for i in 0 ..< l.len: l[i] = 0.0f
+        choirProcess(addr g, addr l[0], addr l[0], 1, l.len)
+        for i in 0 ..< l.len: peak = max(peak, abs(l[i]))
+      check peak > 1e-3f
+      choirAllOff(addr g)
+      freeChoir(addr g)
+
+  test "щипковые держат строй: арфа на ноте A4 даёт ~440 Гц":
+    var g = newPluck(4, Sr)
+    check g.isReady
+    pluckSet(addr g, 0.7f, 0.9f, 0.4f, 0.3f, 200.0f, 0.0f, 0.8f)
+    pluckNoteOn(addr g, 69, 1.0f)
+    var l, r: array[512, float32]
+    var n = 0
+    var buf = newSeq[float32](24000)
+    var pos = 0
+    while pos < buf.len:
+      for i in 0 ..< l.len: l[i] = 0.0f
+      pluckProcess(addr g, addr l[0], addr l[0], 1, l.len)
+      for i in 0 ..< min(l.len, buf.len - pos): buf[pos + i] = l[i]
+      pos += l.len
+    # Автокорреляция: у щипка богатый спектр, и zero-crossing считает лишние
+    # переходы. Основной тон — это лаг, на котором сигнал похож сам на себя.
+    var best = 0.0f
+    var bestLag = 0
+    for lag in 60 .. 200:
+      var acc = 0.0f
+      for i in 4800 ..< 12000:
+        acc += buf[i] * buf[i + lag]
+      if acc > best:
+        best = acc
+        bestLag = lag
+    check bestLag > 0
+    let f = Sr / float32(bestLag)
+    check abs(f - 440.0f) < 12.0f
+    freePluck(addr g)
+
   test "флейта монофонична: новая нота гасит прежний голос":
     var g = newFlute(8, Sr)
     check g.isReady
@@ -297,6 +406,12 @@ suite "инструменты: ноды играют по событиям":
       (getBagpipeFactory(), getBagpipeDesc(), 60),
       (getStringsFactory(), getStringsDesc(), 57),
       (getBellFactory(), getBellDesc(), 60),
+      (getHarpFactory(), getHarpDesc(), 60),
+      (getHarpsichordFactory(), getHarpsichordDesc(), 60),
+      (getRecorderFactory(), getRecorderDesc(), 72),
+      (getBrassFactory(), getBrassDesc(), 60),
+      (getTimpaniFactory(), getTimpaniDesc(), 45),
+      (getChoirFactory(), getChoirDesc(), 60),
       (getDrumsFactory(), getDrumsDesc(), 38)
     ]
     for (factory, desc, note) in rigs:

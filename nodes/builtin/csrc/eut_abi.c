@@ -26,4 +26,14 @@ int eut_abi_sizeof_strings_voice(void){ return (int)sizeof(EutStringsVoice); }
 int eut_abi_sizeof_strings(void)      { return (int)sizeof(EutStrings); }
 int eut_abi_sizeof_bell_voice(void)   { return (int)sizeof(EutBellVoice); }
 int eut_abi_sizeof_bell(void)         { return (int)sizeof(EutBell); }
+int eut_abi_sizeof_pluck_voice(void)  { return (int)sizeof(EutPluckVoice); }
+int eut_abi_sizeof_pluck(void)        { return (int)sizeof(EutPluck); }
+int eut_abi_sizeof_recorder_voice(void){ return (int)sizeof(EutRecorderVoice); }
+int eut_abi_sizeof_recorder(void)     { return (int)sizeof(EutRecorder); }
+int eut_abi_sizeof_brass_voice(void)  { return (int)sizeof(EutBrassVoice); }
+int eut_abi_sizeof_brass(void)        { return (int)sizeof(EutBrass); }
+int eut_abi_sizeof_timpani_voice(void){ return (int)sizeof(EutTimpaniVoice); }
+int eut_abi_sizeof_timpani(void)      { return (int)sizeof(EutTimpani); }
+int eut_abi_sizeof_choir_voice(void)  { return (int)sizeof(EutChoirVoice); }
+int eut_abi_sizeof_choir(void)        { return (int)sizeof(EutChoir); }
 

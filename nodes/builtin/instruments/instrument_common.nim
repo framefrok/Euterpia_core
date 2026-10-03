@@ -315,6 +315,129 @@ proc bellAbi*(g: ptr Bell): InstAbi {.inline.} =
     pedal: nil, process: bellProcessAbi
   )
 
+proc pluckNoteOnAbi(state: pointer; note: cint; velocity: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  pluckNoteOn(cast[ptr Pluck](state), note.int, velocity)
+
+proc pluckNoteOffAbi(state: pointer; note: cint) {.nimcall, raises: [], gcsafe.} =
+  pluckNoteOff(cast[ptr Pluck](state), note.int)
+
+proc pluckAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  pluckAllOff(cast[ptr Pluck](state))
+
+proc pluckProcessAbi(state: pointer; outL, outR: ptr float32; stride, frames: cint;
+                     bendSemitones, modCents: float32) {.nimcall, raises: [], gcsafe.} =
+  # Струна не строится колесом: щипок задаёт высоту целиком.
+  discard bendSemitones
+  discard modCents
+  pluckProcess(cast[ptr Pluck](state), outL, outR, stride.int, frames.int)
+
+proc pluckAbi*(g: ptr Pluck): InstAbi {.inline.} =
+  ## Таблица вызовов щипковых (арфа, клавесин).
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: pluckNoteOnAbi, noteOff: pluckNoteOffAbi, allOff: pluckAllOffAbi,
+    pedal: nil, process: pluckProcessAbi
+  )
+
+proc recorderNoteOnAbi(state: pointer; note: cint; velocity: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  recorderNoteOn(cast[ptr Recorder](state), note.int, velocity)
+
+proc recorderNoteOffAbi(state: pointer; note: cint)
+    {.nimcall, raises: [], gcsafe.} =
+  recorderNoteOff(cast[ptr Recorder](state), note.int)
+
+proc recorderAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  recorderAllOff(cast[ptr Recorder](state))
+
+proc recorderProcessAbi(state: pointer; outL, outR: ptr float32;
+                        stride, frames: cint; bendSemitones, modCents: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  recorderProcess(cast[ptr Recorder](state), outL, outR, stride.int, frames.int,
+                  bendSemitones, modCents)
+
+proc recorderAbi*(g: ptr Recorder): InstAbi {.inline.} =
+  ## Таблица вызовов свирели: деревянный духовой, монофоничный.
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: recorderNoteOnAbi, noteOff: recorderNoteOffAbi,
+    allOff: recorderAllOffAbi, pedal: nil, process: recorderProcessAbi
+  )
+
+proc brassNoteOnAbi(state: pointer; note: cint; velocity: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  brassNoteOn(cast[ptr Brass](state), note.int, velocity)
+
+proc brassNoteOffAbi(state: pointer; note: cint) {.nimcall, raises: [], gcsafe.} =
+  brassNoteOff(cast[ptr Brass](state), note.int)
+
+proc brassAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  brassAllOff(cast[ptr Brass](state))
+
+proc brassProcessAbi(state: pointer; outL, outR: ptr float32; stride, frames: cint;
+                     bendSemitones, modCents: float32) {.nimcall, raises: [], gcsafe.} =
+  brassProcess(cast[ptr Brass](state), outL, outR, stride.int, frames.int,
+               bendSemitones, modCents)
+
+proc brassAbi*(g: ptr Brass): InstAbi {.inline.} =
+  ## Таблица вызовов меди: пила через форманту, вибрато после атаки.
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: brassNoteOnAbi, noteOff: brassNoteOffAbi, allOff: brassAllOffAbi,
+    pedal: nil, process: brassProcessAbi
+  )
+
+proc timpaniNoteOnAbi(state: pointer; note: cint; velocity: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  timpaniNoteOn(cast[ptr Timpani](state), note.int, velocity)
+
+proc timpaniNoteOffAbi(state: pointer; note: cint)
+    {.nimcall, raises: [], gcsafe.} =
+  timpaniNoteOff(cast[ptr Timpani](state), note.int)
+
+proc timpaniAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  timpaniAllOff(cast[ptr Timpani](state))
+
+proc timpaniProcessAbi(state: pointer; outL, outR: ptr float32;
+                       stride, frames: cint; bendSemitones, modCents: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  # Литавры не строятся колесом: высота задана нотой и параметром `tune`.
+  discard bendSemitones
+  discard modCents
+  timpaniProcess(cast[ptr Timpani](state), outL, outR, stride.int, frames.int)
+
+proc timpaniAbi*(g: ptr Timpani): InstAbi {.inline.} =
+  ## Таблица вызовов литавр: настраиваемый удар со строем.
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: timpaniNoteOnAbi, noteOff: timpaniNoteOffAbi,
+    allOff: timpaniAllOffAbi, pedal: nil, process: timpaniProcessAbi
+  )
+
+proc choirNoteOnAbi(state: pointer; note: cint; velocity: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  choirNoteOn(cast[ptr Choir](state), note.int, velocity)
+
+proc choirNoteOffAbi(state: pointer; note: cint) {.nimcall, raises: [], gcsafe.} =
+  choirNoteOff(cast[ptr Choir](state), note.int)
+
+proc choirAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  choirAllOff(cast[ptr Choir](state))
+
+proc choirProcessAbi(state: pointer; outL, outR: ptr float32; stride, frames: cint;
+                     bendSemitones, modCents: float32) {.nimcall, raises: [], gcsafe.} =
+  choirProcess(cast[ptr Choir](state), outL, outR, stride.int, frames.int,
+               bendSemitones, modCents)
+
+proc choirAbi*(g: ptr Choir): InstAbi {.inline.} =
+  ## Таблица вызовов хора: формантные гласные, гласная — параметр.
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: choirNoteOnAbi, noteOff: choirNoteOffAbi, allOff: choirAllOffAbi,
+    pedal: nil, process: choirProcessAbi
+  )
+
 # =============================================================================
 # Управление голосами
 # =============================================================================

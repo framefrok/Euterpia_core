@@ -208,6 +208,16 @@ type
   EutStrings {.importc: "EutStrings", bycopy.} = object
   EutBellVoice {.importc: "EutBellVoice", bycopy.} = object
   EutBell {.importc: "EutBell", bycopy.} = object
+  EutPluckVoice {.importc: "EutPluckVoice", bycopy.} = object
+  EutPluck {.importc: "EutPluck", bycopy.} = object
+  EutRecorderVoice {.importc: "EutRecorderVoice", bycopy.} = object
+  EutRecorder {.importc: "EutRecorder", bycopy.} = object
+  EutBrassVoice {.importc: "EutBrassVoice", bycopy.} = object
+  EutBrass {.importc: "EutBrass", bycopy.} = object
+  EutTimpaniVoice {.importc: "EutTimpaniVoice", bycopy.} = object
+  EutTimpani {.importc: "EutTimpani", bycopy.} = object
+  EutChoirVoice {.importc: "EutChoirVoice", bycopy.} = object
+  EutChoir {.importc: "EutChoir", bycopy.} = object
 
 # ==============================================================================
 # Обёртки состояния
@@ -260,6 +270,25 @@ type
     p: pointer
     voiceCount: int
   Bell* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
+  Pluck* {.bycopy.} = object
+    p: pointer
+      ## Память струн живёт отдельным блоком (как у гитары): её размер зависит
+      ## от частоты дискретизации, а не от раскладки C-структуры.
+    memory: pointer
+    voiceCount: int
+    lineCap: int
+  Recorder* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
+  Brass* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
+  Timpani* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
+  Choir* {.bycopy.} = object
     p: pointer
     voiceCount: int
 
@@ -472,6 +501,91 @@ proc c_bell_all_off(g: ptr EutBell)
 proc c_bell_process(g: ptr EutBell; outL, outR: ptr float32; stride, n: cint)
       {.importc: "eut_bell_process", header: "eut_dsp.h".}
 
+proc c_pluck_init(g: ptr EutPluck; voices: ptr EutPluckVoice; voiceCount: cint;
+                  memory: ptr float32; lineCap: cint; sampleRate: float32)
+      {.importc: "eut_pluck_init", header: "eut_dsp.h".}
+proc c_pluck_reset(g: ptr EutPluck)
+      {.importc: "eut_pluck_reset", header: "eut_dsp.h".}
+proc c_pluck_set(g: ptr EutPluck; tone, damping, pluck, body, bodyHz, pan,
+                 level: float32)
+      {.importc: "eut_pluck_set", header: "eut_dsp.h".}
+proc c_pluck_note_on(g: ptr EutPluck; note: cint; velocity: float32)
+      {.importc: "eut_pluck_note_on", header: "eut_dsp.h".}
+proc c_pluck_note_off(g: ptr EutPluck; note: cint)
+      {.importc: "eut_pluck_note_off", header: "eut_dsp.h".}
+proc c_pluck_all_off(g: ptr EutPluck)
+      {.importc: "eut_pluck_all_off", header: "eut_dsp.h".}
+proc c_pluck_process(g: ptr EutPluck; outL, outR: ptr float32; stride, n: cint)
+      {.importc: "eut_pluck_process", header: "eut_dsp.h".}
+
+proc c_recorder_init(g: ptr EutRecorder; voices: ptr EutRecorderVoice;
+                     voiceCount: cint; sampleRate: float32)
+      {.importc: "eut_recorder_init", header: "eut_dsp.h".}
+proc c_recorder_reset(g: ptr EutRecorder)
+      {.importc: "eut_recorder_reset", header: "eut_dsp.h".}
+proc c_recorder_set(g: ptr EutRecorder; tone, breath, vibratoCents, pan,
+                    level: float32)
+      {.importc: "eut_recorder_set", header: "eut_dsp.h".}
+proc c_recorder_note_on(g: ptr EutRecorder; note: cint; velocity: float32)
+      {.importc: "eut_recorder_note_on", header: "eut_dsp.h".}
+proc c_recorder_note_off(g: ptr EutRecorder; note: cint)
+      {.importc: "eut_recorder_note_off", header: "eut_dsp.h".}
+proc c_recorder_all_off(g: ptr EutRecorder)
+      {.importc: "eut_recorder_all_off", header: "eut_dsp.h".}
+proc c_recorder_process(g: ptr EutRecorder; outL, outR: ptr float32;
+                        stride, n: cint; bendSemitones, modCents: float32)
+      {.importc: "eut_recorder_process", header: "eut_dsp.h".}
+
+proc c_brass_init(g: ptr EutBrass; voices: ptr EutBrassVoice; voiceCount: cint;
+                  sampleRate: float32)
+      {.importc: "eut_brass_init", header: "eut_dsp.h".}
+proc c_brass_reset(g: ptr EutBrass)
+      {.importc: "eut_brass_reset", header: "eut_dsp.h".}
+proc c_brass_set(g: ptr EutBrass; tone, rasp, vibratoCents, pan, level: float32)
+      {.importc: "eut_brass_set", header: "eut_dsp.h".}
+proc c_brass_note_on(g: ptr EutBrass; note: cint; velocity: float32)
+      {.importc: "eut_brass_note_on", header: "eut_dsp.h".}
+proc c_brass_note_off(g: ptr EutBrass; note: cint)
+      {.importc: "eut_brass_note_off", header: "eut_dsp.h".}
+proc c_brass_all_off(g: ptr EutBrass)
+      {.importc: "eut_brass_all_off", header: "eut_dsp.h".}
+proc c_brass_process(g: ptr EutBrass; outL, outR: ptr float32; stride, n: cint;
+                     bendSemitones, modCents: float32)
+      {.importc: "eut_brass_process", header: "eut_dsp.h".}
+
+proc c_timpani_init(g: ptr EutTimpani; voices: ptr EutTimpaniVoice;
+                    voiceCount: cint; sampleRate: float32)
+      {.importc: "eut_timpani_init", header: "eut_dsp.h".}
+proc c_timpani_reset(g: ptr EutTimpani)
+      {.importc: "eut_timpani_reset", header: "eut_dsp.h".}
+proc c_timpani_set(g: ptr EutTimpani; tune, decay, tone, pan, level: float32)
+      {.importc: "eut_timpani_set", header: "eut_dsp.h".}
+proc c_timpani_note_on(g: ptr EutTimpani; note: cint; velocity: float32)
+      {.importc: "eut_timpani_note_on", header: "eut_dsp.h".}
+proc c_timpani_note_off(g: ptr EutTimpani; note: cint)
+      {.importc: "eut_timpani_note_off", header: "eut_dsp.h".}
+proc c_timpani_all_off(g: ptr EutTimpani)
+      {.importc: "eut_timpani_all_off", header: "eut_dsp.h".}
+proc c_timpani_process(g: ptr EutTimpani; outL, outR: ptr float32; stride, n: cint)
+      {.importc: "eut_timpani_process", header: "eut_dsp.h".}
+
+proc c_choir_init(g: ptr EutChoir; voices: ptr EutChoirVoice; voiceCount: cint;
+                  sampleRate: float32)
+      {.importc: "eut_choir_init", header: "eut_dsp.h".}
+proc c_choir_reset(g: ptr EutChoir)
+      {.importc: "eut_choir_reset", header: "eut_dsp.h".}
+proc c_choir_set(g: ptr EutChoir; vowel, tone, vibratoCents, pan, level: float32)
+      {.importc: "eut_choir_set", header: "eut_dsp.h".}
+proc c_choir_note_on(g: ptr EutChoir; note: cint; velocity: float32)
+      {.importc: "eut_choir_note_on", header: "eut_dsp.h".}
+proc c_choir_note_off(g: ptr EutChoir; note: cint)
+      {.importc: "eut_choir_note_off", header: "eut_dsp.h".}
+proc c_choir_all_off(g: ptr EutChoir)
+      {.importc: "eut_choir_all_off", header: "eut_dsp.h".}
+proc c_choir_process(g: ptr EutChoir; outL, outR: ptr float32; stride, n: cint;
+                     bendSemitones, modCents: float32)
+      {.importc: "eut_choir_process", header: "eut_dsp.h".}
+
 proc c_size_inst_voice(): cint {.importc: "eut_abi_sizeof_inst_voice", header: "eut_dsp.h".}
 proc c_size_organ_voice(): cint {.importc: "eut_abi_sizeof_organ_voice", header: "eut_dsp.h".}
 proc c_size_organ(): cint {.importc: "eut_abi_sizeof_organ", header: "eut_dsp.h".}
@@ -489,6 +603,16 @@ proc c_size_strings_voice(): cint {.importc: "eut_abi_sizeof_strings_voice", hea
 proc c_size_strings(): cint {.importc: "eut_abi_sizeof_strings", header: "eut_dsp.h".}
 proc c_size_bell_voice(): cint {.importc: "eut_abi_sizeof_bell_voice", header: "eut_dsp.h".}
 proc c_size_bell(): cint {.importc: "eut_abi_sizeof_bell", header: "eut_dsp.h".}
+proc c_size_pluck_voice(): cint {.importc: "eut_abi_sizeof_pluck_voice", header: "eut_dsp.h".}
+proc c_size_pluck(): cint {.importc: "eut_abi_sizeof_pluck", header: "eut_dsp.h".}
+proc c_size_recorder_voice(): cint {.importc: "eut_abi_sizeof_recorder_voice", header: "eut_dsp.h".}
+proc c_size_recorder(): cint {.importc: "eut_abi_sizeof_recorder", header: "eut_dsp.h".}
+proc c_size_brass_voice(): cint {.importc: "eut_abi_sizeof_brass_voice", header: "eut_dsp.h".}
+proc c_size_brass(): cint {.importc: "eut_abi_sizeof_brass", header: "eut_dsp.h".}
+proc c_size_timpani_voice(): cint {.importc: "eut_abi_sizeof_timpani_voice", header: "eut_dsp.h".}
+proc c_size_timpani(): cint {.importc: "eut_abi_sizeof_timpani", header: "eut_dsp.h".}
+proc c_size_choir_voice(): cint {.importc: "eut_abi_sizeof_choir_voice", header: "eut_dsp.h".}
+proc c_size_choir(): cint {.importc: "eut_abi_sizeof_choir", header: "eut_dsp.h".}
 
 # ==============================================================================
 # Предикаты готовности
@@ -512,6 +636,11 @@ proc isReady*(g: Flute): bool {.inline.} = not g.p.isNil
 proc isReady*(g: Bagpipe): bool {.inline.} = not g.p.isNil
 proc isReady*(g: Strings): bool {.inline.} = not g.p.isNil
 proc isReady*(g: Bell): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Pluck): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Recorder): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Brass): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Timpani): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Choir): bool {.inline.} = not g.p.isNil
 
 # ==============================================================================
 # Внутренние помощники
@@ -1233,6 +1362,294 @@ proc bellProcess*(g: ptr Bell; outL, outR: ptr float32; stride,
   if g.isNil or g.p.isNil or n <= 0: return
   c_bell_process(cast[ptr EutBell](g.p), outL, outR, stride.cint, n.cint)
 
+# --- щипковые (арфа, клавесин) ------------------------------------------------
+
+const PluckLowestHz* = 20.0f
+  ## Нижняя граница строя, под которую считается память струн. Литавры — не
+  ## щипковые, а вот арфа в самой низкой октаве опускается ниже C2, поэтому
+  ## запас нужен: 20 Гц ≈ MIDI 15.
+
+proc pluckMemoryFrames*(sampleRate, lowestHz: float32): int =
+  ## Кадров линии задержки на одну струну.
+  max(int(sampleRate / max(lowestHz, 1.0f)) + 8, 2)
+
+proc newPluck*(voiceCount: int = 12; sampleRate: float32 = 48000.0f): Pluck =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_pluck().int
+  let voiceBytes = c_size_pluck_voice().int
+  let lineCap = pluckMemoryFrames(max(sampleRate, 96000.0f), PluckLowestHz)
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  result.lineCap = lineCap
+  result.memory = allocState(lineCap * n * sizeof(float32))
+  if result.memory.isNil:
+    deallocShared(result.p)
+    result.p = nil
+    return
+  c_pluck_init(cast[ptr EutPluck](result.p),
+               cast[ptr EutPluckVoice](instVoices(result.p, stateBytes)),
+               n.cint, cast[ptr float32](result.memory), lineCap.cint, sampleRate)
+
+proc freePluck*(g: ptr Pluck) {.inline.} =
+  if g.isNil:
+    return
+  if not g.memory.isNil:
+    deallocShared(g.memory)
+    g.memory = nil
+  if not g.p.isNil:
+    deallocShared(g.p)
+    g.p = nil
+
+proc pluckInitAt*(g: ptr Pluck; sampleRate: float32): bool =
+  ## Переинициализация на другой частоте. Отказывает, если линии струн не
+  ## помещаются в уже выделенный блок: выходить за границу памяти нельзя.
+  if g.isNil or g.p.isNil or g.memory.isNil:
+    return false
+  if pluckMemoryFrames(sampleRate, PluckLowestHz) > g.lineCap:
+    return false
+  let stateBytes = c_size_pluck().int
+  c_pluck_init(cast[ptr EutPluck](g.p),
+               cast[ptr EutPluckVoice](instVoices(g.p, stateBytes)),
+               g.voiceCount.cint, cast[ptr float32](g.memory), g.lineCap.cint,
+               sampleRate)
+  true
+
+proc pluckSet*(g: ptr Pluck; tone, damping, pluck, body, bodyHz, pan,
+               level: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_pluck_set(cast[ptr EutPluck](g.p), tone, damping, pluck, body, bodyHz, pan,
+              level)
+
+proc pluckNoteOn*(g: ptr Pluck; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_pluck_note_on(cast[ptr EutPluck](g.p), note.cint, velocity)
+
+proc pluckNoteOff*(g: ptr Pluck; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_pluck_note_off(cast[ptr EutPluck](g.p), note.cint)
+
+proc pluckAllOff*(g: ptr Pluck) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_pluck_all_off(cast[ptr EutPluck](g.p))
+
+proc pluckProcess*(g: ptr Pluck; outL, outR: ptr float32; stride,
+                   n: int) {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_pluck_process(cast[ptr EutPluck](g.p), outL, outR, stride.cint, n.cint)
+
+# --- свирель -----------------------------------------------------------------
+
+proc newRecorder*(voiceCount: int = 8; sampleRate: float32 = 48000.0f): Recorder =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_recorder().int
+  let voiceBytes = c_size_recorder_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_recorder_init(cast[ptr EutRecorder](result.p),
+                  cast[ptr EutRecorderVoice](instVoices(result.p, stateBytes)),
+                  n.cint, sampleRate)
+
+proc freeRecorder*(g: ptr Recorder) {.inline.} =
+  if g.isNil or g.p.isNil:
+    return
+  deallocShared(g.p)
+  g.p = nil
+
+proc recorderInitAt*(g: ptr Recorder; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_recorder().int
+  c_recorder_init(cast[ptr EutRecorder](g.p),
+                  cast[ptr EutRecorderVoice](instVoices(g.p, stateBytes)),
+                  g.voiceCount.cint, sampleRate)
+  true
+
+proc recorderSet*(g: ptr Recorder; tone, breath, vibratoCents, pan,
+                  level: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_recorder_set(cast[ptr EutRecorder](g.p), tone, breath, vibratoCents, pan,
+                 level)
+
+proc recorderNoteOn*(g: ptr Recorder; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_recorder_note_on(cast[ptr EutRecorder](g.p), note.cint, velocity)
+
+proc recorderNoteOff*(g: ptr Recorder; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_recorder_note_off(cast[ptr EutRecorder](g.p), note.cint)
+
+proc recorderAllOff*(g: ptr Recorder) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_recorder_all_off(cast[ptr EutRecorder](g.p))
+
+proc recorderProcess*(g: ptr Recorder; outL, outR: ptr float32; stride,
+                      n: int; bendSemitones: float32 = 0.0f;
+                      modCents: float32 = 0.0f) {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_recorder_process(cast[ptr EutRecorder](g.p), outL, outR, stride.cint, n.cint,
+                     bendSemitones, modCents)
+
+# --- медь --------------------------------------------------------------------
+
+proc newBrass*(voiceCount: int = 8; sampleRate: float32 = 48000.0f): Brass =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_brass().int
+  let voiceBytes = c_size_brass_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_brass_init(cast[ptr EutBrass](result.p),
+               cast[ptr EutBrassVoice](instVoices(result.p, stateBytes)),
+               n.cint, sampleRate)
+
+proc freeBrass*(g: ptr Brass) {.inline.} =
+  if g.isNil or g.p.isNil:
+    return
+  deallocShared(g.p)
+  g.p = nil
+
+proc brassInitAt*(g: ptr Brass; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_brass().int
+  c_brass_init(cast[ptr EutBrass](g.p),
+               cast[ptr EutBrassVoice](instVoices(g.p, stateBytes)),
+               g.voiceCount.cint, sampleRate)
+  true
+
+proc brassSet*(g: ptr Brass; tone, rasp, vibratoCents, pan, level: float32)
+    {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_brass_set(cast[ptr EutBrass](g.p), tone, rasp, vibratoCents, pan, level)
+
+proc brassNoteOn*(g: ptr Brass; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_brass_note_on(cast[ptr EutBrass](g.p), note.cint, velocity)
+
+proc brassNoteOff*(g: ptr Brass; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_brass_note_off(cast[ptr EutBrass](g.p), note.cint)
+
+proc brassAllOff*(g: ptr Brass) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_brass_all_off(cast[ptr EutBrass](g.p))
+
+proc brassProcess*(g: ptr Brass; outL, outR: ptr float32; stride, n: int;
+                   bendSemitones: float32 = 0.0f; modCents: float32 = 0.0f)
+    {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_brass_process(cast[ptr EutBrass](g.p), outL, outR, stride.cint, n.cint,
+                  bendSemitones, modCents)
+
+# --- литавры -----------------------------------------------------------------
+
+proc newTimpani*(voiceCount: int = 6; sampleRate: float32 = 48000.0f): Timpani =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_timpani().int
+  let voiceBytes = c_size_timpani_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_timpani_init(cast[ptr EutTimpani](result.p),
+                 cast[ptr EutTimpaniVoice](instVoices(result.p, stateBytes)),
+                 n.cint, sampleRate)
+
+proc freeTimpani*(g: ptr Timpani) {.inline.} =
+  if g.isNil or g.p.isNil:
+    return
+  deallocShared(g.p)
+  g.p = nil
+
+proc timpaniInitAt*(g: ptr Timpani; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_timpani().int
+  c_timpani_init(cast[ptr EutTimpani](g.p),
+                 cast[ptr EutTimpaniVoice](instVoices(g.p, stateBytes)),
+                 g.voiceCount.cint, sampleRate)
+  true
+
+proc timpaniSet*(g: ptr Timpani; tune, decay, tone, pan, level: float32)
+    {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_timpani_set(cast[ptr EutTimpani](g.p), tune, decay, tone, pan, level)
+
+proc timpaniNoteOn*(g: ptr Timpani; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_timpani_note_on(cast[ptr EutTimpani](g.p), note.cint, velocity)
+
+proc timpaniNoteOff*(g: ptr Timpani; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_timpani_note_off(cast[ptr EutTimpani](g.p), note.cint)
+
+proc timpaniAllOff*(g: ptr Timpani) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_timpani_all_off(cast[ptr EutTimpani](g.p))
+
+proc timpaniProcess*(g: ptr Timpani; outL, outR: ptr float32; stride,
+                     n: int) {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_timpani_process(cast[ptr EutTimpani](g.p), outL, outR, stride.cint, n.cint)
+
+# --- хор ---------------------------------------------------------------------
+
+proc newChoir*(voiceCount: int = 12; sampleRate: float32 = 48000.0f): Choir =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_choir().int
+  let voiceBytes = c_size_choir_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_choir_init(cast[ptr EutChoir](result.p),
+               cast[ptr EutChoirVoice](instVoices(result.p, stateBytes)),
+               n.cint, sampleRate)
+
+proc freeChoir*(g: ptr Choir) {.inline.} =
+  if g.isNil or g.p.isNil:
+    return
+  deallocShared(g.p)
+  g.p = nil
+
+proc choirInitAt*(g: ptr Choir; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_choir().int
+  c_choir_init(cast[ptr EutChoir](g.p),
+               cast[ptr EutChoirVoice](instVoices(g.p, stateBytes)),
+               g.voiceCount.cint, sampleRate)
+  true
+
+proc choirSet*(g: ptr Choir; vowel, tone, vibratoCents, pan, level: float32)
+    {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_choir_set(cast[ptr EutChoir](g.p), vowel, tone, vibratoCents, pan, level)
+
+proc choirNoteOn*(g: ptr Choir; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_choir_note_on(cast[ptr EutChoir](g.p), note.cint, velocity)
+
+proc choirNoteOff*(g: ptr Choir; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_choir_note_off(cast[ptr EutChoir](g.p), note.cint)
+
+proc choirAllOff*(g: ptr Choir) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_choir_all_off(cast[ptr EutChoir](g.p))
+
+proc choirProcess*(g: ptr Choir; outL, outR: ptr float32; stride, n: int;
+                   bendSemitones: float32 = 0.0f; modCents: float32 = 0.0f)
+    {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_choir_process(cast[ptr EutChoir](g.p), outL, outR, stride.cint, n.cint,
+                  bendSemitones, modCents)
+
 # --- ABI --------------------------------------------------------------------
 
 proc abiCheck*(): bool =
@@ -1279,6 +1696,21 @@ proc abiCheck*(): bool =
   c_size_strings() mod 8 == 0 and
   c_size_bell_voice() == 200 and
   c_size_bell() == 48 and
-  c_size_bell() mod 8 == 0
+  c_size_bell() mod 8 == 0 and
+  c_size_pluck_voice() == 112 and
+  c_size_pluck() == 64 and
+  c_size_pluck() mod 8 == 0 and
+  c_size_recorder_voice() == 96 and
+  c_size_recorder() == 56 and
+  c_size_recorder() mod 8 == 0 and
+  c_size_brass_voice() == 108 and
+  c_size_brass() == 56 and
+  c_size_brass() mod 8 == 0 and
+  c_size_timpani_voice() == 140 and
+  c_size_timpani() == 48 and
+  c_size_timpani() mod 8 == 0 and
+  c_size_choir_voice() == 140 and
+  c_size_choir() == 56 and
+  c_size_choir() mod 8 == 0
 
 {.pop.}

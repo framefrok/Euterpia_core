@@ -31,6 +31,11 @@ import
   instruments/bagpipe,
   instruments/strings,
   instruments/bell,
+  instruments/plucked,
+  instruments/recorder,
+  instruments/brass,
+  instruments/timpani,
+  instruments/choir,
   sequencer/notes
 
 type
@@ -42,6 +47,7 @@ type
     bnCompressor, bnDelay,
     bnOrgan, bnPiano, bnGuitar, bnDrums,
     bnFlute, bnBagpipe, bnStrings, bnBell,
+    bnHarp, bnHarpsichord, bnRecorder, bnBrass, bnTimpani, bnChoir,
     bnNotes
 
   ## Порядок ниже совпадает с порядком нод в реестре и используется
@@ -59,6 +65,7 @@ const
     bnCompressor, bnDelay,
     bnOrgan, bnPiano, bnGuitar, bnDrums,
     bnFlute, bnBagpipe, bnStrings, bnBell,
+    bnHarp, bnHarpsichord, bnRecorder, bnBrass, bnTimpani, bnChoir,
     bnNotes
   ]
 
@@ -82,6 +89,12 @@ proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
   of bnBagpipe:     getBagpipeDesc()
   of bnStrings:     getStringsDesc()
   of bnBell:        getBellDesc()
+  of bnHarp:        getHarpDesc()
+  of bnHarpsichord: getHarpsichordDesc()
+  of bnRecorder:    getRecorderDesc()
+  of bnBrass:       getBrassDesc()
+  of bnTimpani:     getTimpaniDesc()
+  of bnChoir:       getChoirDesc()
   of bnNotes:       getNotesDesc()
 
 proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
@@ -104,6 +117,12 @@ proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   of bnBagpipe:     getBagpipeFactory()
   of bnStrings:     getStringsFactory()
   of bnBell:        getBellFactory()
+  of bnHarp:        getHarpFactory()
+  of bnHarpsichord: getHarpsichordFactory()
+  of bnRecorder:    getRecorderFactory()
+  of bnBrass:       getBrassFactory()
+  of bnTimpani:     getTimpaniFactory()
+  of bnChoir:       getChoirFactory()
   of bnNotes:       getNotesFactory()
 
 proc registerBuiltinNodes*(reg: var NodeRegistry): int =
