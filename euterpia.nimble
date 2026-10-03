@@ -108,7 +108,7 @@ task cli, "Сборка CLI: build/euterpia (issue #88)":
   buildLog "cli"
   exec "nim c --hints:off --out:" & cliBin & " cli.nim"
 
-task cliSmoke, "CLI smoke: точка входа, doctor, completion, проект и настройки (#88, #89, #105, #258, #259)":
+task cliSmoke, "CLI smoke: точка входа, doctor, completion, проект, граф и настройки (#88, #89, #90, #105, #258, #259)":
   mkDir buildDir
   buildLog "cli build"
   exec "nim c --hints:off --out:" & cliBin & " cli.nim"

@@ -826,3 +826,238 @@ suite "CLI: настройки окружения — config (#258)":
     check onDisk["futureKey"]["a"].getInt == 1
     check onDisk["logLevel"].getStr == "debug"
 
+# =============================================================================
+# Граф: node / connect / disconnect / param / graph check (#90)
+# =============================================================================
+
+suite "CLI: граф — node/connect/param/graph check (#90)":
+  let dir = getTempDir() / "euterpia_cli_graph"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  let work = dir / "cwd"
+  createDir(work)
+  # Проект по умолчанию (`project.eut`) — как в примерах MANIFEST §19:
+  # команды графа без `--file` правят именно его. Отдельный тест проверяет,
+  # что явный путь (`--file` и аргумент с `.eut`) выбирает другой файл.
+  let project = work / "project.eut"
+
+  test "node add: порты, задержка и умолчания берутся из типа ноды":
+    check runCliIn(work, ["init", "--name", "Graph"]).code == 0
+
+    let added = runCliIn(work, ["node", "add", "osc"])
+    check added.code == 0
+    check added.errput.len == 0
+    check "добавлена нода #1 Oscillator (euterpia.osc)" in added.output
+
+    check runCliIn(work, ["node", "add", "gain"]).code == 0
+    let machine = parseJson(runCliIn(work,
+      ["--json", "node", "list", "project.eut"]).output)
+    check machine["ok"].getBool
+    check machine["command"].getStr == "node"
+    check machine["summary"]["nodes"].getInt == 2
+
+    let osc = machine["nodes"][0]
+    check osc["id"].getInt == 1
+    check osc["type"].getStr == "euterpia.osc"
+    check osc["known"].getBool
+    check osc["counts"]["audio"]["out"].getInt == 1
+    check osc["counts"]["event"]["in"].getInt == 1
+    # Параметры в файле — умолчания типа (freq 440, level -6 — из описателя).
+    check osc["params"]["freq"].getFloat == 440.0
+    check osc["params"]["level"].getFloat == -6.0
+
+    # Файл получает счётчики портов: без них связь некуда привязать.
+    let onDisk = parseJson(readFile(project))
+    check onDisk["graph"]["nodes"][0]["audioOutCount"].getInt == 1
+    check onDisk["graph"]["nodes"][0]["parameters"]["freq"].getFloat == 440.0
+
+  test "node add: неизвестный тип — код 1 и список доступных типов":
+    let r = runCliIn(work, ["node", "add", "reverb", "--file", "project.eut"])
+    check r.code == 1
+    check "reverb" in r.errput
+    check "euterpia.osc" in r.errput
+    # Файл не изменился: нода не добавилась.
+    check parseJson(readFile(project))["graph"]["nodes"].len == 2
+
+  test "node types: каталог типов с портами и параметрами":
+    let human = runCliIn(work, ["node", "types"])
+    check human.code == 0
+    check "euterpia.osc — Oscillator (generator)" in human.output
+    check "euterpia.delay — Delay (effects)" in human.output
+
+    let machine = parseJson(runCliIn(work, ["--json", "node", "types"]).output)
+    check machine["count"].getInt == machine["types"].len
+    var found = false
+    for item in machine["types"]:
+      if item["id"].getStr == "euterpia.osc":
+        found = true
+        check item["ports"]["audio"]["out"].getInt == 1
+        check item["params"].len == 5
+    check found
+
+  test "connect: связь попадает в файл, graph check компилирует граф":
+    let connected = runCliIn(work, ["connect", "osc:out", "gain:in"])
+    check connected.code == 0
+    check "#1:audio:0 → #2:audio:0" in connected.output
+
+    let onDisk = parseJson(readFile(project))
+    check onDisk["graph"]["connections"].len == 1
+    check onDisk["graph"]["connections"][0]["srcNodeId"].getInt == 1
+    check onDisk["graph"]["connections"][0]["dstNodeId"].getInt == 2
+    check onDisk["graph"]["connections"][0]["sigType"].getInt == 0
+
+    let checked = runCliIn(work, ["graph", "check", "project.eut"])
+    check checked.code == 0
+    check "граф компилируется: шагов 2" in checked.output
+    check "провалов: 0" in checked.output
+
+    let machine = parseJson(runCliIn(work,
+      ["--json", "graph", "check", "project.eut"]).output)
+    check machine["ok"].getBool
+    check machine["compile"]["verdict"].getStr == "compiles"
+    check machine["compile"]["steps"].getInt == 2
+    check machine["summary"]["fail"].getInt == 0
+
+  test "connect: вид порта обязан совпадать, повтор связи — ошибка":
+    # У gain есть ctrl-вход: осциллятор к нему не подключается.
+    let wrongKind = runCliIn(work, ["connect", "osc:out", "gain:ctrl:0"])
+    check wrongKind.code == 1
+    check "виды портов не совпадают" in wrongKind.errput
+
+    let duplicate = runCliIn(work, ["connect", "osc:out", "gain:in"])
+    check duplicate.code == 1
+    check "уже есть" in duplicate.errput
+
+    # Порта с таким номером у ноды нет: ошибка называет доступное число.
+    let noPort = runCliIn(work, ["connect", "osc:audio:1", "gain:in"])
+    check noPort.code == 1
+    check "доступно 1" in noPort.errput
+
+  test "param: set проверяет диапазон, get печатает источник значения":
+    check runCliIn(work, ["param", "set", "1", "freq", "220"]).code == 0
+    check parseJson(readFile(project))["graph"]["nodes"][0]["parameters"]["freq"].getFloat == 220.0
+
+    let got = parseJson(runCliIn(work,
+      ["--json", "param", "get", "1", "freq"]).output)
+    check got["param"]["value"].getFloat == 220.0
+    check got["param"]["source"].getStr == "file"
+    check got["param"]["default"].getFloat == 440.0
+    check got["param"]["id"].getInt == 1
+
+    # Вне диапазона: отказ, файл не тронут.
+    let outOfRange = runCliIn(work, ["param", "set", "1", "freq", "999999"])
+    check outOfRange.code == 1
+    check "вне диапазона" in outOfRange.errput
+    check parseJson(readFile(project))["graph"]["nodes"][0]["parameters"]["freq"].getFloat == 220.0
+
+    # Дискретный параметр не принимает дробное значение.
+    let fraction = runCliIn(work, ["param", "set", "1", "waveform", "1.5"])
+    check fraction.code == 1
+    check "целочисленный" in fraction.errput
+
+    # Нечисловое значение — ошибка данных, а не тихий ноль.
+    let notNumber = runCliIn(work, ["param", "set", "1", "freq", "высоко"])
+    check notNumber.code == 1
+    check "должно быть числом" in notNumber.errput
+
+  test "--dry-run показывает правку и не пишет файл":
+    let before = readFile(project)
+    let r = runCliIn(work, ["--dry-run", "node", "add", "noise", "--file", "project.eut"])
+    check r.code == 0
+    check "добавлена нода #3 Noise (euterpia.noise)" in r.output
+    check "не записан" in r.output
+    check readFile(project) == before
+
+  test "graph check: цикл — провал с вердиктом, а не молчаливый успех":
+    check runCliIn(work, ["connect", "gain:out", "gain:in"]).code == 0
+    let r = runCliIn(work, ["graph", "check", "project.eut"])
+    check r.code == 1
+    check "в графе цикл" in r.output
+    check "провалов: 1" in r.output
+
+    let machine = parseJson(runCliIn(work,
+      ["--json", "graph", "check", "project.eut"]).output)
+    check not machine["ok"].getBool
+    check machine["exitCode"].getInt == 1
+    check machine["compile"]["verdict"].getStr == "cycle"
+    check machine["summary"]["fail"].getInt == 1
+    # Ошибка объяснена и по-человечески, и машинно: агент берёт verdict.
+    check machine["error"]["kind"].getStr == "usage"
+
+    # Без портов снимаются ВСЕ связи между парой нод — цикл уходит.
+    let off = runCliIn(work, ["disconnect", "gain", "gain"])
+    check off.code == 0
+    check "снято связей: 1" in off.output
+    check runCliIn(work, ["graph", "check", "project.eut"]).code == 0
+
+  test "disconnect: нет такой связи — ошибка, а не тихий успех":
+    let r = runCliIn(work, ["disconnect", "2", "1"])
+    check r.code == 1
+    check "такой связи нет" in r.errput
+
+    # Связь с указанием портов снимается точечно и соединяется обратно.
+    check runCliIn(work, ["disconnect", "osc:out", "gain:in"]).code == 0
+    check parseJson(readFile(project))["graph"]["connections"].len == 0
+    check runCliIn(work, ["connect", "osc:out", "gain:in"]).code == 0
+
+  test "node rm: удаляет ноду и её связи, граф остаётся согласованным":
+    let r = runCliIn(work, ["node", "rm", "2"])
+    check r.code == 0
+    check "удалена нода #2 Gain (euterpia.gain)" in r.output
+    check "удалено связей: 1" in r.output
+
+    let onDisk = parseJson(readFile(project))
+    check onDisk["graph"]["nodes"].len == 1
+    check onDisk["graph"]["connections"].len == 0
+
+    # Проверка проекта из #89 видит ту же картину, что и проверка графа.
+    let validated = runCliIn(work, ["project", "validate", "project.eut"])
+    check validated.code == 0
+    check "graph: ноды и связи" in validated.output
+    check runCliIn(work, ["graph", "check", "project.eut"]).code == 0
+
+  test "пустой граф: предупреждение, но не провал (код 0)":
+    check runCliIn(work, ["init", "empty.eut"]).code == 0
+    let r = runCliIn(work, ["graph", "check", "empty.eut"])
+    check r.code == 0
+    check "[warn] в графе есть ноды" in r.output
+    check "добавьте ноду: euterpia node add oscillator" in r.output
+    check "провалов: 0" in r.output
+    check "предупреждений: 1" in r.output
+
+  test "выбор файла: --file и аргумент с .eut указывают на один проект":
+    check runCliIn(work, ["init", "other.eut", "--name", "Other"]).code == 0
+    check runCliIn(work, ["node", "add", "svf", "other.eut"]).code == 0
+    check runCliIn(work, ["node", "add", "delay", "--file", "other.eut"]).code == 0
+
+    # Правки ушли в other.eut, а проект по умолчанию не тронут.
+    check parseJson(readFile(work / "other.eut"))["graph"]["nodes"].len == 2
+    check parseJson(readFile(project))["graph"]["nodes"].len == 1
+
+    # Первый позиционный аргумент, начинающийся с ключа, файлом не считается.
+    let wrong = runCliIn(work, ["node", "list", "--file"])
+    check wrong.code == 1
+    check "--file" in wrong.errput
+
+  test "вывод детерминирован: два запуска совпадают побайтово":
+    let first = runCliIn(work, ["node", "list", "project.eut"]).output
+    let second = runCliIn(work, ["node", "list", "project.eut"]).output
+    check first == second
+
+  test "справка и автодополнение знают новые команды":
+    let names = machineCommandNames()
+    for name in ["node", "connect", "disconnect", "param", "graph"]:
+      check name in names
+
+    let nodeHelp = runCliIn(work, ["help", "node"])
+    check nodeHelp.code == 0
+    check "node <list|types|add|rm|show>" in nodeHelp.output
+    check "graph check" in runCliIn(work, ["help", "graph"]).output
+
+    let candidates = runCli(["__complete", "--", "n"])
+    check candidates.code == 0
+    check "node" in candidates.output
+
