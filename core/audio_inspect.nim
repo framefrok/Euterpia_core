@@ -112,7 +112,7 @@ proc defaultInspectionOptions*(): InspectionOptions =
     hop: 512,
     clipThreshold: 0.9995f,
     dcWarn: 0.002f,
-    glitchK: 12.0f,
+    glitchK: 16.0f,
     humFreqs: @[50.0f, 60.0f],
     humDbOverFloor: 18.0f,
     dropoutRatio: 1.0e-4f
@@ -288,29 +288,67 @@ proc scanClick(rep: var InspectionReport; samples: openArray[float32];
     let mad = max(medianOf(devs), 1.0e-6f)
     let thr = med + opts.glitchK * mad
 
+    # Разрывы рядом по времени — это один «частокол» транзиентов, а не сотни
+    # отдельных дефектов: в плотном миксе иначе отчёт превращался бы в
+    # тысячи строк. Группируем прогоны в пределах 30 мс.
+    type ClickRun = tuple[a, b: int; peak: float32; count: int]
+    let mergeWin = max(1, int(0.030 * float64(sr)))
+    var runs: seq[ClickRun]
     var i = 0
     while i < diffs.len:
       if diffs[i] > thr:
-        let start = i
-        var peakDiff = diffs[i]
+        let a = i
+        var peak = diffs[i]
+        var cnt = 0
         while i < diffs.len and diffs[i] > thr:
-          peakDiff = max(peakDiff, diffs[i])
+          peak = max(peak, diffs[i])
+          inc cnt
           inc i
-        let ratio = peakDiff / thr
-        rep.addDefect InspectionDefect(
-          startSample: int64(start + 1),
-          startSec: sampleToSec(int64(start + 1), sr.float32),
-          endSec: sampleToSec(int64(i + 1), sr.float32), channel: ch,
-          kind: dkClick, severity: sevWarn,
-          confidence: min(1.0f, max(0.2f, (ratio - 1.0f) / 6.0f)),
-          detail: "скачок " & $peakDiff & " (порог " & $thr &
-            ", ×" & $ratio & ")",
-          cause: "разрыв сигнала: старт/стоп голоса без микро-фейда, " &
-            "смена параметра ступенью, склейка буфера",
-          advice: "добавить микро-фейд (≤2 мс) на границе или сгладить " &
-            "параметр")
+        runs.add (a, i - 1, peak, cnt)
       else:
         inc i
+
+    var merged: seq[ClickRun]
+    for r in runs:
+      if merged.len > 0 and r.a - merged[^1].b <= mergeWin:
+        merged[^1].b = r.b
+        merged[^1].peak = max(merged[^1].peak, r.peak)
+        merged[^1].count += r.count
+      else:
+        merged.add r
+
+    const MaxClickGroups = 40
+    # Щелчок — КОРОТКИЙ разрыв, а не широкополосный транзиент: у щипка или
+    # тарелки производная высока много сэмплов подряд, и это нормальная
+    # атака, а не дефект. Поэтому оставляем только узкие выбросы.
+    let maxClickSpan = max(1, int(0.005 * float64(sr)))
+    var kept = 0
+    for r in merged:
+      if (r.b - r.a) > maxClickSpan or r.count > 24:
+        continue
+      if kept >= MaxClickGroups:
+        rep.addDefect InspectionDefect(
+          startSample: int64(r.a), startSec: sampleToSec(int64(r.a), sr.float32),
+          endSec: sampleToSec(int64(merged[^1].b), sr.float32), channel: ch,
+          kind: dkClick, severity: sevInfo, confidence: 0.5f,
+          detail: "ещё группы разрывов подавлены (см. --json)",
+          cause: "продолжение частокола транзиентов",
+          advice: "смотреть интервал целиком, а не отдельные скачки")
+        break
+      let ratio = r.peak / thr
+      rep.addDefect InspectionDefect(
+        startSample: int64(r.a + 1),
+        startSec: sampleToSec(int64(r.a + 1), sr.float32),
+        endSec: sampleToSec(int64(r.b + 2), sr.float32), channel: ch,
+        kind: dkClick, severity: if ratio > 4.0f: sevWarn else: sevInfo,
+        confidence: min(1.0f, max(0.2f, (ratio - 1.0f) / 6.0f)),
+        detail: $r.count & " скачк(ов) до " & $r.peak & " (порог " & $thr &
+          ", ×" & $ratio & ")",
+        cause: "разрыв сигнала: старт/стоп голоса без микро-фейда, " &
+          "смена параметра ступенью, склейка буфера",
+        advice: "добавить микро-фейд (≤2 мс) на границе или сгладить " &
+          "параметр")
+      inc kept
 
 proc scanDropout(rep: var InspectionReport; samples: openArray[float32];
                  channels, sr: int; opts: InspectionOptions) =
