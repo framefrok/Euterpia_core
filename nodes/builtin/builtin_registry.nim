@@ -20,6 +20,7 @@ import
   filters/svf,
   mixing/gain,
   mixing/pan,
+  mixing/mix,
   dynamics/compressor,
   effects/delay,
   instruments/organ,
@@ -33,7 +34,7 @@ type
     bnInput,
     bnOscillator, bnNoise,
     bnBiquad, bnSvf,
-    bnGain, bnPan,
+    bnGain, bnPan, bnMix,
     bnCompressor, bnDelay,
     bnOrgan, bnPiano, bnGuitar, bnDrums,
     bnNotes
@@ -49,7 +50,7 @@ const
     bnInput,
     bnOscillator, bnNoise,
     bnBiquad, bnSvf,
-    bnGain, bnPan,
+    bnGain, bnPan, bnMix,
     bnCompressor, bnDelay,
     bnOrgan, bnPiano, bnGuitar, bnDrums,
     bnNotes
@@ -64,6 +65,7 @@ proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
   of bnSvf:         getSvfDesc()
   of bnGain:        getGainDesc()
   of bnPan:         getPanDesc()
+  of bnMix:         getMixDesc()
   of bnCompressor:  getCompDesc()
   of bnDelay:       getDelayDesc()
   of bnOrgan:       getOrganDesc()
@@ -81,6 +83,7 @@ proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   of bnSvf:         getSvfFactory()
   of bnGain:        getGainFactory()
   of bnPan:         getPanFactory()
+  of bnMix:         getMixFactory()
   of bnCompressor:  getCompFactory()
   of bnDelay:       getDelayFactory()
   of bnOrgan:       getOrganFactory()
