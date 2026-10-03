@@ -901,8 +901,10 @@ void eut_drums_note_on(EutDrums *g, int note, float velocity)
 
   const float ampTime = inst_clamp(sp->ampTime * g->decay * jitterDecay, 0.008f, 8.0f);
   /* Удар ударных держится не пальцем: held = 0, затухание идёт по
-     отпусканию. Так одна и та же огибающая обслуживает и «чок» хэта. */
-  inst_voice_setup(&v->v, note, vel, 0.0005f, 0.0f, ampTime, ampTime, sr);
+     отпусканию. Так одна и та же огибающая обслуживает и «чок» хэта.
+     Атака — не нулевая: она даёт короткий фейд, иначе старт с полной
+     амплитудой превращался в щелчок (поймано инспектором аудио). */
+  inst_voice_setup(&v->v, note, vel, 0.0008f, 0.0f, ampTime, ampTime, sr);
   v->v.held = 0;
   v->v.seq = g->seqCounter;
 
@@ -946,7 +948,10 @@ void eut_drums_note_on(EutDrums *g, int note, float velocity)
   inst_pan_gains(inst_clamp(g->pan + sp->pan, -1.0f, 1.0f), &pl, &pr);
   v->v.gainL = pl * toneMix * 0.5f;
   v->v.gainR = pr * toneMix * 0.5f;
-  v->v.ampInc = 1.0f;   /* мгновенная атака: у удара нет «нарастания» */
+  /* Мгновенной атаки (ampInc = 1) быть не должно: amp прыгал с 0 до 1 за
+     один сэмпл, и это слышалось как щелчок на каждом ударе. Атака из
+     setup (доли миллисекунды) уже достаточно быстрая для удара, но
+     разрыв убирает. */
   g->active = 1;
 }
 
