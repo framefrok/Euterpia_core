@@ -48,4 +48,6 @@ import test_logger
 import test_undo_redo
 import test_waveform_cache
 import test_audio_file_io
+import test_instruments
+import test_mix
 import test_graph_check

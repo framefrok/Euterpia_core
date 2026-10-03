@@ -87,6 +87,17 @@ proc initTransport*(sampleRate: float32 = 48000.0f): Transport =
   result.metronomeEnabled.store(false, moRelaxed)
 
 # ============================================================================
+# Разрешение времени
+# ============================================================================
+
+const
+  PpqTicksPerQuarter* = 960'i32
+    ## Тиков на четверть — разрешение, в котором говорят про время и
+    ## нотные секвенсоры ядра. Совпадает с `PpqResolution` audio-движка
+    ## (`core/audio_engine.nim`): нода, считающая тики сама (например,
+    ## `euterpia.notes`), использует ту же шкалу и не нуждается в пересчёте.
+
+# ============================================================================
 # Time helpers (Control Thread / Offline math)
 # ============================================================================
 
@@ -114,8 +125,8 @@ proc samplesPerBeat*(t: var Transport): float64 {.inline.} =
 proc ticksPerBeat*(t: var Transport): int32 {.inline.} =
   ## Тиков на долю при разрешении 960 PPQ.
   let den = if t.timeSignature.denominator > 0: t.timeSignature.denominator else: 4'i32
-  let v = 960'i32 * 4'i32 div den
-  if v > 0: v else: 960'i32
+  let v = PpqTicksPerQuarter * 4'i32 div den
+  if v > 0: v else: PpqTicksPerQuarter
 
 proc samplesPerBar*(t: var Transport): float64 {.inline.} =
   ## Вычисляет количество сэмплов на один такт с учётом TimeSignature.

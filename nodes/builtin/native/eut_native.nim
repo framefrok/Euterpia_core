@@ -78,6 +78,7 @@ const
 {.compile: ("../csrc/eut_comp.c", EutDspObjPrefix & "eut_comp.o").}
 {.compile: ("../csrc/eut_delay.c", EutDspObjPrefix & "eut_delay.o").}
 {.compile: ("../csrc/eut_abi.c", EutDspObjPrefix & "eut_abi.o").}
+{.compile: ("../csrc/eut_inst.c", EutDspObjPrefix & "eut_inst.o").}
 
 {.push raises: [].}
 
@@ -124,6 +125,21 @@ const
   EutCompPeak* = 0.cint
   EutCompRms*  = 1.cint
 
+  # Куски установки (порядок обязан совпадать с enum в eut_dsp.h).
+  EutDrumKick*      = 0.cint
+  EutDrumSnare*     = 1.cint
+  EutDrumRim*       = 2.cint
+  EutDrumClap*      = 3.cint
+  EutDrumTomLow*    = 4.cint
+  EutDrumTomMid*    = 5.cint
+  EutDrumTomHigh*   = 6.cint
+  EutDrumHatClosed* = 7.cint
+  EutDrumHatPedal*  = 8.cint
+  EutDrumHatOpen*   = 9.cint
+  EutDrumCrash*     = 10.cint
+  EutDrumRide*      = 11.cint
+  EutDrumPieceCount* = 12.cint
+
 # ==============================================================================
 # C-состояния: приватные, наружу не выходят
 # ==============================================================================
@@ -166,6 +182,25 @@ type
     pingPong: cint
     lpStateL, lpStateR: float32
 
+  # ---------------------------------------------------------------------
+  # Инструменты (eut_inst.c)
+  #
+  # Содержимое этих структур Nim не разбирает и не имеет права разбирать:
+  # движку передаётся только `ptr`, а размеры блоков запрашиваются у C
+  # (`eut_abi_sizeof_*`). Поэтому поля не объявлены вообще — раскладка
+  # структур инструментов может меняться без правки Nim-стороны, а
+  # расхождение ловится `abiCheck()`.
+  # ---------------------------------------------------------------------
+  EutInstVoice {.importc: "EutInstVoice", bycopy.} = object
+  EutOrganVoice {.importc: "EutOrganVoice", bycopy.} = object
+  EutOrgan {.importc: "EutOrgan", bycopy.} = object
+  EutPianoVoice {.importc: "EutPianoVoice", bycopy.} = object
+  EutPiano {.importc: "EutPiano", bycopy.} = object
+  EutGuitarVoice {.importc: "EutGuitarVoice", bycopy.} = object
+  EutGuitar {.importc: "EutGuitar", bycopy.} = object
+  EutDrumVoice {.importc: "EutDrumVoice", bycopy.} = object
+  EutDrums {.importc: "EutDrums", bycopy.} = object
+
 # ==============================================================================
 # Обёртки состояния
 #
@@ -186,6 +221,27 @@ type
     p: pointer
   Delay* {.bycopy.} = object
     p: pointer
+  Organ* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
+      ## Число голосов нужно при переинициализации на другой частоте
+      ## дискретизации: C-движок фиксирует `sampleRate` на `*_init`.
+  Piano* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
+  Guitar* {.bycopy.} = object
+    p: pointer
+      ## Струнная память живёт отдельным блоком: её размер зависит от
+      ## частоты дискретизации (`sr / 8 Гц`), а не от раскладки C-структуры.
+    memory: pointer
+    voiceCount: int
+    lineCap: int
+      ## Кадров линии задержки на одну струну — ёмкость выделенного блока.
+      ## Переинициализация на частоте, которой этой ёмкости мало, обязана
+      ## отказать, а не выйти за границу памяти.
+  Drums* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
 
 # ==============================================================================
 # C-функции
@@ -259,6 +315,90 @@ proc c_size_noise(): cint {.importc: "eut_abi_sizeof_noise", header: "eut_dsp.h"
 proc c_size_comp(): cint {.importc: "eut_abi_sizeof_comp", header: "eut_dsp.h".}
 proc c_size_delay(): cint {.importc: "eut_abi_sizeof_delay", header: "eut_dsp.h".}
 
+# --- инструменты ------------------------------------------------------------
+#
+# Общий контракт всех четырёх движков (eut_inst.c):
+#   * `*_process` ДОБАВЛЯЕТ результат в буферы вывода, а не перезаписывает
+#     их: инструмент обязан суммироваться с тем, что уже пришло по порту;
+#   * `stride` — шаг между кадрами канала: 1 — planar (каналы подряд),
+#     2 — interleaved (LRLR). Раскладку задаёт граф, движок её не угадывает;
+#   * `bendSemitones` и `modCents` приходят на блок целиком (control rate).
+
+proc c_organ_init(g: ptr EutOrgan; voices: ptr EutOrganVoice; voiceCount: cint;
+                  sampleRate: float32)
+      {.importc: "eut_organ_init", header: "eut_dsp.h".}
+proc c_organ_reset(g: ptr EutOrgan) {.importc: "eut_organ_reset", header: "eut_dsp.h".}
+proc c_organ_set(g: ptr EutOrgan; bars, tone, clickLevel, vibratoCents, pan,
+                 level: float32) {.importc: "eut_organ_set", header: "eut_dsp.h".}
+proc c_organ_note_on(g: ptr EutOrgan; note: cint; velocity: float32)
+      {.importc: "eut_organ_note_on", header: "eut_dsp.h".}
+proc c_organ_note_off(g: ptr EutOrgan; note: cint)
+      {.importc: "eut_organ_note_off", header: "eut_dsp.h".}
+proc c_organ_all_off(g: ptr EutOrgan) {.importc: "eut_organ_all_off", header: "eut_dsp.h".}
+proc c_organ_process(g: ptr EutOrgan; outL, outR: ptr float32; stride, n: cint;
+                     bendSemitones, modCents: float32)
+      {.importc: "eut_organ_process", header: "eut_dsp.h".}
+
+proc c_piano_init(g: ptr EutPiano; voices: ptr EutPianoVoice; voiceCount: cint;
+                  sampleRate: float32)
+      {.importc: "eut_piano_init", header: "eut_dsp.h".}
+proc c_piano_reset(g: ptr EutPiano) {.importc: "eut_piano_reset", header: "eut_dsp.h".}
+proc c_piano_set(g: ptr EutPiano; tone, decay, detuneCents, hammer, release, pan,
+                 level: float32) {.importc: "eut_piano_set", header: "eut_dsp.h".}
+proc c_piano_note_on(g: ptr EutPiano; note: cint; velocity: float32)
+      {.importc: "eut_piano_note_on", header: "eut_dsp.h".}
+proc c_piano_note_off(g: ptr EutPiano; note: cint)
+      {.importc: "eut_piano_note_off", header: "eut_dsp.h".}
+proc c_piano_pedal(g: ptr EutPiano; down: cint)
+      {.importc: "eut_piano_pedal", header: "eut_dsp.h".}
+proc c_piano_all_off(g: ptr EutPiano) {.importc: "eut_piano_all_off", header: "eut_dsp.h".}
+proc c_piano_process(g: ptr EutPiano; outL, outR: ptr float32; stride, n: cint;
+                     bendSemitones, modCents: float32)
+      {.importc: "eut_piano_process", header: "eut_dsp.h".}
+
+proc c_guitar_init(g: ptr EutGuitar; voices: ptr EutGuitarVoice; voiceCount: cint;
+                   memory: ptr float32; lineCap: cint; sampleRate: float32)
+      {.importc: "eut_guitar_init", header: "eut_dsp.h".}
+proc c_guitar_reset(g: ptr EutGuitar) {.importc: "eut_guitar_reset", header: "eut_dsp.h".}
+proc c_guitar_set(g: ptr EutGuitar; pick, damping, tone, drive, mute, release,
+                  pan, level: float32)
+      {.importc: "eut_guitar_set", header: "eut_dsp.h".}
+proc c_guitar_note_on(g: ptr EutGuitar; note: cint; velocity: float32)
+      {.importc: "eut_guitar_note_on", header: "eut_dsp.h".}
+proc c_guitar_note_off(g: ptr EutGuitar; note: cint)
+      {.importc: "eut_guitar_note_off", header: "eut_dsp.h".}
+proc c_guitar_all_off(g: ptr EutGuitar)
+      {.importc: "eut_guitar_all_off", header: "eut_dsp.h".}
+proc c_guitar_process(g: ptr EutGuitar; outL, outR: ptr float32; stride, n: cint;
+                      bendSemitones, modCents: float32)
+      {.importc: "eut_guitar_process", header: "eut_dsp.h".}
+
+proc c_drums_piece_for_note(note: cint): cint
+      {.importc: "eut_drums_piece_for_note", header: "eut_dsp.h".}
+proc c_drums_init(g: ptr EutDrums; voices: ptr EutDrumVoice; voiceCount: cint;
+                  sampleRate: float32)
+      {.importc: "eut_drums_init", header: "eut_dsp.h".}
+proc c_drums_reset(g: ptr EutDrums) {.importc: "eut_drums_reset", header: "eut_dsp.h".}
+proc c_drums_set(g: ptr EutDrums; tune, decay, snappy, tone, drive, pan,
+                 level: float32) {.importc: "eut_drums_set", header: "eut_dsp.h".}
+proc c_drums_note_on(g: ptr EutDrums; note: cint; velocity: float32)
+      {.importc: "eut_drums_note_on", header: "eut_dsp.h".}
+proc c_drums_note_off(g: ptr EutDrums; note: cint)
+      {.importc: "eut_drums_note_off", header: "eut_dsp.h".}
+proc c_drums_all_off(g: ptr EutDrums) {.importc: "eut_drums_all_off", header: "eut_dsp.h".}
+proc c_drums_process(g: ptr EutDrums; outL, outR: ptr float32; stride, n: cint)
+      {.importc: "eut_drums_process", header: "eut_dsp.h".}
+
+proc c_size_inst_voice(): cint {.importc: "eut_abi_sizeof_inst_voice", header: "eut_dsp.h".}
+proc c_size_organ_voice(): cint {.importc: "eut_abi_sizeof_organ_voice", header: "eut_dsp.h".}
+proc c_size_organ(): cint {.importc: "eut_abi_sizeof_organ", header: "eut_dsp.h".}
+proc c_size_piano_voice(): cint {.importc: "eut_abi_sizeof_piano_voice", header: "eut_dsp.h".}
+proc c_size_piano(): cint {.importc: "eut_abi_sizeof_piano", header: "eut_dsp.h".}
+proc c_size_guitar_voice(): cint {.importc: "eut_abi_sizeof_guitar_voice", header: "eut_dsp.h".}
+proc c_size_guitar(): cint {.importc: "eut_abi_sizeof_guitar", header: "eut_dsp.h".}
+proc c_size_drum_voice(): cint {.importc: "eut_abi_sizeof_drum_voice", header: "eut_dsp.h".}
+proc c_size_drums(): cint {.importc: "eut_abi_sizeof_drums", header: "eut_dsp.h".}
+
 # ==============================================================================
 # Предикаты готовности
 #
@@ -273,6 +413,10 @@ proc isReady*(o: Osc): bool {.inline.} = not o.p.isNil
 proc isReady*(nz: Noise): bool {.inline.} = not nz.p.isNil
 proc isReady*(c: Compressor): bool {.inline.} = not c.p.isNil
 proc isReady*(d: Delay): bool {.inline.} = not d.p.isNil
+proc isReady*(g: Organ): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Piano): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Guitar): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Drums): bool {.inline.} = not g.p.isNil
 
 # ==============================================================================
 # Внутренние помощники
@@ -483,6 +627,313 @@ proc delayProcess*(d: ptr Delay; inL, inR, outL, outR: ptr float32; n: int) {.in
   if d.isNil or d.p.isNil or n <= 0: return
   c_delay_process(cast[ptr EutDelay](d.p), inL, inR, outL, outR, n.cint)
 
+# --- инструменты ------------------------------------------------------------
+#
+# Общая схема владения памятью: состояние движка и массив голосов лежат в
+# ОДНОМ блоке `allocState` (голоса — сразу за состоянием). Так освобождение
+# сводится к одному `deallocShared`, а раскладку Nim не знает: адрес голосов
+# считается как «начало блока + размер состояния», который сообщает сам C.
+
+proc instVoices(state: pointer; stateBytes: int): pointer {.inline.} =
+  ## Адрес массива голосов внутри блока состояния (`eut_inst.c` кладёт
+  ## голоса сразу за состоянием движка). Байты к указателю добавляются
+  ## байтовой арифметикой: складывать указатели разных типов нельзя.
+  ## Хост обязан передать ровно `sizeof(состояние)`: движок сам размечает
+  ## голоса шагом `sizeof(голос)`, и любое «улучшение» выравнивания на
+  ## стороне Nim сдвинуло бы массив относительно ожидаемого движком.
+  cast[pointer](cast[uint](state) + uint(stateBytes))
+
+proc newOrgan*(voiceCount: int = 12; sampleRate: float32 = 48000.0f): Organ =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_organ().int
+  let voiceBytes = c_size_organ_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_organ_init(cast[ptr EutOrgan](result.p),
+               cast[ptr EutOrganVoice](instVoices(result.p, stateBytes)),
+               n.cint, sampleRate)
+
+proc freeOrgan*(g: ptr Organ) {.inline.} =
+  if g.isNil or g.p.isNil:
+    return
+  deallocShared(g.p)
+  g.p = nil
+
+proc organReset*(g: ptr Organ) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_organ_reset(cast[ptr EutOrgan](g.p))
+
+proc organSet*(g: ptr Organ; bars, tone, clickLevel, vibratoCents, pan, level: float32) {.inline.} =
+  ## `bars` — положение регистра (0 — флейты, 1 — полный микст) внутри
+  ## фиксированной таблицы 8 частий; наружу выходит одним параметром,
+  ## чтобы автоматизация регистровой ручки оставалась одномерной.
+  if g.isNil or g.p.isNil: return
+  c_organ_set(cast[ptr EutOrgan](g.p), bars, tone, clickLevel, vibratoCents, pan, level)
+
+proc organNoteOn*(g: ptr Organ; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_organ_note_on(cast[ptr EutOrgan](g.p), note.cint, velocity)
+
+proc organNoteOff*(g: ptr Organ; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_organ_note_off(cast[ptr EutOrgan](g.p), note.cint)
+
+proc organAllOff*(g: ptr Organ) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_organ_all_off(cast[ptr EutOrgan](g.p))
+
+proc organProcess*(g: ptr Organ; outL, outR: ptr float32; stride, n: int;
+                   bendSemitones: float32 = 0.0f; modCents: float32 = 0.0f) {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_organ_process(cast[ptr EutOrgan](g.p), outL, outR, stride.cint, n.cint,
+                  bendSemitones, modCents)
+
+# --- фортепиано -------------------------------------------------------------
+
+proc newPiano*(voiceCount: int = 16; sampleRate: float32 = 48000.0f): Piano =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_piano().int
+  let voiceBytes = c_size_piano_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_piano_init(cast[ptr EutPiano](result.p),
+               cast[ptr EutPianoVoice](instVoices(result.p, stateBytes)),
+               n.cint, sampleRate)
+
+proc freePiano*(g: ptr Piano) {.inline.} =
+  if g.isNil or g.p.isNil:
+    return
+  deallocShared(g.p)
+  g.p = nil
+
+proc pianoReset*(g: ptr Piano) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_piano_reset(cast[ptr EutPiano](g.p))
+
+proc pianoSet*(g: ptr Piano; tone, decay, detuneCents, hammer, release, pan,
+               level: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_piano_set(cast[ptr EutPiano](g.p), tone, decay, detuneCents, hammer, release,
+              pan, level)
+
+proc pianoNoteOn*(g: ptr Piano; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_piano_note_on(cast[ptr EutPiano](g.p), note.cint, velocity)
+
+proc pianoNoteOff*(g: ptr Piano; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_piano_note_off(cast[ptr EutPiano](g.p), note.cint)
+
+proc pianoPedal*(g: ptr Piano; down: bool) {.inline.} =
+  ## CC64: нажатая педаль не гасит голос при note off, а удлиняет его
+  ## затухание — то же поведение, что и в C-движке.
+  if g.isNil or g.p.isNil: return
+  c_piano_pedal(cast[ptr EutPiano](g.p), (if down: 1.cint else: 0.cint))
+
+proc pianoAllOff*(g: ptr Piano) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_piano_all_off(cast[ptr EutPiano](g.p))
+
+proc pianoProcess*(g: ptr Piano; outL, outR: ptr float32; stride, n: int;
+                   bendSemitones: float32 = 0.0f; modCents: float32 = 0.0f) {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_piano_process(cast[ptr EutPiano](g.p), outL, outR, stride.cint, n.cint,
+                  bendSemitones, modCents)
+
+# --- гитара ------------------------------------------------------------------
+
+const GuitarLowestHz* = 8.0f
+  ## Нижняя граница строя, под которую считается струнная память: MIDI 0
+  ## ≈ 8.18 Гц, а амплитудная модуляция длины струны (bend, вибрато) может
+  ## период удлинить, поэтому нужен запас.
+
+const GuitarMaxSampleRate* = 96000.0f
+  ## Частота дискретизации, под которую память струн выделяется сразу.
+  ##
+  ## Нода не знает фактическую частоту на момент создания состояния, а
+  ## перевыделять струны в audio thread нельзя. Поэтому память берётся
+  ## с запасом до 96 кГц: переинициализация на 44.1/48/88.2/96 кГц
+  ## помещается в уже выделенный блок, а выше — честно отказывает
+  ## (`guitarInitAt`), вместо того чтобы выйти за границу.
+
+proc guitarMemoryFrames*(sampleRate, lowestHz: float32): int =
+  ## Кадров линии задержки на одну струну. Не меньше 2: при меньшем
+  ## значении C-движок отказывается инициализироваться.
+  max(int(sampleRate / max(lowestHz, 1.0f)) + 8, 2)
+
+proc newGuitar*(voiceCount: int = 8; sampleRate: float32 = 48000.0f): Guitar =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_guitar().int
+  let voiceBytes = c_size_guitar_voice().int
+  let lineCap = guitarMemoryFrames(max(sampleRate, GuitarMaxSampleRate),
+                                  GuitarLowestHz)
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  result.lineCap = lineCap
+  result.memory = allocState(lineCap * n * sizeof(float32))
+  if result.memory.isNil:
+    deallocShared(result.p)
+    result.p = nil
+    return
+  c_guitar_init(cast[ptr EutGuitar](result.p),
+                cast[ptr EutGuitarVoice](instVoices(result.p, stateBytes)),
+                n.cint, cast[ptr float32](result.memory), lineCap.cint, sampleRate)
+
+proc freeGuitar*(g: ptr Guitar) {.inline.} =
+  if g.isNil:
+    return
+  if not g.memory.isNil:
+    deallocShared(g.memory)
+    g.memory = nil
+  if not g.p.isNil:
+    deallocShared(g.p)
+    g.p = nil
+
+proc guitarReset*(g: ptr Guitar) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_guitar_reset(cast[ptr EutGuitar](g.p))
+
+proc guitarSet*(g: ptr Guitar; pick, damping, tone, drive, mute, release, pan,
+                level: float32) {.inline.} =
+  ## `mute` — глушение ладонью (0 — открытая струна, 1 — плотный palm mute),
+  ## `drive` — кабинетный перегруз с компенсацией усиления.
+  if g.isNil or g.p.isNil: return
+  c_guitar_set(cast[ptr EutGuitar](g.p), pick, damping, tone, drive, mute,
+               release, pan, level)
+
+proc guitarNoteOn*(g: ptr Guitar; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_guitar_note_on(cast[ptr EutGuitar](g.p), note.cint, velocity)
+
+proc guitarNoteOff*(g: ptr Guitar; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_guitar_note_off(cast[ptr EutGuitar](g.p), note.cint)
+
+proc guitarAllOff*(g: ptr Guitar) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_guitar_all_off(cast[ptr EutGuitar](g.p))
+
+proc guitarProcess*(g: ptr Guitar; outL, outR: ptr float32; stride, n: int;
+                    bendSemitones: float32 = 0.0f; modCents: float32 = 0.0f) {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_guitar_process(cast[ptr EutGuitar](g.p), outL, outR, stride.cint, n.cint,
+                   bendSemitones, modCents)
+
+# --- ударные -----------------------------------------------------------------
+
+proc drumsPieceForNote*(note: int): cint {.inline.} =
+  ## Какая часть установки отвечает на ноту MIDI. `-1` — нота вне карты
+  ## (GM-совместимой, но не полной): движок такую ноту честно игнорирует,
+  ## а не подменяет случайным куском.
+  c_drums_piece_for_note(note.cint)
+
+proc newDrums*(voiceCount: int = 16; sampleRate: float32 = 48000.0f): Drums =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_drums().int
+  let voiceBytes = c_size_drum_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_drums_init(cast[ptr EutDrums](result.p),
+               cast[ptr EutDrumVoice](instVoices(result.p, stateBytes)),
+               n.cint, sampleRate)
+
+proc freeDrums*(g: ptr Drums) {.inline.} =
+  if g.isNil or g.p.isNil:
+    return
+  deallocShared(g.p)
+  g.p = nil
+
+proc drumsReset*(g: ptr Drums) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_drums_reset(cast[ptr EutDrums](g.p))
+
+proc drumsSet*(g: ptr Drums; tune, decay, snappy, tone, drive, pan, level: float32) {.inline.} =
+  ## `tune` — общий строй установки в полутонах (0 — «как записано»),
+  ## `decay` — множитель длительности, `snappy` — доля пружины малого.
+  if g.isNil or g.p.isNil: return
+  c_drums_set(cast[ptr EutDrums](g.p), tune, decay, snappy, tone, drive, pan, level)
+
+proc drumsNoteOn*(g: ptr Drums; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_drums_note_on(cast[ptr EutDrums](g.p), note.cint, velocity)
+
+proc drumsNoteOff*(g: ptr Drums; note: int) {.inline.} =
+  ## Отпускание ноты гасит тарелку и хэт: так закрывается открытый хэт,
+  ## когда педаль опускают или рука возвращается на пэд.
+  if g.isNil or g.p.isNil: return
+  c_drums_note_off(cast[ptr EutDrums](g.p), note.cint)
+
+proc drumsAllOff*(g: ptr Drums) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_drums_all_off(cast[ptr EutDrums](g.p))
+
+proc drumsProcess*(g: ptr Drums; outL, outR: ptr float32; stride, n: int) {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_drums_process(cast[ptr EutDrums](g.p), outL, outR, stride.cint, n.cint)
+
+# --- смена частоты дискретизации --------------------------------------------
+#
+# Все четыре движка фиксируют `sampleRate` в `*_init` (в `*_set` его нет:
+# пересчёт коэффициентов на каждый блок — это лишняя работа, а параметры
+# и без того приходят раз в блок). Нода узнаёт фактическую частоту только
+# из контекста обработки, поэтому нужен путь «переинициализироваться на
+# другой частоте».
+#
+# Переинициализация идёт по УЖЕ ВЫДЕЛЕННОЙ памяти и ничего не аллоцирует,
+# а значит безопасна и в audio thread: голоса просто сбрасываются в тишину,
+# что при смене частоты дискретизации и так неизбежно.
+
+proc organInitAt*(g: ptr Organ; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_organ().int
+  c_organ_init(cast[ptr EutOrgan](g.p),
+               cast[ptr EutOrganVoice](instVoices(g.p, stateBytes)),
+               g.voiceCount.cint, sampleRate)
+  true
+
+proc pianoInitAt*(g: ptr Piano; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_piano().int
+  c_piano_init(cast[ptr EutPiano](g.p),
+               cast[ptr EutPianoVoice](instVoices(g.p, stateBytes)),
+               g.voiceCount.cint, sampleRate)
+  true
+
+proc drumsInitAt*(g: ptr Drums; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_drums().int
+  c_drums_init(cast[ptr EutDrums](g.p),
+               cast[ptr EutDrumVoice](instVoices(g.p, stateBytes)),
+               g.voiceCount.cint, sampleRate)
+  true
+
+proc guitarInitAt*(g: ptr Guitar; sampleRate: float32): bool =
+  ## `false` — частота выше той, под которую выделена память струн
+  ## (`GuitarMaxSampleRate`). Лучше отказать и оставить прежнюю частоту,
+  ## чем писать за границей блока.
+  if g.isNil or g.p.isNil or g.memory.isNil:
+    return false
+  let needed = guitarMemoryFrames(sampleRate, GuitarLowestHz)
+  if needed > g.lineCap:
+    return false
+  let stateBytes = c_size_guitar().int
+  c_guitar_init(cast[ptr EutGuitar](g.p),
+                cast[ptr EutGuitarVoice](instVoices(g.p, stateBytes)),
+                g.voiceCount.cint, cast[ptr float32](g.memory),
+                g.lineCap.cint, sampleRate)
+  true
+
 # --- ABI --------------------------------------------------------------------
 
 proc abiCheck*(): bool =
@@ -491,11 +942,32 @@ proc abiCheck*(): bool =
   ## Нужен не для того, чтобы «что-то поймать при сборке» (это делает
   ## компилятор), а чтобы изменение структуры в C не осталось незамеченным:
   ## к примеру, добавление поля меняет размер, и это видно сразу.
+  ##
+  ## Для инструментов проверяются ещё две вещи, от которых зависит
+  ## корректность блоков, выделяемых `newOrgan`/`newPiano`/`newGuitar`/
+  ## `newDrums`:
+  ##   1) размер СОСТОЯНИЯ кратен 8 — иначе массив голосов, который C ждёт
+  ##      сразу за состоянием, встал бы на невыровненный адрес;
+  ##   2) размеры голосов совпадают с шагом, которым C обходит массив
+  ##      (`sizeof(voice)`), — Nim считает общий размер блока сам.
   c_size_biquad() == 28 and
   c_size_svf() == 28 and
   c_size_osc() == 16 and        # phase, inc, pulseWidth, phaseR
   c_size_noise() == 36 and
   c_size_comp() == 16440 and    # gainCurve обязан покрывать EUT_MAX_BLOCK (4096)
-  c_size_delay() == 48
+  c_size_delay() == 48 and
+  c_size_inst_voice() == 72 and
+  c_size_organ_voice() == 140 and
+  c_size_organ() == 88 and
+  c_size_organ() mod 8 == 0 and
+  c_size_piano_voice() == 116 and
+  c_size_piano() == 56 and
+  c_size_piano() mod 8 == 0 and
+  c_size_guitar_voice() == 104 and
+  c_size_guitar() == 80 and
+  c_size_guitar() mod 8 == 0 and
+  c_size_drum_voice() == 184 and
+  c_size_drums() == 56 and
+  c_size_drums() mod 8 == 0
 
 {.pop.}

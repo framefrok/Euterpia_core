@@ -15,7 +15,9 @@ import cmd_completion
 import cmd_config
 import cmd_doctor
 import cmd_graph
+import cmd_notation
 import cmd_project
+import cmd_render
 import config
 import euterpia_version
 
@@ -258,6 +260,37 @@ proc setupRegistry*() =
         "отчёт — те же секции и `summary`, что у `project validate` и `doctor` (#96)",
       ],
       run: runGraph),
+    CommandDef(
+      name: "render",
+      summary: "офлайн-рендер проекта в WAV без аудиоустройства",
+      usage: "render [проект.eut] [выход.wav] [ключи]",
+      flags: RenderKeys,
+      notes: @[
+        "пример MANIFEST §19: euterpia render project.eut",
+        "вывод — WAV (PCM 16 или 24 бита, стерео); MP3/OGG требуют кодировщика и в ядре отсутствуют",
+        "длительность: --seconds, иначе конец последней ноты + --tail (умолчание " &
+          $int(DefaultTailSeconds) & " с)",
+        "проект без нотных событий требует --seconds: длину пустой партитуры CLI не выдумывает",
+        "частота и блок: argv > метаданные проекта > настройки > умолчание",
+        "--dry-run печатает план рендера и не пишет файл",
+        "тихая или оборванная запись — предупреждение, а не ошибка: код 2 только у сбоя записи",
+      ],
+      run: runRender),
+    CommandDef(
+      name: "notation",
+      summary: "текстовая нотация: проверка файла и импорт в проект",
+      usage: "notation <check|import> <файл.notes> [ключи]",
+      subcommands: NotationSubcommands,
+      flags: NotationKeys,
+      notes: @[
+        "notation check — разбор с указанием «строка:колонка»; ошибка разбора даёт код 1",
+        "notation import — партитура становится клипом дорожки проекта; дорожка и клип создаются при необходимости",
+        "файл задаёт клип целиком: повторный импорт той же партитуры даёт тот же проект",
+        "длина клипа округляется вверх до целого такта размера проекта; --length задаёт её явно",
+        "ключи check: " & CheckKeys.join(", "),
+        "нотация: " & NotationHint,
+      ],
+      run: runNotation),
     CommandDef(
       name: "completion",
       summary: "скрипт автодополнения оболочки",

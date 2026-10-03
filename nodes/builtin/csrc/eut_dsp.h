@@ -365,11 +365,251 @@ EUT_TARGET_CLONES
 void eut_saturate(float *buf, int n, float drive, float ceiling);
 
 /* ===========================================================================
+ * Инструменты: полифония, ADSR, панорама на голос
+ *
+ * Четыре ядра:
+ *   EutOrgan  — аддитивный орган (тоновые колёса, морфинг регистров);
+ *   EutPiano  — двухоператорный FM-«электророяль» + молоточковый шум,
+ *               педаль сустейна и две расстроенные «струны» на голос;
+ *   EutGuitar — электрогитара на Karplus-Strong с дробным чтением,
+ *               palm mute, насыщением усилителя и вибрато;
+ *   EutDrums  — синтезированные куски (тон + шум + металлическая группа).
+ *
+ * Контракт тот же, что у остальных ядер этого файла, плюс три уточнения:
+ *
+ *   1. Вся память (состояние движка и массив голосов) выделяется хостом
+ *      (Nim) на холодной стороне и передаётся в *_init. Ядро не аллоцирует
+ *      ничего — ни при init, ни на нотном событии: note_on обязан быть
+ *      безопасен для audio thread.
+ *
+ *   2. *_process ДОБАВЛЯЕТ звук в outL/outR (не перезаписывает): голоса
+ *      суммируются в один буфер. Вызывающий обязан очистить буфер до
+ *      вызова. `stride` кодирует раскладку: 1 — planar (outL и outR —
+ *      непрерывные каналы), 2 — interleaved (outL указывает на левый сэмпл
+ *      кадра, outR — на правый). Один и тот же код обслуживает оба случая.
+ *
+ *   3. ГПСЧ засевается детерминированно (note + номер голоса + счётчик
+ *      событий), поэтому один и тот же проект даёт байт-в-байт один и тот
+ *      же рендер. Иначе golden-сравнение в CI было бы невозможно.
+ * ========================================================================= */
+
+/* Общий голос: огибающая, частота, панорама, ГПСЧ. Все голосовые
+   структуры конкретных движков НАЧИНАЮТСЯ с этого поля, поэтому общая
+   часть обрабатывается одним кодом (см. inst_voice_step). */
+typedef struct {
+  int   active;     /* голос звучит */
+  int   held;       /* клавиша удержана */
+  int   pedal;      /* клавиша отпущена, но удержана педалью */
+  int   note;       /* номер MIDI */
+  int   seq;        /* порядок запуска: различает голоса при выборе на steal */
+  float vel;        /* 0..1 */
+  float freq;       /* Гц, без модуляции (бенд и вибрато добавляются позже) */
+  float amp;        /* амплитудная огибающая (==1 в пике атаки) */
+  float ampInc;     /* прирост огибающей за сэмпл на атаке */
+  float ampCoef;    /* множитель затухания до sustain за сэмпл */
+  float sustain;    /* уровень удержания 0..1 */
+  float relCoef;    /* множитель release за сэмпл */
+  float amp2;       /* вторая огибающая: щипок, молоточек, шум куска */
+  float amp2Inc;
+  float amp2Coef;
+  float gainL, gainR;
+  uint32_t rng;
+} EutInstVoice;
+
+#define EUT_INST_ORGAN_PARTIALS 8
+#define EUT_INST_DRUM_METAL     6
+
+/* --- орган ----------------------------------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float ph[EUT_INST_ORGAN_PARTIALS];   /* фазы частичных (регистров) */
+  float dph[EUT_INST_ORGAN_PARTIALS];
+  float clickLp;                       /* сглаживание щелчка клавиши */
+} EutOrganVoice;
+
+typedef struct {
+  EutOrganVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float bars;        /* морфинг регистров: 0 — флейта, 1 — все регистры */
+  float tone;        /* яркость: приглушает верхние регистры */
+  float clickLevel;  /* уровень щелчка клавиши */
+  float vibrato;     /* глубина вибрато, центы */
+  float pan;
+  float level;
+  float lfoPhase, lfoInc;
+  float reg[EUT_INST_ORGAN_PARTIALS];  /* усиления регистров, считает set() */
+  int   seqCounter;  /* счётчик запусков: различает голоса при steal */
+  int   active;      /* сколько голосов звучало в прошлом process() */
+} EutOrgan;
+
+void eut_organ_init(EutOrgan *g, EutOrganVoice *voices, int voiceCount, float sampleRate);
+void eut_organ_reset(EutOrgan *g);
+void eut_organ_set(EutOrgan *g, float bars, float tone, float clickLevel,
+                   float vibratoCents, float pan, float level);
+void eut_organ_note_on(EutOrgan *g, int note, float velocity);
+void eut_organ_note_off(EutOrgan *g, int note);
+void eut_organ_all_off(EutOrgan *g);
+EUT_TARGET_CLONES
+void eut_organ_process(EutOrgan *g, float *outL, float *outR, int stride,
+                       int n, float bendSemitones, float modCents);
+
+/* --- пианино --------------------------------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float phA, dphA, phB, dphB;         /* несущие двух «струн» */
+  float modA, dmodA, modB, dmodB;     /* модуляторы: индекс яркости */
+  float modIndex;
+  float modCoef;                      /* спад индекса модуляции за сэмпл */
+  float hammerLp;                     /* сглаживание молоточкового шума */
+} EutPianoVoice;
+
+typedef struct {
+  EutPianoVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;      /* яркость: индекс модуляции и срез молоточка */
+  float decay;     /* время затухания струны, с */
+  float detune;    /* центы расстройки между «струнами» */
+  float hammer;    /* уровень молоточкового шума */
+  float release;   /* время отпускания клавиши, с */
+  float pan;
+  float level;
+  int   pedalDown; /* педаль сустейна нажата */
+  int   seqCounter;
+  int   active;
+} EutPiano;
+
+void eut_piano_init(EutPiano *g, EutPianoVoice *voices, int voiceCount, float sampleRate);
+void eut_piano_reset(EutPiano *g);
+void eut_piano_set(EutPiano *g, float tone, float decay, float detuneCents,
+                   float hammer, float release, float pan, float level);
+void eut_piano_note_on(EutPiano *g, int note, float velocity);
+void eut_piano_note_off(EutPiano *g, int note);
+void eut_piano_pedal(EutPiano *g, int down);
+void eut_piano_all_off(EutPiano *g);
+EUT_TARGET_CLONES
+void eut_piano_process(EutPiano *g, float *outL, float *outR, int stride,
+                       int n, float bendSemitones, float modCents);
+
+/* --- гитара ---------------------------------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  int   offset;         /* смещение линии в общей памяти, кадров */
+  int   len;            /* длина линии, кадров (меньше — выше тон) */
+  float rp;             /* дробный указатель чтения/записи, 0..len */
+  float damp;           /* затухание за сэмпл, 0..1 */
+  float lp;             /* состояние демпфера струны */
+  float dcIn, dcOut;    /* блокировка постоянной составляющей */
+  float bend;           /* текущий изгиб, полутоны */
+} EutGuitarVoice;
+
+typedef struct {
+  EutGuitarVoice *voices;
+  int   voiceCount;
+  int   lineCap;        /* вместимость одной линии, кадров */
+  float *memory;        /* voiceCount * lineCap; выделяет хост */
+  float sampleRate;
+  float pick;           /* позиция щипка 0..1 (гребенчатый фильтр) */
+  float damping;        /* затухание струны за период */
+  float tone;           /* пост-фильтр кабинета 0..1 */
+  float drive;          /* насыщение усилителя 0..1 */
+  float mute;           /* palm mute 0..1 */
+  float release;        /* время отпускания, с */
+  float pan;
+  float level;
+  float toneLpL, toneLpR;
+  int   seqCounter;
+  int   active;
+} EutGuitar;
+
+void eut_guitar_init(EutGuitar *g, EutGuitarVoice *voices, int voiceCount,
+                     float *memory, int lineCap, float sampleRate);
+void eut_guitar_reset(EutGuitar *g);
+void eut_guitar_set(EutGuitar *g, float pick, float damping, float tone,
+                    float drive, float mute, float release, float pan, float level);
+void eut_guitar_note_on(EutGuitar *g, int note, float velocity);
+void eut_guitar_note_off(EutGuitar *g, int note);
+void eut_guitar_all_off(EutGuitar *g);
+EUT_TARGET_CLONES
+void eut_guitar_process(EutGuitar *g, float *outL, float *outR, int stride,
+                        int n, float bendSemitones, float modCents);
+
+/* --- барабаны -------------------------------------------------------------- */
+
+enum {
+  EUT_DRUM_KICK = 0,
+  EUT_DRUM_SNARE,
+  EUT_DRUM_RIM,
+  EUT_DRUM_CLAP,
+  EUT_DRUM_TOM_LOW,
+  EUT_DRUM_TOM_MID,
+  EUT_DRUM_TOM_HIGH,
+  EUT_DRUM_HAT_CLOSED,
+  EUT_DRUM_HAT_PEDAL,
+  EUT_DRUM_HAT_OPEN,
+  EUT_DRUM_CRASH,
+  EUT_DRUM_RIDE,
+  EUT_DRUM_PIECE_COUNT
+};
+
+typedef struct {
+  EutInstVoice v;
+  int   piece;
+  float pitch, pitchTarget, pitchCoef;   /* огибающая высоты */
+  float tonePh[2], toneDph[2];
+  float metalPh[EUT_INST_DRUM_METAL], metalDph[EUT_INST_DRUM_METAL];
+  float noiseLp, noiseHp;
+  float noiseLpCoef, noiseHpCoef;  /* полоса шума: свой для каждого куска */
+  float mixNoise, mixMetal;        /* доли шума и металла в миксе */
+  float drive;
+  float gain;
+} EutDrumVoice;
+
+typedef struct {
+  EutDrumVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tune;     /* множитель высоты */
+  float decay;    /* множитель времени затухания */
+  float snappy;   /* доля шума (малый, хэты) */
+  float tone;     /* яркость 0..1 */
+  float drive;
+  float pan;
+  float level;
+  int   seqCounter;
+  int   active;
+} EutDrums;
+
+/* Нота MIDI -> кусок установки; -1 — нота вне карты (звука не будет).
+   Карта GM-совместимая, но не полная: нота вне её честно молчит, а не
+   превращается в случайный кусок. */
+int eut_drums_piece_for_note(int note);
+
+void eut_drums_init(EutDrums *g, EutDrumVoice *voices, int voiceCount, float sampleRate);
+void eut_drums_reset(EutDrums *g);
+void eut_drums_set(EutDrums *g, float tune, float decay, float snappy,
+                   float tone, float drive, float pan, float level);
+void eut_drums_note_on(EutDrums *g, int note, float velocity);
+void eut_drums_note_off(EutDrums *g, int note);
+void eut_drums_all_off(EutDrums *g);
+EUT_TARGET_CLONES
+void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n);
+
+
+/* ===========================================================================
  * ABI-проверка
  *
  * sizeof C-структуры нельзя получить на стороне Nim без completeStruct,
  * а completeStruct запрещает доступ к полям по имени. Поэтому размеры
  * отдаются наружу явными функциями и сверяются в тестах.
+ *
+ * Инструменты отдают по два размера: состояние движка и один голос.
+ * Хост (Nim) выделяет оба блока одним куском памяти и передаёт указатели
+ * в *_init, поэтому размеры обязан знать именно он.
  * ======================================================================= */
 int eut_abi_sizeof_biquad(void);
 int eut_abi_sizeof_svf(void);
@@ -377,6 +617,16 @@ int eut_abi_sizeof_osc(void);
 int eut_abi_sizeof_noise(void);
 int eut_abi_sizeof_comp(void);
 int eut_abi_sizeof_delay(void);
+
+int eut_abi_sizeof_inst_voice(void);
+int eut_abi_sizeof_organ_voice(void);
+int eut_abi_sizeof_organ(void);
+int eut_abi_sizeof_piano_voice(void);
+int eut_abi_sizeof_piano(void);
+int eut_abi_sizeof_guitar_voice(void);
+int eut_abi_sizeof_guitar(void);
+int eut_abi_sizeof_drum_voice(void);
+int eut_abi_sizeof_drums(void);
 
 #ifdef __cplusplus
 }

@@ -20,16 +20,24 @@ import
   filters/svf,
   mixing/gain,
   mixing/pan,
+  mixing/mix,
   dynamics/compressor,
-  effects/delay
+  effects/delay,
+  instruments/organ,
+  instruments/piano,
+  instruments/guitar,
+  instruments/drums,
+  sequencer/notes
 
 type
   BuiltinNodeId* = enum
     bnInput,
     bnOscillator, bnNoise,
     bnBiquad, bnSvf,
-    bnGain, bnPan,
-    bnCompressor, bnDelay
+    bnGain, bnPan, bnMix,
+    bnCompressor, bnDelay,
+    bnOrgan, bnPiano, bnGuitar, bnDrums,
+    bnNotes
 
   ## Порядок ниже совпадает с порядком нод в реестре и используется
   ## инструментами (CLI/Editor) для выборки по индексу.
@@ -42,8 +50,10 @@ const
     bnInput,
     bnOscillator, bnNoise,
     bnBiquad, bnSvf,
-    bnGain, bnPan,
-    bnCompressor, bnDelay
+    bnGain, bnPan, bnMix,
+    bnCompressor, bnDelay,
+    bnOrgan, bnPiano, bnGuitar, bnDrums,
+    bnNotes
   ]
 
 proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
@@ -55,8 +65,14 @@ proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
   of bnSvf:         getSvfDesc()
   of bnGain:        getGainDesc()
   of bnPan:         getPanDesc()
+  of bnMix:         getMixDesc()
   of bnCompressor:  getCompDesc()
   of bnDelay:       getDelayDesc()
+  of bnOrgan:       getOrganDesc()
+  of bnPiano:       getPianoDesc()
+  of bnGuitar:      getGuitarDesc()
+  of bnDrums:       getDrumsDesc()
+  of bnNotes:       getNotesDesc()
 
 proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   case id
@@ -67,8 +83,14 @@ proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   of bnSvf:         getSvfFactory()
   of bnGain:        getGainFactory()
   of bnPan:         getPanFactory()
+  of bnMix:         getMixFactory()
   of bnCompressor:  getCompFactory()
   of bnDelay:       getDelayFactory()
+  of bnOrgan:       getOrganFactory()
+  of bnPiano:       getPianoFactory()
+  of bnGuitar:      getGuitarFactory()
+  of bnDrums:       getDrumsFactory()
+  of bnNotes:       getNotesFactory()
 
 proc registerBuiltinNodes*(reg: var NodeRegistry): int =
   ## Регистрирует все builtin-ноды. Возвращает число зарегистрированных:
