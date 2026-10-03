@@ -23,4 +23,8 @@
 расхождение форматов, даёт проверки компилятора и не тянет внешних
 зависимостей.
 
-Пример — `compositions/dark-fantasy/generate.nim`.
+Примеры — `compositions/dark-fantasy/generate.nim` («Cathedral of Ash»,
+medieval dark fantasy) и `compositions/neo-romantic/generate.nim`
+(неоклассический ансамбль). Обе пьесы собираются библиотекой и, для сверки, тем
+же составом только через CLI (см. `build_via_cli.sh` рядом) — результат
+совпадает.
