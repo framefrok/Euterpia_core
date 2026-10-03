@@ -50,10 +50,10 @@ euterpia analyze out.wav --snippets /tmp/snips --heatmap spec.pgm
 позже использует Editor как **пассивный помощник** (v0.7, #178): он ничего не
 меняет ни в проекте, ни в звуке.
 
-Эталон для проверки прибора — пьеса `compositions/neo-romantic` (#275):
-64 такта, ~2:48, четыре партии, собирается и рендерится **только CLI**
-(`compositions/neo-romantic/build.sh`). В CI джоб `analyze` собирает пьесу и
-требует отсутствия дефектов уровня error.
+Эталоны для проверки прибора — две пьесы, собираемые и рендерящиеся **только
+CLI**: `compositions/neo-romantic` (#275, ~2:48) и `compositions/dark-fantasy`
+(«Cathedral of Ash», #295, ~4:02, medieval dark fantasy). В CI джоб `analyze`
+собирает обе и требует отсутствия дефектов уровня error.
 
 ## Возможности
 
