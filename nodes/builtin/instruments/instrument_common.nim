@@ -371,6 +371,7 @@ proc instRender*(abi: InstAbi; midi: var InstMidi; outBuf: PAudioBuffer;
   # на канал). Индексация через UncheckedArray — указатель на канал сам
   # по себе не индексируется.
   let arena = cast[ptr UncheckedArray[float32]](scratch)
+  let arenaR = cast[ptr UncheckedArray[float32]](offsetPtr(scratch, InstScratchFrames))
   let scratchL = scratch
   let scratchR = offsetPtr(scratch, InstScratchFrames)
 
@@ -379,6 +380,19 @@ proc instRender*(abi: InstAbi; midi: var InstMidi; outBuf: PAudioBuffer;
     let part = min(InstScratchFrames, frames - pos)
     let bend = midi.bend.advance(part)
     let modCents = midi.modCents.advance(part)
+
+    # Ядро ПРИБАВЛЯЕТ к буферу, а `scratch` — общий на все блоки ноды
+    # (в отличие от outBuf, который нода только что очистила). Без этой
+    # очистки остаток прошлого блока копился бы: у инструмента, стоящего
+    # последним в цепочке (мастер-шина, interleaved-выход), со второго
+    # блока нарастал «грязный» призвук. Ошибка была не слышна на planar-
+    # пути и в первом блоке — отсюда её долгая жизнь.
+    var k = 0'i32
+    while k < part:
+      arena[k] = 0.0f
+      arenaR[k] = 0.0f
+      inc k
+
     instRenderPlanar(abi, midi, scratchL, scratchR, part, q, evIdx,
                      bend, modCents)
 
