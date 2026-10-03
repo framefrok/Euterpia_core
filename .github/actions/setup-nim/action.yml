@@ -1,0 +1,123 @@
+name: 'setup-nim'
+description: >
+  Ставит ровно заданную версию Nim из ГОТОВОГО бинаря nim-lang.org и
+  кэширует тулчейн между прогонами. Сборка из исходников не используется.
+
+inputs:
+  nim-version:
+    description: 'Точная версия Nim, без "x"/"stable" (например 2.2.12)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # ---------------------------------------------------------------------
+    # Кэш тулчейна.
+    #
+    # Ключ включает версию, ОС и архитектуру: `macos-latest` — это Apple
+    # Silicon, а `ubuntu-latest` — x86_64, и общий ключ приводил бы к
+    # попаданию бинаря не для той платформы.
+    # ---------------------------------------------------------------------
+    - name: Кэш тулчейна Nim
+      if: runner.os != 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/euterpia-nim
+        key: nim-${{ runner.os }}-${{ runner.arch }}-${{ inputs.nim-version }}
+        restore-keys: |
+          nim-${{ runner.os }}-${{ runner.arch }}-
+
+    # ---------------------------------------------------------------------
+    # Windows: делегируем jiro4989/setup-nim-action (#255).
+    #
+    # В нашем `case` ниже нет win-ветки, и windows-latest из матрицы job
+    # `test` падал на «нет предсобранного Nim для Windows-X64». У него
+    # установка — готовый zip `nim-<ver>_x64.zip` с nim-lang.org (имя
+    # отличается: без слова `windows`), то есть сборки из исходников нет и
+    # джоб отрабатывает за ~1 мин (проверено в прогонах #251/#246).
+    #
+    # Полноценная win-ветка в нашем экшене потребовала бы `unzip` +
+    # записи Windows-пути в GITHUB_PATH (иначе pwsh-шаги не найдут `nim`),
+    # и локально на Linux это не проверить. Unix-ОС идут обычным путём —
+    # с кэшем, без чего и был сделан #42.
+    # ---------------------------------------------------------------------
+    - name: Установка Nim (Windows, готовый zip)
+      if: runner.os == 'Windows'
+      uses: jiro4989/setup-nim-action@v2
+      with:
+        nim-version: ${{ inputs.nim-version }}
+
+    # ---------------------------------------------------------------------
+    # Установка из готового бинаря.
+    #
+    # Почему не jiro4989/setup-nim-action: его install_nim.sh берёт
+    # предсобранный tarball ТОЛЬКО для Linux+x86_64
+    #
+    #     elif [[ "$os" = "Linux" && "$HOSTTYPE" = "x86_64" ]]; then
+    #
+    # а всё остальное (macOS любой архитектуры, Windows) уводит в ветку
+    # «# need to build compiler» с build.sh + koch boot + koch tools —
+    # это и есть ~5 минут в macOS-джобе (issue #42).
+    #
+    # Готовые бинари 2.2.12 подтверждены доступными (HTTP 200):
+    #   nim-2.2.12-macosx_arm64.tar.xz
+    #   nim-2.2.12-macosx_x64.tar.xz
+    #   nim-2.2.12-linux_x64.tar.xz
+    # ---------------------------------------------------------------------
+    - name: Установка Nim из готового бинаря
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        NIM_VERSION: ${{ inputs.nim-version }}
+      run: |
+        set -euo pipefail
+
+        dest="${RUNNER_TEMP}/euterpia-nim"
+        nim_root="${dest}/nim-${NIM_VERSION}"
+
+        # Тёплый кэш: тулчейн уже распакован, ничего качать не нужно.
+        if [ -x "${nim_root}/bin/nim" ]; then
+          echo "Nim ${NIM_VERSION} взят из кэша"
+          echo "${nim_root}/bin" >> "${GITHUB_PATH}"
+          "${nim_root}/bin/nim" --version | head -n 1
+          exit 0
+        fi
+
+        # runner.arch: X64 или ARM64. Имя файла у nim-lang.org:
+        #   linux_x64 / macosx_x64 / macosx_arm64
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   asset="nim-${NIM_VERSION}-linux_x64.tar.xz" ;;
+          macOS-ARM64) asset="nim-${NIM_VERSION}-macosx_arm64.tar.xz" ;;
+          macOS-X64)   asset="nim-${NIM_VERSION}-macosx_x64.tar.xz" ;;
+          *)
+            echo "::error::нет предсобранного Nim для ${RUNNER_OS}-${RUNNER_ARCH}"
+            echo "::error::добавь asset в setup-nim/action.yml или почини матрицу"
+            exit 1
+            ;;
+        esac
+
+        url="https://nim-lang.org/download/${asset}"
+        echo "Скачиваем ${url}"
+
+        mkdir -p "${dest}"
+        work="${RUNNER_TEMP}/nim-dl"
+        rm -rf "${work}"
+        mkdir -p "${work}"
+        curl -sSL --connect-timeout 10 --max-time 300 --retry 3 \
+          -o "${work}/nim.tar.xz" "${url}"
+        tar xf "${work}/nim.tar.xz" -C "${work}"
+        rm -f "${work}/nim.tar.xz"
+
+        # Каталог верхнего уровня — nim-${NIM_VERSION}; переносим в dest,
+        # чтобы путь к бинарю был стабильным и не зависел от развёртки.
+        if [ ! -d "${work}/nim-${NIM_VERSION}" ]; then
+          echo "::error::неожиданная структура архива: нет каталога nim-${NIM_VERSION}"
+          ls -1 "${work}" || true
+          exit 1
+        fi
+        rm -rf "${nim_root}"
+        mv "${work}/nim-${NIM_VERSION}" "${nim_root}"
+        rm -rf "${work}"
+
+        echo "${nim_root}/bin" >> "${GITHUB_PATH}"
+        "${nim_root}/bin/nim" --version | head -n 1
