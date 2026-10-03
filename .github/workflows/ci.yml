@@ -183,11 +183,15 @@ jobs:
       - name: Build CLI
         run: nimble cli
 
-      - name: Assemble and render reference piece (#275)
-        run: ./compositions/neo-romantic/build.sh
+      - name: Assemble and render reference pieces (#275, #295)
+        run: |
+          ./compositions/neo-romantic/build.sh
+          ./compositions/dark-fantasy/build.sh
 
       - name: Inspect audio for defects (#290)
-        run: ./build/euterpia analyze compositions/neo-romantic/ensemble.wav --fail-on error
+        run: |
+          ./build/euterpia analyze compositions/neo-romantic/ensemble.wav --fail-on error
+          ./build/euterpia analyze compositions/dark-fantasy/ensemble.wav --fail-on error
 
   # ---------------------------------------------------------------------------
   # Архитектурные guard'ы границ слоёв (MANIFEST §40, §41, §42).
