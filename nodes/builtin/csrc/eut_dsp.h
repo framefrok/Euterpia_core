@@ -606,6 +606,7 @@ typedef struct {
   float ph, dph;        /* основная фаза (почти синус) */
   float breathLp, breathHp;  /* полоса дыхательного шума */
   float chiff;          /* короткий шумовой «чиф» атаки */
+  float vibAmp;         /* задержанное вибрато: растёт после атаки */
 } EutFluteVoice;
 
 typedef struct {
@@ -667,6 +668,76 @@ void eut_bagpipe_all_off(EutBagpipe *g);
 EUT_TARGET_CLONES
 void eut_bagpipe_process(EutBagpipe *g, float *outL, float *outR, int stride, int n);
 
+/* --- смычковые (струнный ансамбль) ----------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float ph;             /* фаза пилообразной волны */
+  float lp1, lp2;       /* двухполюсный ФНЧ (яркость/корпус) */
+  float detune;         /* микрорасстройка голоса (ансамбль), центы */
+  float vibAmp;         /* задержанное вибрато */
+} EutStringsVoice;
+
+typedef struct {
+  EutStringsVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;       /* яркость: срез ФНЧ (0..1) */
+  float vibrato;    /* глубина вибрато, центы */
+  float ensemble;   /* разброс расстройки, центы */
+  float pan;
+  float level;
+  float lfoPhase, lfoInc;
+  float lpCoef;
+  int   seqCounter;
+  int   active;
+} EutStrings;
+
+void eut_strings_init(EutStrings *g, EutStringsVoice *voices, int voiceCount, float sampleRate);
+void eut_strings_reset(EutStrings *g);
+void eut_strings_set(EutStrings *g, float tone, float vibratoCents, float ensembleCents,
+                     float pan, float level);
+void eut_strings_note_on(EutStrings *g, int note, float velocity);
+void eut_strings_note_off(EutStrings *g, int note);
+void eut_strings_all_off(EutStrings *g);
+EUT_TARGET_CLONES
+void eut_strings_process(EutStrings *g, float *outL, float *outR, int stride,
+                         int n, float bendSemitones, float modCents);
+
+/* --- колокол (трубчатый/церковный, ингармонические частичные) -------------- */
+
+#define EUT_INST_BELL_PARTIALS 8
+
+typedef struct {
+  EutInstVoice v;
+  float ph[EUT_INST_BELL_PARTIALS];
+  float dph[EUT_INST_BELL_PARTIALS];
+  float amp[EUT_INST_BELL_PARTIALS];    /* затухание частичных */
+  float ampCoef[EUT_INST_BELL_PARTIALS];
+} EutBellVoice;
+
+typedef struct {
+  EutBellVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tune;       /* множитель строя */
+  float decay;      /* множитель затухания */
+  float tone;       /* яркость (наклон частичных) */
+  float pan;
+  float level;
+  int   seqCounter;
+  int   active;
+} EutBell;
+
+void eut_bell_init(EutBell *g, EutBellVoice *voices, int voiceCount, float sampleRate);
+void eut_bell_reset(EutBell *g);
+void eut_bell_set(EutBell *g, float tune, float decay, float tone, float pan, float level);
+void eut_bell_note_on(EutBell *g, int note, float velocity);
+void eut_bell_note_off(EutBell *g, int note);
+void eut_bell_all_off(EutBell *g);
+EUT_TARGET_CLONES
+void eut_bell_process(EutBell *g, float *outL, float *outR, int stride, int n);
+
 
 /* ===========================================================================
  * ABI-проверка
@@ -699,6 +770,10 @@ int eut_abi_sizeof_flute_voice(void);
 int eut_abi_sizeof_flute(void);
 int eut_abi_sizeof_bagpipe_voice(void);
 int eut_abi_sizeof_bagpipe(void);
+int eut_abi_sizeof_strings_voice(void);
+int eut_abi_sizeof_strings(void);
+int eut_abi_sizeof_bell_voice(void);
+int eut_abi_sizeof_bell(void);
 
 #ifdef __cplusplus
 }

@@ -267,6 +267,54 @@ proc bagpipeAbi*(g: ptr Bagpipe): InstAbi {.inline.} =
     pedal: nil, process: bagpipeProcessAbi
   )
 
+proc stringsNoteOnAbi(state: pointer; note: cint; velocity: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  stringsNoteOn(cast[ptr Strings](state), note.int, velocity)
+
+proc stringsNoteOffAbi(state: pointer; note: cint) {.nimcall, raises: [], gcsafe.} =
+  stringsNoteOff(cast[ptr Strings](state), note.int)
+
+proc stringsAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  stringsAllOff(cast[ptr Strings](state))
+
+proc stringsProcessAbi(state: pointer; outL, outR: ptr float32; stride, frames: cint;
+                       bendSemitones, modCents: float32) {.nimcall, raises: [], gcsafe.} =
+  stringsProcess(cast[ptr Strings](state), outL, outR, stride.int, frames.int,
+                 bendSemitones, modCents)
+
+proc stringsAbi*(g: ptr Strings): InstAbi {.inline.} =
+  ## Таблица вызовов смычковых: колесом строится высота, модуляция — вибрато.
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: stringsNoteOnAbi, noteOff: stringsNoteOffAbi, allOff: stringsAllOffAbi,
+    pedal: nil, process: stringsProcessAbi
+  )
+
+proc bellNoteOnAbi(state: pointer; note: cint; velocity: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  bellNoteOn(cast[ptr Bell](state), note.int, velocity)
+
+proc bellNoteOffAbi(state: pointer; note: cint) {.nimcall, raises: [], gcsafe.} =
+  bellNoteOff(cast[ptr Bell](state), note.int)
+
+proc bellAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  bellAllOff(cast[ptr Bell](state))
+
+proc bellProcessAbi(state: pointer; outL, outR: ptr float32; stride, frames: cint;
+                    bendSemitones, modCents: float32) {.nimcall, raises: [], gcsafe.} =
+  # Колокол не строит высоту колесом: он звенит на своей ноте.
+  discard bendSemitones
+  discard modCents
+  bellProcess(cast[ptr Bell](state), outL, outR, stride.int, frames.int)
+
+proc bellAbi*(g: ptr Bell): InstAbi {.inline.} =
+  ## Таблица вызовов колокола: ударные голоса с длинным естественным затуханием.
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: bellNoteOnAbi, noteOff: bellNoteOffAbi, allOff: bellAllOffAbi,
+    pedal: nil, process: bellProcessAbi
+  )
+
 # =============================================================================
 # Управление голосами
 # =============================================================================

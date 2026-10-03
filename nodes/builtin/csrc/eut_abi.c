@@ -22,4 +22,8 @@ int eut_abi_sizeof_flute_voice(void)  { return (int)sizeof(EutFluteVoice); }
 int eut_abi_sizeof_flute(void)        { return (int)sizeof(EutFlute); }
 int eut_abi_sizeof_bagpipe_voice(void){ return (int)sizeof(EutBagpipeVoice); }
 int eut_abi_sizeof_bagpipe(void)      { return (int)sizeof(EutBagpipe); }
+int eut_abi_sizeof_strings_voice(void){ return (int)sizeof(EutStringsVoice); }
+int eut_abi_sizeof_strings(void)      { return (int)sizeof(EutStrings); }
+int eut_abi_sizeof_bell_voice(void)   { return (int)sizeof(EutBellVoice); }
+int eut_abi_sizeof_bell(void)         { return (int)sizeof(EutBell); }
 

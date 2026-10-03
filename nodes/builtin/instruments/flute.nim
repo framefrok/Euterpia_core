@@ -62,7 +62,7 @@ proc initFluteDesc() =
     flags: uint32(npfAutomatable) or uint32(npfModulatable))
   fluteDesc.params[2] = NodeParamDesc(
     id: FluteParamVibrato, name: fixedParamName("vibrato"),
-    minValue: 0.0f, maxValue: 60.0f, defaultValue: 14.0f, step: 0.1f,
+    minValue: 0.0f, maxValue: 60.0f, defaultValue: 8.0f, step: 0.1f,
     flags: uint32(npfAutomatable) or uint32(npfModulatable))
   fluteDesc.params[3] = NodeParamDesc(
     id: FluteParamPan, name: fixedParamName("pan"),
@@ -92,7 +92,7 @@ proc createFluteState(desc: ptr NodeDesc; userData: pointer): pointer
     return nil
   st.abi = fluteAbi(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
-  st.tone = 0.55f; st.breath = 0.35f; st.vibrato = 14.0f
+  st.tone = 0.55f; st.breath = 0.35f; st.vibrato = 8.0f
   st.pan = 0.0f; st.levelLin = dbToLin(-6.0f)
 
 proc destroyFluteState(state: pointer) {.cdecl, raises: [], gcsafe.} =

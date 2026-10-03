@@ -2,8 +2,8 @@
 # compositions/dark-fantasy/generate.nim
 #
 # «Cathedral of Ash» — medieval dark fantasy на Nim (библиотека libs/compose).
-# Версия 2: энергичнее, с флейтой и волынкой, меняющейся ударной партией и
-# «разгоном» через плотность (реальный rubato — отдельная задача ядра #302).
+# Версия 3: энергии 2-й версии + струнный фундамент и колокол-«метки» по
+# краям разделов (инструменты euterpia.strings и euterpia.bell).
 #
 # Запуск:  nim r compositions/dark-fantasy/generate.nim
 # Пишет:   *.notes, ensemble.eut и ensemble.wav — одной командой.
@@ -226,6 +226,40 @@ proc genBagpipe(): Part =
     else:
       result.add bar(velAt(b, 90), r(4))
 
+proc genStrings(): Part =
+  ## Струнный фундамент: длинные педали низких струн под гармонию.
+  ## Тембр — регистром: в плаче низкие «виолончельные» ноты, в марше/финале
+  ## добавляется октавный удвоитель.
+  result = part("cello")
+  for b in 1 .. BARS:
+    let tones = chordAt(b)
+    let sec = sectionOf(b)
+    if sec == "dawn":
+      result.add bar(velAt(b, 58), n(tones[0] - 12, 4))
+    elif sec == "lament":
+      result.add bar(velAt(b, 62), ch(@[tones[0] - 12, tones[2]], 4))
+    else:
+      result.add bar(velAt(b, 68), ch(@[tones[0] - 12, tones[0]], 4))
+
+proc genBell(): Part =
+  ## Колокол — редкие удары-«метки» по краям разделов, атмосфера собора.
+  result = part("bell")
+  for b in 1 .. BARS:
+    var hit = false
+    var tone = chordAt(b)[0] + 12
+    if b == 1:
+      hit = true
+    elif b == sectionStart("lament"):
+      hit = true
+    elif b == sectionStart("finale"):
+      hit = true
+    elif b == BARS:
+      hit = true
+    if hit:
+      result.add bar(100, n(tone, 4))
+    else:
+      result.add bar(80, r(4))
+
 proc genDrums(): Part =
   result = part("war")
   for b in 1 .. BARS:
@@ -279,7 +313,7 @@ proc genDrums(): Part =
 proc main() =
   let here = parentDir(currentSourcePath())
   var arr = arrangement("Cathedral of Ash", tempo = 100.0f32)
-  # Шесть партий в сумме дают запас меньше нуля: держим -8 dB на мастере,
+  # Восемь партий в сумме дают запас меньше нуля: держим -8 dB на мастере,
   # чтобы клиппинга не было даже в кульминации (проверяет инспектор #290).
   arr.mixLevel = -8.0f32
 
@@ -315,6 +349,20 @@ proc main() =
   var drums = instrument("euterpia.drums", "Drums", "war")
   drums.setParam("level", -4.0f32)
   arr.add(drums, genDrums())
+
+  var cello = instrument("euterpia.strings", "Cello", "cello")
+  cello.setParam("level", -12.0f32)
+  cello.setParam("tone", 0.42f32)        # тёмный «виолончельный» срез
+  cello.setParam("vibrato", 8.0f32)
+  cello.setParam("ensemble", 6.0f32)
+  cello.setParam("pan", -0.10f32)
+  arr.add(cello, genStrings())
+
+  var bell = instrument("euterpia.bell", "Bell", "bell")
+  bell.setParam("level", -10.0f32)
+  bell.setParam("decay", 6.0f32)
+  bell.setParam("pan", 0.25f32)
+  arr.add(bell, genBell())
 
   arr.writeNotes(here)
   let proj = here / "ensemble.eut"

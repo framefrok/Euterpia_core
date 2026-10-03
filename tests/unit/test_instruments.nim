@@ -25,6 +25,8 @@ import builtin/instruments/guitar
 import builtin/instruments/drums
 import builtin/instruments/flute
 import builtin/instruments/bagpipe
+import builtin/instruments/strings
+import builtin/instruments/bell
 
 const
   Sr = 48000.0'f32
@@ -213,6 +215,70 @@ suite "инструменты: C-движки (eut_inst.c)":
     check guitarInitAt(addr g, GuitarMaxSampleRate)
     freeGuitar(addr g)
 
+  test "смычковые отвечают на ноту и держат высоту":
+    var g = newStrings(8, Sr)
+    check g.isReady
+    stringsSet(addr g, 0.5f, 10.0f, 7.0f, 0.0f, 0.7f)
+    stringsNoteOn(addr g, 57, 0.9f)
+    var l, r: array[512, float32]
+    var peak = 0.0f
+    for b in 0 ..< 16:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      stringsProcess(addr g, addr l[0], addr r[0], 1, l.len)
+      for i in 0 ..< l.len:
+        peak = max(peak, abs(l[i]))
+    check peak > 1e-3f
+    check peak <= 1.5f
+    stringsAllOff(addr g)
+    freeStrings(addr g)
+
+  test "колокол звенит долго и затухает":
+    var g = newBell(8, Sr)
+    check g.isReady
+    bellSet(addr g, 1.0f, 4.0f, 0.5f, 0.0f, 0.7f)
+    bellNoteOn(addr g, 60, 1.0f)
+    var l, r: array[512, float32]
+    var early = 0.0f
+    var late = 0.0f
+    for b in 0 ..< 200:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      bellProcess(addr g, addr l[0], addr r[0], 1, l.len)
+      for i in 0 ..< l.len:
+        if b < 10: early = max(early, abs(l[i]))
+        if b >= 190: late = max(late, abs(l[i]))
+    check early > 1e-3f
+    # Естественное затухание: к концу хвост тише начала, но ещё слышен.
+    check late < early
+    freeBell(addr g)
+
+  test "флейта монофонична: новая нота гасит прежний голос":
+    var g = newFlute(8, Sr)
+    check g.isReady
+    fluteNoteOn(addr g, 72, 0.9f)
+    var l, r: array[512, float32]
+    for b in 0 ..< 4:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      fluteProcess(addr g, addr l[0], addr r[0], 1, l.len)
+    # Вторая нота через малое время: прежний голос обязан быстро уйти.
+    fluteNoteOn(addr g, 74, 0.9f)
+    fluteAllOff(addr g)
+    for b in 0 ..< 8:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      fluteProcess(addr g, addr l[0], addr r[0], 1, l.len)
+    var p = 0.0f
+    for i in 0 ..< l.len:
+      p = max(p, abs(l[i]))
+    check p < 1.0f        # без «двух флейт» и без рассинхрона
+    freeFlute(addr g)
+
 
 # ----------------------------------------------------------------------------
 # Ноды: события -> голоса -> звук
@@ -229,6 +295,8 @@ suite "инструменты: ноды играют по событиям":
       (getGuitarFactory(), getGuitarDesc(), 60),
       (getFluteFactory(), getFluteDesc(), 60),
       (getBagpipeFactory(), getBagpipeDesc(), 60),
+      (getStringsFactory(), getStringsDesc(), 57),
+      (getBellFactory(), getBellDesc(), 60),
       (getDrumsFactory(), getDrumsDesc(), 38)
     ]
     for (factory, desc, note) in rigs:

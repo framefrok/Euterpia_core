@@ -1084,6 +1084,7 @@ void eut_flute_reset(EutFlute *g)
     v->ph = v->dph = 0.0f;
     v->breathLp = v->breathHp = 0.0f;
     v->chiff = 0.0f;
+    v->vibAmp = 0.0f;
   }
   g->lfoPhase = 0.0f;
   g->active = 0;
@@ -1098,10 +1099,10 @@ void eut_flute_init(EutFlute *g, EutFluteVoice *voices, int voiceCount,
   g->sampleRate = sampleRate > 0.0f ? sampleRate : 48000.0f;
   g->tone = 0.5f;
   g->breath = 0.35f;
-  g->vibrato = 12.0f;
+  g->vibrato = 8.0f;
   g->pan = 0.0f;
   g->level = 0.8f;
-  g->lfoInc = EUT_INST_TWO_PI * 5.5f / g->sampleRate;   /* вибрато ~5.5 Гц */
+  g->lfoInc = EUT_INST_TWO_PI * 5.0f / g->sampleRate;   /* вибрато ~5 Гц */
   g->seqCounter = 0;
   eut_flute_reset(g);
 }
@@ -1123,6 +1124,15 @@ void eut_flute_note_on(EutFlute *g, int note, float velocity)
   EutFluteVoice *v = (EutFluteVoice *)inst_pick_voice(
     g->voices, (int)sizeof(EutFluteVoice), g->voiceCount);
   if (v == NULL) return;
+  /* Флейта монофонична: новую ноту берём одну — прежнюю голос гасим быстро.
+     Иначе две ноты звучат вместе, и на слух это «фальшь». */
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutFluteVoice *o = &g->voices[i];
+    if (o != v && o->v.active) {
+      o->v.held = 0;
+      o->v.relCoef = inst_coef(0.020f, g->sampleRate);
+    }
+  }
   v->v.seq = g->seqCounter++;
   /* Флейта — инструмент с дыханием: мягкая атака, длинный хвост. */
   inst_voice_setup(&v->v, note, velocity, 0.045f, 0.92f, 0.6f, 0.10f, g->sampleRate);
@@ -1130,6 +1140,7 @@ void eut_flute_note_on(EutFlute *g, int note, float velocity)
   v->dph = 0.0f;
   v->breathLp = v->breathHp = 0.0f;
   v->chiff = 0.6f;
+  v->vibAmp = 0.0f;
   g->active = 1;
 }
 
@@ -1175,26 +1186,28 @@ void eut_flute_process(EutFlute *g, float *outL, float *outR, int stride, int n,
       if (!inst_voice_alive(&v->v)) continue;
       ++alive;
 
-      float cents = g->vibrato * lfo + modCents + bendSemitones * 100.0f;
+      v->vibAmp += (1.0f - v->vibAmp) * 0.00008f;   /* вибрато soft-включается после атаки */
+      float cents = g->vibrato * v->vibAmp * lfo + modCents + bendSemitones * 100.0f;
       float f = v->v.freq;
       if (cents != 0.0f) f *= (float)exp2((double)(cents / 1200.0f));
       v->ph += f * invSr;
       if (v->ph >= 1.0f) v->ph -= 1.0f;
 
       float s = inst_sin(v->ph);
-      if (f * 3.0f < nyq) s += inst_sin_mult(v->ph, 3.0f) * 0.12f * g->tone;
-      if (f * 5.0f < nyq) s += inst_sin_mult(v->ph, 5.0f) * 0.05f * g->tone;
+      if (f * 3.0f < nyq) s += inst_sin_mult(v->ph, 3.0f) * 0.08f * g->tone;
+      if (f * 5.0f < nyq) s += inst_sin_mult(v->ph, 5.0f) * 0.03f * g->tone;
 
       const float nz = inst_noise(&v->v.rng);
-      /* «Дыхание» — ПОЛОСОВОЙ шум (ВЧ + ФНЧ): воздух вокруг тона, а не
-         широкополосное шипение. Верхний срез ~6 кГц убирает «сссс». */
-      v->breathHp += (nz - v->breathHp) * 0.10f;
+      /* «Дыхание» — ПОЛОСОВОЙ шум (ФВЧ + ФНЧ ~2.3 кГц): воздух вокруг тона,
+         а не широкополосное шипение. Тихий: у настоящей флейты шум дыхания
+         на порядок слабее тона, иначе строй «плывёт» и слышно «сссс». */
+      v->breathHp += (nz - v->breathHp) * 0.08f;
       const float hi = nz - v->breathHp;
-      v->breathLp += (hi - v->breathLp) * 0.55f;
-      s += v->breathLp * g->breath * 0.20f;
+      v->breathLp += (hi - v->breathLp) * 0.30f;
+      s += v->breathLp * g->breath * 0.08f;
 
       /* «Чиф» атаки — короткий и тихий, тоже полосовой, не щелчок. */
-      s += v->chiff * v->breathLp * 0.35f;
+      s += v->chiff * v->breathLp * 0.25f;
       v->chiff *= 0.9985f;
 
       s *= v->v.amp;
@@ -1353,6 +1366,285 @@ void eut_bagpipe_process(EutBagpipe *g, float *outL, float *outR, int stride, in
 
     if (outL != NULL) outL[i * stride] += (chanterL + drone * gl) * g->level;
     if (outR != NULL) outR[i * stride] += (chanterR + drone * gr) * g->level;
+  }
+}
+
+
+/* ===========================================================================
+ * Смычковые (струнный ансамбль)
+ *
+ * Пилообразная волна (band-limited, polyBLEP) через двухполюсный ФНЧ —
+ * корпус и «смычковая» мягкость; задержанное вибрато; лёгкая микрорасстройка
+ * голосов даёт ансамблевую глубину. Медленная атака — как у смычка.
+ * ========================================================================= */
+
+void eut_strings_reset(EutStrings *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutStringsVoice *v = &g->voices[i];
+    memset(&v->v, 0, sizeof(v->v));
+    v->ph = 0.0f;
+    v->lp1 = v->lp2 = 0.0f;
+    v->detune = 0.0f;
+    v->vibAmp = 0.0f;
+  }
+  g->lfoPhase = 0.0f;
+  g->active = 0;
+}
+
+void eut_strings_init(EutStrings *g, EutStringsVoice *voices, int voiceCount,
+                      float sampleRate)
+{
+  if (g == NULL) return;
+  g->voices = voices;
+  g->voiceCount = voiceCount > 0 ? voiceCount : 1;
+  g->sampleRate = sampleRate > 0.0f ? sampleRate : 48000.0f;
+  g->tone = 0.5f;
+  g->vibrato = 10.0f;
+  g->ensemble = 7.0f;
+  g->pan = 0.0f;
+  g->level = 0.7f;
+  g->lfoInc = EUT_INST_TWO_PI * 4.8f / g->sampleRate;
+  g->lpCoef = inst_clamp(EUT_INST_TWO_PI * 2200.0f / g->sampleRate, 0.02f, 0.8f);
+  g->seqCounter = 0;
+  eut_strings_reset(g);
+}
+
+void eut_strings_set(EutStrings *g, float tone, float vibratoCents,
+                     float ensembleCents, float pan, float level)
+{
+  if (g == NULL) return;
+  g->tone = inst_clamp(tone, 0.0f, 1.0f);
+  g->vibrato = inst_clamp(vibratoCents, 0.0f, 100.0f);
+  g->ensemble = inst_clamp(ensembleCents, 0.0f, 40.0f);
+  g->pan = inst_clamp(pan, -1.0f, 1.0f);
+  g->level = level;
+  /* Яркость = срез ФНЧ: 500 Гц (тёмно) … 5 кГц (ярко). */
+  const float fc = 500.0f + g->tone * 4500.0f;
+  g->lpCoef = inst_clamp(EUT_INST_TWO_PI * fc / g->sampleRate, 0.02f, 0.85f);
+}
+
+void eut_strings_note_on(EutStrings *g, int note, float velocity)
+{
+  if (g == NULL || g->voices == NULL) return;
+  EutStringsVoice *v = (EutStringsVoice *)inst_pick_voice(
+    g->voices, (int)sizeof(EutStringsVoice), g->voiceCount);
+  if (v == NULL) return;
+  v->v.seq = g->seqCounter++;
+  /* Смычок: мягкая атака, длинная нота, умеренный релиз. */
+  inst_voice_setup(&v->v, note, velocity, 0.14f, 0.9f, 1.2f, 0.30f, g->sampleRate);
+  v->ph = 0.0f;
+  v->lp1 = v->lp2 = 0.0f;
+  /* Микрорасстройка голоса: детерминированно от seq — ансамбль без «хора» вразнобой. */
+  v->detune = ((float)(v->v.seq % 5) - 2.0f) * (g->ensemble / 2.0f);
+  v->vibAmp = 0.0f;
+  g->active = 1;
+}
+
+void eut_strings_note_off(EutStrings *g, int note)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutStringsVoice *v = &g->voices[i];
+    if (v->v.active && v->v.note == note) v->v.held = 0;
+  }
+}
+
+void eut_strings_all_off(EutStrings *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutStringsVoice *v = &g->voices[i];
+    if (v->v.active) {
+      v->v.held = 0;
+      v->v.relCoef = inst_coef(0.060f, g->sampleRate);
+    }
+  }
+}
+
+EUT_TARGET_CLONES
+void eut_strings_process(EutStrings *g, float *outL, float *outR, int stride, int n,
+                         float bendSemitones, float modCents)
+{
+  if (g == NULL || g->voices == NULL || n <= 0) return;
+  if (g->active == 0) return;
+  const float invSr = 1.0f / g->sampleRate;
+  float gl, gr;
+  inst_pan_gains(g->pan, &gl, &gr);
+
+  for (int i = 0; i < n; ++i) {
+    float sumL = 0.0f, sumR = 0.0f;
+    int alive = 0;
+    const float lfo = inst_sin(g->lfoPhase);
+
+    for (int vi = 0; vi < g->voiceCount; ++vi) {
+      EutStringsVoice *v = &g->voices[vi];
+      if (!inst_voice_alive(&v->v)) continue;
+      ++alive;
+
+      v->vibAmp += (1.0f - v->vibAmp) * 0.00010f;
+      float cents = v->detune + g->vibrato * v->vibAmp * lfo + modCents +
+                    bendSemitones * 100.0f;
+      float f = v->v.freq * (float)exp2((double)(cents / 1200.0f));
+      const float dt = f * invSr;
+      v->ph += dt;
+      if (v->ph >= 1.0f) v->ph -= 1.0f;
+
+      /* Пила с polyBLEP (band-limited) → меньше алиасинга на высоких нотах. */
+      float saw = 2.0f * v->ph - 1.0f - inst_polyblep(v->ph, dt);
+      v->lp1 += (saw - v->lp1) * g->lpCoef;
+      v->lp2 += (v->lp1 - v->lp2) * g->lpCoef;
+      float s = v->lp2 * v->v.amp;
+
+      sumL += s * gl;
+      sumR += s * gr;
+    }
+
+    g->active = alive;
+    g->lfoPhase += g->lfoInc;
+    if (g->lfoPhase >= 1.0f) g->lfoPhase -= 1.0f;
+    if (outL != NULL) outL[i * stride] += sumL * g->level;
+    if (outR != NULL) outR[i * stride] += sumR * g->level;
+  }
+}
+
+
+/* ===========================================================================
+ * Колокол (трубчатый/церковный)
+ *
+ * Ингармонические частичные (как у настоящего колокола) с индивидуальным
+ * затуханием: высокие частичные гаснут быстрее — «звон» постепенно темнеет.
+ * Удар — очень короткая атака, дальше чистое естественное затухание.
+ * ========================================================================= */
+
+static const float kBellRatios[EUT_INST_BELL_PARTIALS] = {
+  0.50f, 1.00f, 1.19f, 1.56f, 2.00f, 2.51f, 2.66f, 3.01f
+};
+static const float kBellWeights[EUT_INST_BELL_PARTIALS] = {
+  0.90f, 1.00f, 0.70f, 0.55f, 0.40f, 0.30f, 0.22f, 0.16f
+};
+
+void eut_bell_reset(EutBell *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutBellVoice *v = &g->voices[i];
+    memset(&v->v, 0, sizeof(v->v));
+    for (int k = 0; k < EUT_INST_BELL_PARTIALS; ++k) {
+      v->ph[k] = v->dph[k] = 0.0f;
+      v->amp[k] = 0.0f;
+      v->ampCoef[k] = 0.0f;
+    }
+  }
+  g->active = 0;
+}
+
+void eut_bell_init(EutBell *g, EutBellVoice *voices, int voiceCount, float sampleRate)
+{
+  if (g == NULL) return;
+  g->voices = voices;
+  g->voiceCount = voiceCount > 0 ? voiceCount : 1;
+  g->sampleRate = sampleRate > 0.0f ? sampleRate : 48000.0f;
+  g->tune = 1.0f;
+  g->decay = 4.0f;
+  g->tone = 0.5f;
+  g->pan = 0.0f;
+  g->level = 0.7f;
+  g->seqCounter = 0;
+  eut_bell_reset(g);
+}
+
+void eut_bell_set(EutBell *g, float tune, float decay, float tone, float pan, float level)
+{
+  if (g == NULL) return;
+  g->tune = inst_clamp(tune, 0.25f, 4.0f);
+  g->decay = inst_clamp(decay, 0.1f, 30.0f);
+  g->tone = inst_clamp(tone, 0.0f, 1.0f);
+  g->pan = inst_clamp(pan, -1.0f, 1.0f);
+  g->level = level;
+}
+
+void eut_bell_note_on(EutBell *g, int note, float velocity)
+{
+  if (g == NULL || g->voices == NULL) return;
+  EutBellVoice *v = (EutBellVoice *)inst_pick_voice(
+    g->voices, (int)sizeof(EutBellVoice), g->voiceCount);
+  if (v == NULL) return;
+  v->v.seq = g->seqCounter++;
+  /* Удар: мгновенная атака, без сустейна, длинный «хвост». */
+  inst_voice_setup(&v->v, note, velocity, 0.004f, 0.0f, g->decay, g->decay * 0.35f,
+                   g->sampleRate);
+  const float nyq = g->sampleRate * 0.5f;
+  const float f0 = v->v.freq * g->tune;
+  for (int k = 0; k < EUT_INST_BELL_PARTIALS; ++k) {
+    const float f = f0 * kBellRatios[k];
+    v->ph[k] = 0.0f;
+    v->dph[k] = (f < nyq) ? (f / g->sampleRate) : 0.0f;
+    /* Наклон спектра: «тёмный» колокол — меньше верхних частичных. */
+    float w = kBellWeights[k] / (1.0f + 0.5f * (float)k * (1.2f - g->tone));
+    if (v->dph[k] <= 0.0f) w = 0.0f;
+    v->amp[k] = w;
+    /* Высокие частичные затухают быстрее — звон со временем темнеет. */
+    const float t = g->decay / (1.0f + 0.6f * (float)k);
+    v->ampCoef[k] = inst_coef(t, g->sampleRate);
+  }
+  g->active = 1;
+}
+
+void eut_bell_note_off(EutBell *g, int note)
+{
+  if (g == NULL || g->voices == NULL) return;
+  /* Колокол не глушится нотой: он звенит до естественного затухания. */
+  (void)note;
+}
+
+void eut_bell_all_off(EutBell *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutBellVoice *v = &g->voices[i];
+    if (v->v.active) {
+      v->v.held = 0;
+      v->v.relCoef = inst_coef(0.12f, g->sampleRate);
+    }
+  }
+}
+
+EUT_TARGET_CLONES
+void eut_bell_process(EutBell *g, float *outL, float *outR, int stride, int n)
+{
+  if (g == NULL || g->voices == NULL || n <= 0) return;
+  if (g->active == 0) return;
+  float gl, gr;
+  inst_pan_gains(g->pan, &gl, &gr);
+
+  for (int i = 0; i < n; ++i) {
+    float sumL = 0.0f, sumR = 0.0f;
+    int alive = 0;
+
+    for (int vi = 0; vi < g->voiceCount; ++vi) {
+      EutBellVoice *v = &g->voices[vi];
+      if (!inst_voice_alive(&v->v)) continue;
+      ++alive;
+
+      float s = 0.0f;
+      for (int k = 0; k < EUT_INST_BELL_PARTIALS; ++k) {
+        if (v->amp[k] <= 0.00002f || v->dph[k] <= 0.0f) continue;
+        v->ph[k] += v->dph[k];
+        if (v->ph[k] >= 1.0f) v->ph[k] -= 1.0f;
+        s += inst_sin(v->ph[k]) * v->amp[k];
+        v->amp[k] *= v->ampCoef[k];
+      }
+      s *= v->v.amp;
+
+      sumL += s * gl;
+      sumR += s * gr;
+    }
+
+    g->active = alive;
+    if (outL != NULL) outL[i * stride] += sumL * g->level;
+    if (outR != NULL) outR[i * stride] += sumR * g->level;
   }
 }
 
