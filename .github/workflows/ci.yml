@@ -164,6 +164,32 @@ jobs:
         run: nimble cliSmoke
 
   # ---------------------------------------------------------------------------
+  # Инспектор аудио (issue #290): эталонная пьеса собирается ТОЛЬКО CLI и
+  # проверяется на дефекты. Это executable-версия критерия #275 «звучит как
+  # задумано, а не просто не падает»: ошибки (клиппинг, провалы, жужжание,
+  # NaN) блокируют merge.
+  # ---------------------------------------------------------------------------
+  analyze:
+    name: audio inspector (reference render)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
+        with:
+          nim-version: '2.2.12'
+
+      - name: Build CLI
+        run: nimble cli
+
+      - name: Assemble and render reference piece (#275)
+        run: ./compositions/neo-romantic/build.sh
+
+      - name: Inspect audio for defects (#290)
+        run: ./build/euterpia analyze compositions/neo-romantic/ensemble.wav --fail-on error
+
+  # ---------------------------------------------------------------------------
   # Архитектурные guard'ы границ слоёв (MANIFEST §40, §41, §42).
   #
   # Это executable-версия критериев приёмки issue #29: конкретный формат
