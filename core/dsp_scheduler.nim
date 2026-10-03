@@ -61,10 +61,15 @@ type
     writes*: seq[ResourceRef]
 
   # --------------------------------------------------------------------------
-  # Runtime shared state
+  # Schedule slot (issue #9)
   # --------------------------------------------------------------------------
-
-  SchedulerShared = object
+  # Расписание вынесено в ОТДЕЛЬНУЮ структуру и хранится в двух экземплярах.
+  # Прежде массивы лежали прямо в SchedulerShared, и смена графа требовала
+  # teardown воркеров (а значит разрыва звука и гонки с renderBlock).
+  #
+  # Слот НЕИЗМЕНЯЕМ после публикации: writer его больше не трогает, пока
+  # не убедится, что читателей не осталось (см. `retireSchedule`).
+  ScheduleSlot = object
     tasks: ptr UncheckedArray[DspTask]
     taskCount: int
 
@@ -74,6 +79,35 @@ type
     levelOffsets: ptr UncheckedArray[int32]
     flatTasks: ptr UncheckedArray[int32]
     flatCount: int
+
+    ## Сколько воркеров/главный поток сейчас читают этот слот. Control-path
+    ## ждёт нуля перед переиспользованием слота. Счётчик, а не флаг:
+    ## читателей (воркеров) много, и они могут войти в слот не одновременно.
+    readers: Atomic[int32]
+
+  # --------------------------------------------------------------------------
+  # Runtime shared state
+  # --------------------------------------------------------------------------
+
+  SchedulerShared = object
+    ## Два слота: `activeIndex` указывает на текущий, второй — кандидат
+    ## на следующую смену графа. Слоты аллоцируются ОДИН раз при
+    ## `initScheduler` и переиспользуются при каждом `swapSchedule` —
+    ## именно это и даёт отсутствие разрывов (issue #9).
+    slots: array[2, ptr ScheduleSlot]
+    activeIndex: Atomic[int32]
+
+    ## Слот, на котором ИДЁТ текущий блок. Публикует главный поток перед
+    ## `commandBlock` (issue #9).
+    ##
+    ## Почему не читать `activeIndex` в воркере: своп может попасть ровно
+    ## между чтением главным потоком и чтением воркером. Тогда главный ждал бы
+    ## прогресса по УРОВНЯМ старого расписания, а воркер публиковал бы штампы
+    ## по уровням нового (у него своя `stride`). При разном числе уровней
+    ## ожидание либо зависало бы навсегда, либо прошло бы раньше времени.
+    ## Здесь слот выбирается ОДИН раз на блок и доезжает до воркеров вместе
+    ## с командой блока, поэтому обе стороны всегда согласованы.
+    blockSlot: Atomic[pointer]
 
     currentCtx: Atomic[pointer]
     currentLevel: Atomic[int32]
@@ -91,7 +125,22 @@ type
     inRender: Atomic[int32]
     abortedBlocks: Atomic[uint64]
 
+    ## Сколько расписаний сменилось за жизнь планировщика. Показывает, что
+    ## горячая замена действительно работает, а не проворачивает teardown.
+    swaps: Atomic[uint64]
+
+    ## Штамп прогресса: номер блока, до которого воркер домёл (issue #9).
     workerProgress: ptr UncheckedArray[Atomic[uint64]]
+
+    ## Уровень внутри ТЕКУЩЕГО блока, завершённый воркером (issue #9).
+    ##
+    ## Без него главный не мог дождаться реального завершения уровня:
+    ## `workerProgress` публикуется на КАЖДОМ уровне одним и тем же
+    ## `blockId`, поэтому со второго уровня ожидание проходило мгновенно,
+    ## главный убегал вперёд, а отставший воркер навсегда застревал в
+    ## ожидании `currentLevel == level` (сравнение было строгим).
+    ## Уровень хранится отдельно и строго растёт внутри блока.
+    workerLevel: ptr UncheckedArray[Atomic[int32]]
 
   WorkerArg = object
     sh: ptr SchedulerShared
@@ -103,6 +152,10 @@ type
     threads: array[MaxWorkerThreads, Thread[ptr WorkerArg]]
     workerCount: int
     running: bool
+
+    ## Control-path: слот, вышедший из обращения, но ещё не дождавшийся
+    ## читателей. `-1` — освобождать нечего.
+    pendingRetire: int32
 
   BuiltSchedule = object
     tasks: seq[DspTask]
@@ -162,13 +215,13 @@ proc allocSharedArray[T](n: int): ptr UncheckedArray[T] =
 # ----------------------------------------------------------------------------
 
 proc runTask(
-  sh: ptr SchedulerShared,
+  slot: ptr ScheduleSlot,
   taskId: int32,
   ctx: ptr NodeProcessContext
 ) {.inline, raises: [].} =
   if ctx.isNil:
     return
-  let t = addr sh.tasks[int(taskId)]
+  let t = addr slot.tasks[int(taskId)]
   if t.process != nil:
     t.process(ctx, t.audio, t.ctrl, t.events, t.userData)
 
@@ -177,16 +230,15 @@ proc runTask(
 # ----------------------------------------------------------------------------
 
 proc workerMain(arg: ptr WorkerArg) {.thread, raises: [].} =
+  ## Воркер живёт весь lifetime планировщика (issue #9): он НЕ перезапускается
+  ## при смене графа, а на каждом блоке заново смотрит `activeIndex`.
+  ##
+  ## `levelCount` и `stride` поэтому НЕ кэшируются при старте (в v1 они были
+  ## константами): новое расписание может иметь другое число уровней, и
+  ## закешированное значение увело бы воркер в несуществующий уровень —
+  ## либо, что хуже, пропустило бы реальные задачи.
   let sh = arg.sh
   let w = int(arg.index)
-  let levelCount = sh.levelCount
-
-  if levelCount == 0:
-    return
-
-  let stride = levelCount + 1
-  let executor = w + 1
-  let base = executor * stride
   var lastBlock = 0'u64
 
   while true:
@@ -198,30 +250,102 @@ proc workerMain(arg: ptr WorkerArg) {.thread, raises: [].} =
       cpuRelax()
       continue
 
+    # Слот и номер блока читаются ВМЕСТЕ и перечитываются до согласия.
+    #
+    # Воркер может отстать от главного потока на блок или больше. Тогда
+    # `blockSlot` уже указывает на слот СЛЕДУЮЩЕГО блока, а `blockId` —
+    # на текущий. Использовать такой слот нельзя: у него своя `stride`
+    # (своё число уровней), и вычисленный из неё штамп прогресса вечно
+    # оставался бы меньше цели главного потока — тот висел бы в ожидании
+    # вечно, а воркер крутился бы в spin. Поэтому пара «блок + слот»
+    # принимается только если блок не сменился повторно; иначе ждём
+    # следующей согласованной пары.
+    var slot = cast[ptr ScheduleSlot](sh.blockSlot.load(moAcquire))
+    if slot.isNil or sh.commandBlock.load(moAcquire) != blockId:
+      cpuRelax()
+      continue
+
+    # Пара согласована: блок принят. Обновляется ДО выполнения, иначе
+    # повторный вход крутил бы один и тот же блок бесконечно.
     lastBlock = blockId
 
     let ctx = cast[ptr NodeProcessContext](sh.currentCtx.load(moAcquire))
 
-    var level = 0
-    while level < levelCount:
-      # Fix 15: Wait for exact level match. -1 means block is not ready yet.
-      while sh.currentLevel.load(moAcquire) != level.int32:
-        if sh.stopFlag.load(moAcquire) != 0'u8:
-          return
-        cpuRelax()
+    # Читатели: control-path не освободит слот, пока этот счётчик не вернётся
+    # в ноль. Инкремент до выполнения, декремент в любом выходе.
+    discard slot.readers.fetchAdd(1'i32, moAcquireRelease)
+    let levelCount = slot.levelCount
+    let stride = levelCount + 1
+    # Строка офсетов этого исполнителя в слоте. Главный поток — исполнитель
+    # 0, воркеры идут следом; у каждого своя полоса уровней.
+    let base = (w + 1) * stride
 
-      let start = sh.levelOffsets[base + level]
-      let finish = sh.levelOffsets[base + level + 1]
+    if levelCount > 0:
+      # Открываем блок: сначала уровень «не выполнен» (-1), затем штамп блока.
+      # Порядок обязателен: `release`-барьер гарантирует, что главный, увидев
+      # новый `blockId`, увидит и `workerLevel = -1`. В обратном порядке он мог
+      # бы принять старый уровень предыдущего блока за текущий и уйти вперёд до
+      # реального завершения уровня.
+      sh.workerLevel[w].store(-1'i32, moRelease)
+      sh.workerProgress[w].store(blockId, moRelease)
 
-      var p = start
-      while p < finish:
-        runTask(sh, sh.flatTasks[p], ctx)
-        inc p
+      var level = 0
+      while level < levelCount:
+        # Fix 15: ждём разрешения на уровень. Условие НЕРАВЕНСТВА снизу:
+        # главный публикует `currentLevel` строго по возрастанию (0,1,2,...),
+        # и воркер обязан ДОГНАТЬ уровень, а не требовать точного совпадения.
+        #
+        # Это и было причиной дедлока: при строгом `!= level` отставший
+        # воркер (главный уже на уровне 3) вечно ждал `currentLevel == 1`,
+        # который никогда не вернётся. Воркер держал слот в `readers`, а
+        # `awaitSlotFree` следующего `swapSchedule` ждал освобождения вечно.
+        #
+        # Отрицательный `currentLevel` — защита от рассинхрона: главный такой
+        # сентинел больше не публикует (уровень 0 выставляется ДО команды
+        # блока), но если он когда-нибудь появится, воркер обязан выйти и
+        # опубликовать штамп, иначе главный остался бы в ожидании вечно.
+        var stale = false
+        while true:
+          let cl = sh.currentLevel.load(moAcquire)
+          if cl >= level.int32:
+            # Уровень разрешён (равен или главный уже ушёл вперёд — догоняем).
+            break
+          if cl < 0:
+            # Блок закрыт: ждать больше нечего.
+            sh.workerLevel[w].store(level.int32, moRelease)
+            stale = true
+            break
+          if sh.commandBlock.load(moAcquire) != blockId:
+            # Пришёл следующий блок: текущий для нас устарел. Публикуем штамп,
+            # чтобы главный предыдущего блока не ждал вечно, и выходим.
+            sh.workerLevel[w].store(level.int32, moRelease)
+            stale = true
+            break
+          if sh.stopFlag.load(moAcquire) != 0'u8:
+            discard slot.readers.fetchAdd(-1'i32, moAcquireRelease)
+            return
+          cpuRelax()
 
-      let stamp = blockId * uint64(stride) + uint64(level + 1)
-      sh.workerProgress[w].store(stamp, moRelease)
+        if stale:
+          break
 
-      inc level
+        let start = slot.levelOffsets[base + level]
+        let finish = slot.levelOffsets[base + level + 1]
+
+        var p = start
+        while p < finish:
+          runTask(slot, slot.flatTasks[p], ctx)
+          inc p
+
+        # Публикуем завершённый УРОВЕНЬ этого блока. Именно по нему главный
+        # ждёт реального окончания уровня; `blockId` растёт медленнее и один
+        # на весь блок, поэтому его для синхронизации уровней недостаточно.
+        sh.workerLevel[w].store(level.int32, moRelease)
+        sh.workerProgress[w].store(blockId, moRelease)
+
+        inc level
+
+    discard slot.readers.fetchAdd(-1'i32, moAcquireRelease)
 
 # ----------------------------------------------------------------------------
 # Compile-time schedule builder
@@ -366,14 +490,70 @@ proc buildSchedule(
 
 proc deinitScheduler*(s: var DspScheduler)
 
+proc freeSlotArrays(slot: ptr ScheduleSlot) =
+  ## Освободить массивы слота. Control-path (cold): вызывается при
+  ## переиспользовании слота и при `deinitScheduler`.
+  if slot.isNil:
+    return
+  if not slot.tasks.isNil:
+    deallocShared(cast[pointer](slot.tasks))
+    slot.tasks = nil
+  if not slot.levelOffsets.isNil:
+    deallocShared(cast[pointer](slot.levelOffsets))
+    slot.levelOffsets = nil
+  if not slot.flatTasks.isNil:
+    deallocShared(cast[pointer](slot.flatTasks))
+    slot.flatTasks = nil
+  slot.taskCount = 0
+  slot.flatCount = 0
+  slot.levelCount = 0
+  slot.executorCount = 0
+
+proc publishSlot(slot: ptr ScheduleSlot, built: BuiltSchedule): bool =
+  ## Залить построенное расписание в слот. Control-path (cold).
+  ##
+  ## Вызывается ТОЛЬКО когда `slot.readers == 0` (см. `swapSchedule`),
+  ## поэтому запись в поля слота не гоняется с воркерами.
+  slot.taskCount = built.tasks.len
+  slot.levelCount = built.levelCount
+  slot.executorCount = built.executorCount
+  slot.flatCount = built.flat.len
+
+  slot.tasks = allocSharedArray[DspTask](built.tasks.len)
+  slot.levelOffsets = allocSharedArray[int32](built.offsets.len)
+  slot.flatTasks = allocSharedArray[int32](built.flat.len)
+
+  if built.tasks.len > 0 and slot.tasks.isNil:
+    freeSlotArrays(slot)
+    return false
+  if built.offsets.len > 0 and slot.levelOffsets.isNil:
+    freeSlotArrays(slot)
+    return false
+  if built.flat.len > 0 and slot.flatTasks.isNil:
+    freeSlotArrays(slot)
+    return false
+
+  for i in 0 ..< built.tasks.len:
+    slot.tasks[i] = built.tasks[i]
+  for i in 0 ..< built.offsets.len:
+    slot.levelOffsets[i] = built.offsets[i]
+  for i in 0 ..< built.flat.len:
+    slot.flatTasks[i] = built.flat[i]
+
+  slot.readers.store(0'i32, moRelaxed)
+  return true
+
 proc initScheduler*(
   s: var DspScheduler,
   descs: openArray[TaskDesc],
   workerCount: int
 ): bool =
-  # Note (Fix 16 documentation):
-  # initScheduler tears down and recreates threads.
-  # Do not call during active realtime audio processing!
+  ## Cold-path: создать пул воркеров и первое расписание.
+  ##
+  ## ВАЖНО (issue #9): после инициализации смена графа во время
+  ## воспроизведения делается через `swapSchedule`, а НЕ повторным
+  ## `initScheduler`. Повторный `initScheduler` по-прежнему делает teardown
+  ## потоков — это холодный путь (старт сессии, смена числа воркеров).
   deinitScheduler(s)
 
   let wc =
@@ -391,28 +571,22 @@ proc initScheduler*(
 
   s.shared = sh
   s.workerCount = wc
+  s.pendingRetire = -1
 
-  sh.taskCount = built.tasks.len
-  sh.levelCount = built.levelCount
-  sh.executorCount = built.executorCount
-  sh.flatCount = built.flat.len
+  # Оба слота аллоцируются ОДИН раз и живут до deinit (issue #9).
+  for i in 0 .. 1:
+    sh.slots[i] = cast[ptr ScheduleSlot](allocShared0(sizeof(ScheduleSlot)))
+    if sh.slots[i].isNil:
+      deinitScheduler(s)
+      return false
 
-  sh.tasks = allocSharedArray[DspTask](built.tasks.len)
-  sh.levelOffsets = allocSharedArray[int32](built.offsets.len)
-  sh.flatTasks = allocSharedArray[int32](built.flat.len)
-
-  if built.tasks.len > 0 and sh.tasks.isNil:
+  if not publishSlot(sh.slots[0], built):
     deinitScheduler(s)
     return false
 
-  if built.offsets.len > 0 and sh.levelOffsets.isNil:
-    deinitScheduler(s)
-    return false
+  sh.activeIndex.store(0'i32, moRelaxed)
 
-  if built.flat.len > 0 and sh.flatTasks.isNil:
-    deinitScheduler(s)
-    return false
-
+  # Воркеры поднимаются, только если в первом расписании есть уровни.
   let startThreads = wc > 0 and built.levelCount > 0
 
   if startThreads:
@@ -420,29 +594,15 @@ proc initScheduler*(
     if sh.workerProgress.isNil:
       deinitScheduler(s)
       return false
-  else:
-    sh.workerProgress = nil
-
-  for i in 0 ..< built.tasks.len:
-    sh.tasks[i] = built.tasks[i]
-
-  for i in 0 ..< built.offsets.len:
-    sh.levelOffsets[i] = built.offsets[i]
-
-  for i in 0 ..< built.flat.len:
-    sh.flatTasks[i] = built.flat[i]
-
-  sh.currentCtx.store(nil, moRelaxed)
-  # -1 signifies unstarted block
-  sh.currentLevel.store(-1'i32, moRelaxed)
-  sh.commandBlock.store(0'u64, moRelaxed)
-  sh.stopFlag.store(0'u8, moRelaxed)
-  sh.inRender.store(0'i32, moRelaxed)
-  sh.abortedBlocks.store(0'u64, moRelaxed)
-
-  if startThreads:
     for i in 0 ..< wc:
       sh.workerProgress[i].store(0'u64, moRelaxed)
+
+    sh.workerLevel = allocSharedArray[Atomic[int32]](wc)
+    if sh.workerLevel.isNil:
+      deinitScheduler(s)
+      return false
+    for i in 0 ..< wc:
+      sh.workerLevel[i].store(-1'i32, moRelaxed)
 
     s.workerArgs = allocSharedArray[WorkerArg](wc)
     if s.workerArgs.isNil:
@@ -455,10 +615,196 @@ proc initScheduler*(
 
     s.running = true
   else:
+    sh.workerProgress = nil
+    sh.workerLevel = nil
     s.workerArgs = nil
     s.running = false
 
+  sh.currentCtx.store(nil, moRelaxed)
+  # -1 signifies unstarted block
+  sh.currentLevel.store(-1'i32, moRelaxed)
+  sh.commandBlock.store(0'u64, moRelaxed)
+  sh.stopFlag.store(0'u8, moRelaxed)
+  sh.inRender.store(0'i32, moRelaxed)
+  sh.abortedBlocks.store(0'u64, moRelaxed)
+  sh.swaps.store(0'u64, moRelaxed)
+
   return true
+
+proc ensureWorkers*(s: var DspScheduler): bool =
+  ## Control-path: поднять пул воркеров, если он ещё не поднят.
+  ##
+  ## Нужен для случая «первое расписание пустое, потоки не создавались»:
+  ## без этого `swapSchedule` на живой сессии молча оставил бы рендер
+  ## без параллелизма. Возвращает false, если воркеров не нужно или
+  ## создание не удалось.
+  if s.shared.isNil:
+    return false
+  if s.running:
+    return true
+  if s.workerCount <= 0:
+    return false
+
+  let sh = s.shared
+
+  if sh.workerProgress.isNil:
+    sh.workerProgress = allocSharedArray[Atomic[uint64]](s.workerCount)
+    if sh.workerProgress.isNil:
+      return false
+
+  for i in 0 ..< s.workerCount:
+    sh.workerProgress[i].store(0'u64, moRelaxed)
+
+  if sh.workerLevel.isNil:
+    sh.workerLevel = allocSharedArray[Atomic[int32]](s.workerCount)
+    if sh.workerLevel.isNil:
+      return false
+
+  for i in 0 ..< s.workerCount:
+    sh.workerLevel[i].store(-1'i32, moRelaxed)
+
+  if s.workerArgs.isNil:
+    s.workerArgs = allocSharedArray[WorkerArg](s.workerCount)
+    if s.workerArgs.isNil:
+      return false
+
+  for i in 0 ..< s.workerCount:
+    s.workerArgs[i] = WorkerArg(sh: sh, index: i.int32)
+    createThread(s.threads[i], workerMain, addr s.workerArgs[i])
+
+  s.running = true
+  return true
+
+proc reclaimRetired*(s: var DspScheduler) =
+  ## Control-path: освободить слот, вышедший из обращения, как только его
+  ## читатели рассосались. Ничего не делает, если воркеры ещё в старом слоте.
+  if s.shared.isNil or s.pendingRetire < 0:
+    return
+  let idx = int(s.pendingRetire)
+  if idx < 0 or idx > 1:
+    s.pendingRetire = -1
+    return
+  let slot = s.shared.slots[idx]
+  if slot.isNil:
+    s.pendingRetire = -1
+    return
+  if slot.readers.load(moAcquire) != 0:
+    return
+  freeSlotArrays(slot)
+  s.pendingRetire = -1
+
+proc awaitSlotFree(slot: ptr ScheduleSlot, sh: ptr SchedulerShared): bool =
+  ## Control-path: дождаться, пока из слота выйдут ВСЕ читатели.
+  ##
+  ## Раньше `swapSchedule` в такой ситуации просто возвращал `false`, и
+  ## смена графа могла молча не произойти: из 10 000 свопов около 1 700
+  ## отклонялись, потому что воркер ещё доигрывал предыдущий блок. Для
+  ## control-path это неприемлемо — «добавил ноду, а она не появилась».
+  ##
+  ## Ждать здесь безопасно: читатель держит слот только на время одного
+  ## блока, а `stopFlag` даёт аварийный выход, если audio-поток остановлен
+  ## и блок никогда не завершится.
+  if slot.isNil:
+    return false
+  while slot.readers.load(moAcquire) != 0:
+    if sh.stopFlag.load(moAcquire) != 0'u8:
+      return false
+    cpuRelax()
+  return true
+
+proc swapSchedule*(
+  s: var DspScheduler,
+  descs: openArray[TaskDesc]
+): bool =
+  ## Control-path: заменить расписание БЕЗ teardown воркеров (issue #9).
+  ##
+  ## Порядок (двухбуферная публикация):
+  ##   1. достроить новое расписание в НЕактивный слот;
+  ##   2. опубликовать индекс через `activeIndex` (release);
+  ##   3. старый слот пометить к утилизации — память освободится позже,
+  ##      когда воркеры выйдут из него (`reclaimRetired`).
+  ##
+  ## Своп разрешён во время воспроизведения: audio-поток подхватит новый
+  ## слот на границе блока, а не посреди уровня.
+  if s.shared.isNil:
+    return false
+
+  let sh = s.shared
+
+  # Освобождаем прошлый отставной слот, если он уже никому не нужен:
+  # без этого второй своп подряд не смог бы переиспользовать слот.
+  reclaimRetired(s)
+
+  let wc = s.workerCount
+
+  var built: BuiltSchedule
+  if not buildSchedule(descs, wc, built):
+    return false
+
+  # Кандидат — слот, который сейчас НЕ активен.
+  let target = 1 - sh.activeIndex.load(moAcquire)
+  if target < 0 or target > 1:
+    return false
+  let slot = sh.slots[target]
+
+  # Слот должен быть свободен. Если воркер ещё доигрывает на нём блок,
+  # ЖДЁМ освобождения: молча отказывать в смене графа нельзя, иначе
+  # «добавил ноду во время playback» тихо не сработает.
+  if not awaitSlotFree(slot, sh):
+    return false
+
+  # Отставной слот освобождаем только после того, как кандидат признан
+  # свободным: иначе второй своп подряд не смог бы освободить слот.
+  if s.pendingRetire == target.int32:
+    freeSlotArrays(slot)
+    s.pendingRetire = -1
+
+  if not publishSlot(slot, built):
+    return false
+
+  # Публикация. Барьер release/acquire гарантирует, что воркер, увидевший
+  # новый индекс, увидит и полностью залитые массивы.
+  let old = sh.activeIndex.exchange(target, moAcquireRelease)
+  s.pendingRetire = old
+  discard sh.swaps.fetchAdd(1'u64, moRelaxed)
+
+  # Первое непустое расписание может прийти на «пустой» сессии — воркеры
+  # тогда не были подняты. Поднимаем их здесь, а не в renderBlock.
+  if built.levelCount > 0 and wc > 0 and not s.running:
+    discard ensureWorkers(s)
+
+  return true
+
+proc scheduleSwaps*(s: DspScheduler): uint64 =
+  ## Сколько расписаний сменилось через `swapSchedule`. Control-path.
+  if s.shared.isNil:
+    return 0'u64
+  s.shared.swaps.load(moRelaxed)
+
+proc activeTaskCount*(s: DspScheduler): int =
+  ## Сколько задач в текущем расписании. Control-path (диагностика).
+  if s.shared.isNil:
+    return 0
+  let idx = s.shared.activeIndex.load(moAcquire)
+  if idx < 0 or idx > 1:
+    return 0
+  let slot = s.shared.slots[idx]
+  if slot.isNil:
+    return 0
+  slot.taskCount
+
+proc activeLevelCount*(s: DspScheduler): int =
+  ## Сколько уровней в текущем расписании. Control-path (диагностика).
+  if s.shared.isNil:
+    return 0
+  let idx = s.shared.activeIndex.load(moAcquire)
+  if idx < 0 or idx > 1:
+    return 0
+  let slot = s.shared.slots[idx]
+  if slot.isNil:
+    return 0
+  slot.levelCount
+
 
 proc requestStop*(s: var DspScheduler) {.raises: [], gcsafe.} =
   ## Control-path: попросить планировщик остановиться. Воркеры выходят, а
@@ -505,17 +851,22 @@ proc deinitScheduler*(s: var DspScheduler) =
 
     s.running = false
 
-  if not s.shared.tasks.isNil:
-    deallocShared(cast[pointer](s.shared.tasks))
-
-  if not s.shared.levelOffsets.isNil:
-    deallocShared(cast[pointer](s.shared.levelOffsets))
-
-  if not s.shared.flatTasks.isNil:
-    deallocShared(cast[pointer](s.shared.flatTasks))
-
+  # Массивы расписания теперь живут в слотах (issue #9) и освобождаются
+  # в цикле ниже — отдельных полей tasks/levelOffsets/flatTasks в
+  # SchedulerShared больше нет.
   if not s.shared.workerProgress.isNil:
     deallocShared(cast[pointer](s.shared.workerProgress))
+
+  if not s.shared.workerLevel.isNil:
+    deallocShared(cast[pointer](s.shared.workerLevel))
+
+  # Оба слота освобождаются целиком: к моменту deinit воркеры уже joined,
+  # поэтому читателей не осталось (проверено doAssert выше по inRender).
+  for i in 0 .. 1:
+    if not s.shared.slots[i].isNil:
+      freeSlotArrays(s.shared.slots[i])
+      deallocShared(cast[pointer](s.shared.slots[i]))
+      s.shared.slots[i] = nil
 
   if not s.workerArgs.isNil:
     deallocShared(cast[pointer](s.workerArgs))
@@ -525,6 +876,7 @@ proc deinitScheduler*(s: var DspScheduler) =
   s.shared = nil
   s.workerArgs = nil
   s.workerCount = 0
+  s.pendingRetire = -1
 
 proc renderBlock*(
   s: var DspScheduler,
@@ -544,7 +896,14 @@ proc renderBlock*(
   ## выполнена, поэтому вызывающий обязан трактовать такой блок как
   ## недостоверный (обычно это уже остановка рендера).
   let sh = s.shared
-  if sh.isNil or sh.levelCount == 0:
+  if sh.isNil:
+    return
+
+  # Активный слот читается ОДИН раз на весь блок (issue #9). Своп расписания
+  # может произойти в любой момент, но блок обязан быть однородным: смешивание
+  # двух карт задач внутри одного блока нарушило бы порядок зависимостей.
+  let slot = sh.slots[sh.activeIndex.load(moAcquire)]
+  if slot.isNil or slot.levelCount == 0:
     return
 
   # После запроса остановки новый блок не начинаем: воркеры уже выходят.
@@ -557,36 +916,73 @@ proc renderBlock*(
   rtScope():
     # Инвариант владения: планировщик нельзя разбирать во время рендера.
     discard sh.inRender.fetchAdd(1'i32, moAcquireRelease)
+    # Главный поток — тоже читатель слота: пока мы здесь, control-path
+    # не освободит и не перезапишет его (важно для `swapSchedule`).
+    discard slot.readers.fetchAdd(1'i32, moAcquireRelease)
     defer:
+      discard slot.readers.fetchAdd(-1'i32, moAcquireRelease)
       discard sh.inRender.fetchAdd(-1'i32, moAcquireRelease)
 
-    # Fix 15: 1. Reset level to -1 before publishing new command block
-    sh.currentLevel.store(-1'i32, moRelease)
+    let levelCount = slot.levelCount
+
+    # Уровень НЕ сбрасываем в -1: этот сентинел означает «блок закрыт», и
+    # воркер, увидев его, немедленно вышел бы из только что начатого блока
+    # (а начальное значение в `initScheduler` как раз -1). Публикуем сразу
+    # уровень 0 — он гарантированно есть, ведь `levelCount > 0` проверено выше.
+    sh.currentLevel.store(0'i32, moRelease)
     sh.currentCtx.store(ctx, moRelease)
+
+    # Слот и номер блока публикуются в строгом порядке: сначала слот,
+    # потом команда. Воркер читает пару «commandBlock -> blockSlot» и
+    # перепроверяет `commandBlock`; при таком порядке он не может получить
+    # слот от СЛЕДУЮЩЕГО блока вместе с номером ТЕКУЩЕГО.
     let blockId = sh.commandBlock.load(moRelaxed) + 1'u64
+    sh.blockSlot.store(cast[pointer](slot), moRelease)
     sh.commandBlock.store(blockId, moRelease)
 
-    let stride = sh.levelCount + 1
+    # Каждому блоку присвоен СВОЙ номер, и прогресс воркера кодируется как
+    # пара «блок + уровень». Раньше здесь стоял монолитный счётчик
+    # `blockId * stride + level`, где `stride = levelCount + 1`.
+    #
+    # Эта схема ломалась при смене числа уровней: stride менялся (например
+    # с 9 на 3), и цель ожидания уезжала за пределы, достижимые старым
+    # штампом. Воркер тогда публиковал прогресс уже никогда, а главный
+    # поток ждал вечно — дедлок, воспроизводимый обычной сменой графа.
+    #
+    # Теперь уровень хранится ОТДЕЛЬНО от номера блока. Сравнение идёт по
+    # номеру блока, а уровень внутри блока строго растёт, поэтому штамп от
+    # предыдущего блока не может удовлетворить ожидание текущего ни при
+    # каком stride.
+    let target = blockId
 
     var level = 0
-    while level < sh.levelCount:
+    while level < levelCount:
       # Fix 15: 2. Explicitly authorize workers to enter this specific level
       sh.currentLevel.store(level.int32, moRelease)
 
-      let start = sh.levelOffsets[level]
-      let finish = sh.levelOffsets[level + 1]
+      let start = slot.levelOffsets[level]
+      let finish = slot.levelOffsets[level + 1]
 
       var p = start
       while p < finish:
-        runTask(sh, sh.flatTasks[p], ctx)
+        runTask(slot, slot.flatTasks[p], ctx)
         inc p
 
-      # Fix 15: 3. Wait for all workers to complete this exact level
-      let target = blockId * uint64(stride) + uint64(level + 1)
-
+      # Fix 15: 3. Ждём, пока КАЖДЫЙ воркер реально добьёт этот уровень.
+      #
+      # Одного `workerProgress == blockId` недостаточно: он публикуется один
+      # раз на весь блок, поэтому со второго уровня условие было бы истинно
+      # сразу и главный убегал бы вперёд. Именно из-за этого отставший воркер
+      # навсегда застревал в ожидании своего уровня, удерживал слот в
+      # `readers`, и следующий `swapSchedule` ждал освобождения вечно.
+      # Завершение уровня подтверждается отдельным штампом `workerLevel`.
       var w = 0
       while w < s.workerCount:
-        while sh.workerProgress[w].load(moAcquire) < target:
+        while true:
+          let bp = sh.workerProgress[w].load(moAcquire)
+          if bp == target and
+             sh.workerLevel[w].load(moAcquire) >= level.int32:
+            break
           # Запрос остановки пришёл во время ожидания: выходим, иначе тут
           # будет вечный spin (issue #74).
           if sh.stopFlag.load(moAcquire) != 0'u8:
