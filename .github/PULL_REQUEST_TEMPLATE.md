@@ -6,6 +6,9 @@
 
 Closes #
 
+Подверсия: <!-- milestone вида v0.3.3, см. docs/versions.md -->
+Продолжает: <!-- существующие Issues, если это развитие направления -->
+
 ## Чек-лист MANIFEST §103
 
 - [ ] Указан слой (Core / Nodes / Commons / CLI / Editor / адаптер)
