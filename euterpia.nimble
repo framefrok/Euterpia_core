@@ -9,7 +9,12 @@
 # (MANIFEST §104).
 # ============================================================
 
-version       = "0.2.0"
+# Версия пакета берётся из Nim-модуля `euterpia_version.nim`, а не пишется
+# строкой: тот же модуль печатает `euterpia --version`, поэтому версия
+# пакета и версия CLI не могут разойтись (issue #88; релиз — #113).
+import euterpia_version
+
+version       = EuterpiaVersion
 author        = "EUTERPIA"
 description   = "EUTERPIA DAW core: audio runtime, graph compiler, realtime scheduler, node SDK, builtin DSP"
 # Проприетарная: репозиторий публичный, но все права сохраняются за автором
@@ -22,9 +27,13 @@ srcDir        = "core"
 requires "nim >= 2.0.0"
 
 const
-  buildDir* = "build"
-  unitBin*  = "build/euterpia_unit_tests"
-  intBin*   = "build/euterpia_integration_tests"
+  buildDir*   = "build"
+  unitBin*    = "build/euterpia_unit_tests"
+  intBin*     = "build/euterpia_integration_tests"
+  cliBin*     =
+    when defined(windows): "build/euterpia.exe"
+    else: "build/euterpia"
+  cliTestBin* = "build/cli_test"
 
 proc buildLog(title: string) =
   echo ""
@@ -84,6 +93,27 @@ task integration, "Интеграционный тест ядра":
 task buildRelease, "Сборка интеграционного теста в release с LTO":
   mkDir buildDir
   exec "nim c --hints:off -d:release --passL:-flto --out:" & intBin & " tests/integration_test.nim"
+
+# ---------------------------------------------------------------------------
+# CLI (issue #88). Отдельная цель, а не часть `nimble test`, по двум
+# причинам:
+#   * CLI линкует адаптер miniaudio — это статическая C-библиотека
+#     (единственный адаптер без внешней зависимости), её сборка заметно
+#     тяжелее unit-набора;
+#   * контракт CLI проверяется ЗАПУСКОМ процесса (коды возврата,
+#     разделение stdout/stderr), то есть это smoke-тест, а не unit-тест.
+# ---------------------------------------------------------------------------
+task cli, "Сборка CLI: build/euterpia (issue #88)":
+  mkDir buildDir
+  buildLog "cli"
+  exec "nim c --hints:off --out:" & cliBin & " cli.nim"
+
+task cliSmoke, "CLI smoke: точка входа, doctor и completion (#88, #105, #259)":
+  mkDir buildDir
+  buildLog "cli build"
+  exec "nim c --hints:off --out:" & cliBin & " cli.nim"
+  buildLog "cli smoke test"
+  exec "nim c -r --hints:off --out:" & cliTestBin & " tests/cli_test.nim"
 
 # ---------------------------------------------------------------------------
 # miniaudio (#31). Здесь РЕАЛЬНО собирается и линкуется TU miniaudio
