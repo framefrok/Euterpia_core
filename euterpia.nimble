@@ -11,6 +11,11 @@
 version       = "0.2.0"
 author        = "EUTERPIA"
 description   = "EUTERPIA DAW core: audio runtime, graph compiler, realtime scheduler, node SDK, builtin DSP"
+# Проприетарная: репозиторий публичный, но все права сохраняются за автором
+# как минимум до ветки v0.10 (возможно v0.15). Поле обязательно для nimble —
+# без него `nimble test`/`dump` падают с «does not contain a license field».
+# История: #252, 1e59ed4 удалил `license = "MIT"` вместе с удалением LICENSE.
+license       = "Proprietary"
 srcDir        = "core"
 
 requires "nim >= 2.0.0"

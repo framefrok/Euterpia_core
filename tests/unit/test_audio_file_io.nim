@@ -131,9 +131,17 @@ suite "audio_file_io: оборванная запись (#76)":
     # маленький файл остаётся пустым).
     var buf = newSeq[float32](10_000)
     enc.writeFrames(cast[ptr UncheckedArray[float32]](addr buf[0]), 10_000)
-    # НЕ вызываем enc.close(): эмулируем падение процесса между open и close.
-
-    defer: removeFile(path)
+    # НЕ вызываем enc.close() до проверок: эмулируем падение процесса между
+    # open и close (здесь и читаются плейсхолдеры нулевых размеров).
+    #
+    # Но cleanup обязан закрыть писателя ПЕРЕД удалением: на Windows
+    # RemoveFile падает с «file is being used by another process», пока
+    # хендл открыт (unlink открытого файла на POSIX разрешён, поэтому на
+    # Linux/macOS тест проходил и дефект не был виден — CI на Windows до
+    # починки workflow вообще не запускался, см. #249/#251).
+    defer:
+      enc.close()
+      removeFile(path)
 
     # Заголовок: RIFF-размер — смещение 4, размер data-чанка — смещение 40.
     let raw = readFile(path)
