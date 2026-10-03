@@ -84,15 +84,45 @@ PROG_B = [
     ('F',  [53, 57, 60]),
     ('C',  [60, 64, 67]),
 ]
+# A′ — то же, но с доминантой (E) вместо G: больше напряжения и тяги домой.
+PROG_A2 = [
+    ('Am', [57, 60, 64]),
+    ('F',  [53, 57, 60]),
+    ('Dm', [62, 65, 69]),
+    ('E',  [52, 56, 59]),
+]
+# Кода разрешается в тонику.
+PROG_CODA = [
+    ('F',  [53, 57, 60]),
+    ('G',  [55, 59, 62]),
+    ('Am', [57, 60, 64]),
+    ('Am', [57, 60, 64]),
+]
 
 # 64 такта: (номер раздела, диапазон 1-based, прогрессия).
 SECTIONS = [
     ('intro', 1, 8,  PROG_A),
     ('A',     9, 24, PROG_A),
     ('B',     25, 40, PROG_B),
-    ('A2',    41, 56, PROG_A),
-    ('coda',  57, 64, PROG_A),
+    ('A2',    41, 56, PROG_A2),
+    ('coda',  57, 64, PROG_CODA),
 ]
+
+# Динамика по разделам: интро тише, A′ — кульминация, кода затихает.
+DYNAMICS = {
+    'intro': 0.78,
+    'A': 1.0,
+    'B': 0.94,
+    'A2': 1.1,
+    'coda': 0.82,
+}
+
+
+def vel(bar_no, base):
+    """Velocity с учётом динамики раздела (зажата в 1..127)."""
+    v = int(round(base * DYNAMICS.get(section_of(bar_no), 1.0)))
+    return max(1, min(127, v))
+
 
 
 def chord_at(bar_no):
@@ -158,8 +188,7 @@ def gen_organ():
     out = []
     for b in range(1, BARS + 1):
         _, tones = chord_at(b)
-        vel = 60 if section_of(b) == 'intro' else 72
-        out.append(bar([(list(tones), 4)], vel))
+        out.append(bar([(list(tones), 4)], vel(b, 72)))
     return out
 
 
@@ -169,15 +198,31 @@ def gen_piano():
         _, tones = chord_at(b)
         sec = section_of(b)
         if sec == 'intro' and b <= 4:
-            out.append(bar([('r', 4)], 70))
+            out.append(bar([('r', 4)], vel(b, 80)))
             continue
         octave = tones[0] + 12
         pool = list(tones) + [octave]
-        order = [0, 1, 2, 3, 2, 1, 0, 2]
+        # В B — восходящий разлив, в остальных разделах — «качели».
+        order = [0, 1, 2, 3] * 2 if sec == 'B' else [0, 1, 2, 3, 2, 1, 0, 2]
         items = [([pool[order[k]]], 0.5) for k in range(8)]
-        vel = 66 if sec == 'intro' else 80
-        out.append(bar(items, vel))
+        out.append(bar(items, vel(b, 80)))
     return out
+
+
+def transpose(items, semis):
+    out = []
+    for pitch, beats in items:
+        if pitch == 'r':
+            out.append(('r', beats))
+        elif isinstance(pitch, (list, tuple)):
+            out.append(([p + semis for p in pitch], beats))
+        else:
+            out.append((pitch + semis, beats))
+    return out
+
+
+# Кода: короткая нисходящая фраза, затем тишина.
+CODA_LINE = [[(76, 2), (74, 2)], [(72, 1), (69, 1), (64, 2)]]
 
 
 def gen_guitar():
@@ -185,28 +230,35 @@ def gen_guitar():
     for b in range(1, BARS + 1):
         sec = section_of(b)
         if sec == 'intro':
-            out.append(bar([('r', 4)], 90))
-        elif sec in ('A', 'A2'):
-            idx = (b - section_start(sec)) % len(MELODY)
-            out.append(bar(MELODY[idx], 100))
+            out.append(bar([('r', 4)], vel(b, 96)))
+        elif sec == 'A':
+            idx = (b - section_start('A')) % len(MELODY)
+            out.append(bar(MELODY[idx], vel(b, 100)))
+        elif sec == 'A2':
+            # Кульминация: тема на октаву выше.
+            idx = (b - section_start('A2')) % len(MELODY)
+            out.append(bar(transpose(MELODY[idx], 12), vel(b, 102)))
         elif sec == 'B':
             idx = (b - section_start('B')) % len(B_MOTIF)
-            out.append(bar(B_MOTIF[idx], 92))
+            out.append(bar(B_MOTIF[idx], vel(b, 92)))
         else:  # coda
-            if b == section_start('coda'):
-                out.append(bar([(69, 4)], 96))
+            k = b - section_start('coda')
+            if k < len(CODA_LINE):
+                out.append(bar(CODA_LINE[k], vel(b, 92)))
             else:
-                out.append(bar([('r', 4)], 90))
+                out.append(bar([('r', 4)], vel(b, 90)))
     return out
 
 
 # Ударные: наборы нот на восьмые доли такта (GM: 36 kick, 38 snare,
-# 42 закрытый хэт, 46 открытый хэт, 49/57 crash, 51 ride).
+# 42 закрытый хэт, 46 открытый хэт, 49 crash, 51 ride).
 GROOVE_HAT = [
     [36, 42], [42], [38, 42], [42], [36, 42], [42], [38, 42], [42],
 ]
+# В B/A′ ride на сильные доли, хэты — на слабые: плотные восьмые ride
+# превращались в сплошную «подвеску» и мешали разобрать рисунок.
 GROOVE_RIDE = [
-    [36, 51], [51], [38, 51], [51], [36, 51], [51], [38, 51], [46],
+    [36, 51], [42], [38, 51], [42], [36, 51], [42], [38, 51], [46],
 ]
 CODA_SPARSE = [
     [36], None, [42], None, [36], None, [42, 38], None,
@@ -218,31 +270,34 @@ def dn(n):
     return n[0] if len(n) == 1 else list(n)
 
 
+def drum_bar(b):
+    sec = section_of(b)
+    if sec == 'intro':
+        return [('r', 4)]
+    if sec == 'coda':
+        if b == section_start('coda'):
+            return [([36, 49], 0.5), (49, 0.5), (42, 1), (38, 1), (42, 1)]
+        if b == BARS:
+            return [([36, 49], 4)]
+        return [('r', 0.5) if n is None else (dn(n), 0.5) for n in CODA_SPARSE]
+
+    base = GROOVE_RIDE if sec in ('B', 'A2') else GROOVE_HAT
+    items = []
+    fill = (b % 4 == 0)   # конец фразы — короткий филл малым
+    for k, n in enumerate(base):
+        if fill and k >= 6:
+            items.append((38, 0.5))
+        else:
+            items.append((dn(n), 0.5))
+    if b == section_start('A2') or b == section_start('B'):
+        items[0] = ([36, 49], 0.5)   # акцент crash на входе в раздел
+    return items
+
+
 def gen_drums():
     out = []
     for b in range(1, BARS + 1):
-        sec = section_of(b)
-        if sec == 'intro':
-            out.append(bar([('r', 4)], 100))
-        elif sec == 'A':
-            out.append(bar([(dn(n), 0.5) for n in GROOVE_HAT], 104))
-        elif sec == 'B':
-            out.append(bar([(dn(n), 0.5) for n in GROOVE_RIDE], 100))
-        elif sec == 'A2':
-            if b == section_start('A2'):
-                pat = [[36, 49]] + GROOVE_RIDE[1:]
-            else:
-                pat = GROOVE_RIDE
-            out.append(bar([(dn(n), 0.5) for n in pat], 104))
-        else:  # coda
-            if b == section_start('coda'):
-                out.append(bar([([36, 49], 0.5), (49, 0.5), (42, 1),
-                                (38, 1), (42, 1)], 108))
-            elif b == BARS:
-                out.append(bar([([36, 49], 4)], 110))
-            else:
-                rest_or = lambda n: ('r', 0.5) if n is None else (dn(n), 0.5)
-                out.append(bar([rest_or(n) for n in CODA_SPARSE], 100))
+        out.append(bar(drum_bar(b), vel(b, 100)))
     return out
 
 
