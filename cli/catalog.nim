@@ -63,7 +63,7 @@ proc parsePortKind*(text: string; kind: var PortKind): bool =
 
 proc flagNames*(flags: uint32): seq[string] =
   ## Флаги параметра человеческим языком. Порядок — как в `NodeParamFlag`.
-  for flag in NodeParamFlag:
+  for flag in NodeParamFlagOrder:
     if (flags and uint32(flag)) != 0:
       case flag
       of npfAutomatable: result.add "automatable"

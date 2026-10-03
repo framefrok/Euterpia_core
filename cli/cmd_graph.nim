@@ -57,6 +57,28 @@ type
     id: int
     haveId: bool
 
+proc looksLikeNumber(s: string): bool =
+  ## true для `-12`, `-0.15`, `+3`, `1.5` — это ЗНАЧЕНИЯ, а не ключи.
+  ## Без этого `param set pan -0.15` отвергался бы как «неизвестный ключ»,
+  ## хотя отрицательные значения есть у половины параметров (pan, level в dB).
+  if s.len == 0:
+    return false
+  var i = 0
+  if s[0] in {'+', '-'}:
+    inc i
+  var digits = 0
+  var dots = 0
+  while i < s.len:
+    let c = s[i]
+    if c in {'0'..'9'}:
+      inc digits
+    elif c == '.':
+      inc dots
+    else:
+      return false
+    inc i
+  digits > 0 and dots <= 1
+
 proc scanArgs(args: seq[string]; what: string): ArgScan =
   ## Разбирает ключи и позиционные аргументы. Ключей мало и они не
   ## пересекаются с именами нод, поэтому разбор остаётся читаемым без
@@ -96,7 +118,7 @@ proc scanArgs(args: seq[string]; what: string): ArgScan =
           return
         result.id = parseInt(value)
         result.haveId = true
-    elif token.startsWith("-") and token.len > 1:
+    elif token.startsWith("-") and token.len > 1 and not looksLikeNumber(token):
       result.rep = usageError("неизвестный ключ: " & token,
                               "ключи графа: " & GraphKeys.join(", "))
       return

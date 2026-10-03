@@ -43,6 +43,7 @@ import test_recorder
 import test_sequencer
 import test_project
 import test_param_registry
+import test_param_flags
 import test_memory_pool
 import test_logger
 import test_undo_redo
