@@ -16,6 +16,7 @@
 import std/json
 import logger
 import euterpia_version
+import config
 
 # Версия пакета реэкспортируется: её печатают `--version`, справка и
 # `doctor`, и каждому модулю CLI не нужно помнить об отдельном импорте.
@@ -47,10 +48,24 @@ type
     ## Контекст одного запуска CLI. Живёт на control-path, копируется
     ## свободно: это обычное значение, а не разделяемое состояние.
     mode*: OutputMode
+    modeExplicit*: bool
+      ## Режим вывода задан ключом argv (`--json`/`--human`). Нужен
+      ## `config get`: иначе непонятно, почему вывод не такой, как в файле
+      ## настроек (argv сильнее — #258).
     verbose*: bool
     quiet*: bool
+    logLevel*: LogLevel
+      ## Порог логов. Складывается из настроек (argv > env > файл >
+      ## умолчание, `cli/config.nim`) ещё до выполнения команды, поэтому
+      ## логгеру не нужно знать про источники.
+    logLevelExplicit*: bool
+      ## Порог задан ключом argv (`-v`/`-q`).
     dryRun*: bool
     command*: string
+    config*: Config
+      ## Настройки окружения, прочитанные один раз при старте (#258).
+      ## Команды читают их отсюда: перечитывать файл на каждую команду
+      ## значило бы, что два запуска в одном процессе видят разное.
 
   Report* = object
     ## Результат команды в терминах CLI, а не в терминах конкретного
@@ -98,13 +113,22 @@ proc cliLogSink(user: pointer; level: LogLevel; msg: cstring)
     discard
 
 proc cliLogger*(ctx: Ctx): Logger =
-  ## Логгер Core, поднятый в CLI: `--quiet` — только ошибки, по умолчанию —
-  ## предупреждения и выше, `--verbose` — всё.
-  let threshold =
-    if ctx.quiet: llError
-    elif ctx.verbose: llDebug
-    else: llWarn
-  logger(nil, cliLogSink, threshold)
+  ## Логгер Core, поднятый в CLI. Порог уже разрешён с учётом приоритета
+  ## argv > env > файл > умолчание (`cli/main.nim`, `cli/config.nim`),
+  ## поэтому здесь нет ни условий, ни знания про источники настроек.
+  logger(nil, cliLogSink, ctx.logLevel)
+
+proc cliWarn*(line: string) =
+  ## Предупреждение CLI в stderr. Единственный публичный способ написать
+  ## в stderr: stdout принадлежит результату команды, иначе `--json`
+  ## перестал бы быть парсируемым (§21).
+  writeStderr(line)
+
+proc argsTail*(args: seq[string]): seq[string] =
+  ## Аргументы после имени команды или подкоманды. Отдельная функция вместо
+  ## среза `args[1 .. ^1]`: на пустом хвосте срез читается как ошибка, а не
+  ## как «аргументов нет».
+  if args.len <= 1: @[] else: args[1 .. ^1]
 
 # =============================================================================
 # Отчёты

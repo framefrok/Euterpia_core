@@ -12,8 +12,10 @@ import std/[json, strutils]
 import context
 import registry
 import cmd_completion
+import cmd_config
 import cmd_doctor
 import cmd_project
+import config
 import euterpia_version
 
 var gCommands: seq[CommandDef]
@@ -203,6 +205,19 @@ proc setupRegistry*() =
       summary: "самодиагностика окружения: устройства, плагины, права",
       usage: "doctor",
       run: runDoctor),
+    CommandDef(
+      name: "config",
+      summary: "настройки окружения: умолчания для команд",
+      usage: "config <list|get|set|unset|path>",
+      subcommands: ConfigSubcommands,
+      notes: @[
+        "приоритет значения: argv > env (EUTERPIA_*) > файл настроек > умолчание CLI",
+        "где файл: `config path`; переопределение пути — EUTERPIA_CONFIG",
+        "ключи: " & keyNames().join(", "),
+        "`config get` печатает источник каждого значения: argv, env, file, default или none",
+        "битый или неверный конфиг — предупреждение в stderr, команда работает на источнике ниже",
+      ],
+      run: runConfig),
     CommandDef(
       name: "help",
       summary: "справка по командам и ключам",
