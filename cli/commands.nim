@@ -13,6 +13,7 @@ import context
 import registry
 import cmd_completion
 import cmd_doctor
+import cmd_project
 import euterpia_version
 
 var gCommands: seq[CommandDef]
@@ -62,6 +63,9 @@ proc helpReport*(cmds: seq[CommandDef]; requested: string): Report =
     var subs = newJArray()
     for sub in cmd.subcommands:
       subs.add %sub
+    var notes = newJArray()
+    for note in cmd.notes:
+      notes.add %note
     return okReport(
       body = %*{
         "helpFor": requested,
@@ -69,6 +73,7 @@ proc helpReport*(cmds: seq[CommandDef]; requested: string): Report =
         "summary": cmd.summary,
         "flags": flags,
         "subcommands": subs,
+        "notes": notes,
         "exitCodes": exitCodesJson(),
       },
       lines = commandHelpLines(cmd))
@@ -147,9 +152,46 @@ proc runComplete*(ctx: var Ctx; args: seq[string]): Report =
 # =============================================================================
 
 proc setupRegistry*() =
-  ## Порядок команд задаёт порядок в `--help`: короткие справки — первыми,
-  ## служебные (`__complete`) — в конце и скрытыми.
+  ## Порядок команд задаёт порядок в `--help`: сначала то, что делает
+  ## пользователь (создать проект — посмотреть — изменить), затем
+  ## диагностика и справка; служебные (`__complete`) — в конце и скрытыми.
+  ##
+  ## `notes` — проза для `--help`/`help <команда> --json` (форма аргументов,
+  ## умолчания). В кандидаты автодополнения они не попадают: там только
+  ## `flags` и `subcommands`.
   gCommands = @[
+    CommandDef(
+      name: "init",
+      summary: "создать проект: метаданные и пустой граф",
+      usage: "init [файл] [ключи]",
+      flags: InitFlags,
+      notes: @[
+        "файл по умолчанию: " & DefaultProjectFile &
+          " (расширение `.eut` — из примера MANIFEST §19)",
+        "--tempo " & $int(DefaultTempo) & " BPM, --sr " &
+          $int(DefaultSampleRate) & " Гц, --ts " &
+          $DefaultTimeSigNumerator & "/" & $DefaultTimeSigDenominator &
+          " — умолчания",
+        "--name и --author задают метаданные; без --name имя берётся из имени файла",
+        "граф создаётся пустым: ноды добавляет `euterpia node add` (#90)",
+        "существующий файл не затирается: перезапись требует --force",
+      ],
+      run: runInit),
+    CommandDef(
+      name: "project",
+      summary: "показать, изменить или проверить файл проекта",
+      usage: "project <show|set|validate>",
+      subcommands: ProjectSubcommands,
+      notes: @[
+        "project show [файл] — метаданные, граф, треки/клипы, автоматизация, состояния плагинов",
+        "project set [файл] <поле> <значение> — поля: " &
+          ProjectFields.join(", "),
+        "project set пишет атомарно (tmp + rename) и обновляет metadata.modified",
+        "project validate [файл] — отчёт о формате и целостности: провал проверки даёт код 1",
+        "без файла команды работают с `" & DefaultProjectFile &
+          "` — как в примере MANIFEST §19",
+      ],
+      run: runProject),
     CommandDef(
       name: "completion",
       summary: "скрипт автодополнения оболочки",

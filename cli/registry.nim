@@ -30,6 +30,10 @@ type
     subcommands*: seq[string]
       ## Позиционные варианты (`bash`, `zsh`, `fish`) — кандидаты
       ## автодополнения второго уровня.
+    notes*: seq[string]
+      ## Свободные строки справки: форма аргументов, умолчания, ограничения.
+      ## В кандидаты автодополнения НЕ попадают — в отличие от `flags`,
+      ## это проза, а не ключи.
     commandArgs*: bool
       ## Позиционные аргументы — имена других команд (`help doctor`).
       ## Дополнение таких аргументов тоже берётся из реестра, а не из
@@ -129,6 +133,11 @@ proc commandHelpLines*(cmd: CommandDef): seq[string] =
     result.add "Ключи команды:"
     for flag in cmd.flags:
       result.add "  " & flag
+  if cmd.notes.len > 0:
+    result.add ""
+    result.add "Подробности:"
+    for note in cmd.notes:
+      result.add "  " & note
   result.add ""
   result.add "Глобальные ключи работают и до, и после имени команды."
   result.add "Коды возврата:"
