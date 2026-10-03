@@ -172,3 +172,15 @@ task clapMock, "Сборка mock CLAP-плагина и сквозной тес
   buildLog "clap host end-to-end test"
   exec "nim c -r --hints:off --out:build/clap_mock_test tests/clap_mock_test.nim"
 
+# ---------------------------------------------------------------------------
+# «Композиция как код» (#285): пьеса собирается библиотекой libs/compose,
+# рендерится и проверяется командами CLI. Демонстрирует, что прикладной
+# слой (libs) строится поверх публичных API Core/Nodes, а не лезет внутрь.
+# ---------------------------------------------------------------------------
+task compose, "Собрать пьесу библиотекой libs/compose и проверить (#285, #295)":
+  mkDir buildDir
+  buildLog "cli build"
+  exec "nim c --hints:off --out:" & cliBin & " cli.nim"
+  buildLog "compose: dark-fantasy (libs/compose)"
+  exec "./compositions/dark-fantasy/build.sh " & cliBin
+

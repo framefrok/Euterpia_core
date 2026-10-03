@@ -1,4 +1,6 @@
-# Артефакты сборки: воспроизводятся из generate.py + build.sh и содержат
+# Артефакты сборки: воспроизводятся из generate.nim + build.sh и содержат
 # метку времени, поэтому в git не хранятся.
 ensemble.wav
 ensemble.eut
+ensemble_cli.wav
+ensemble_cli.eut
