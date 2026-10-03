@@ -18,13 +18,13 @@ suite "флаги параметров: битовая маска":
     check (flags and uint32(npfHidden)) == 0
 
   test "все флаги — независимые степени двойки":
-    var seen: set[uint32]
+    var bits: seq[uint32] = @[]
     for flag in NodeParamFlagOrder:
       let bit = uint32(flag)
       check bit > 0
       check (bit and (bit - 1)) == 0    # степень двойки
-      check bit notin seen
-      seen.incl bit
+      check bit notin bits
+      bits.add bit
 
   test "integer и choice различаются":
     check uint32(npfInteger) != uint32(npfChoice)
