@@ -70,7 +70,7 @@ static inline float inst_noise(uint32_t *state)
   return (float)(int32_t)x * (1.0f / 2147483648.0f);
 }
 
-/* Мягкое ограничение (аппроксимация tanh). Нужно для усилителя гитары и
+/* Soft-clip (аппроксимация tanh). Нужно для усилителя гитары и
    для барабанов: жёсткий клип даёт алиасынг, которого здесь не хочется.
    Рациональная аппроксимация уходит выше единицы при |x| > 4, поэтому
    результат дополнительно ограничен диапазоном ±1. */
@@ -81,6 +81,17 @@ static inline float inst_soft_clip(float x)
   if (y > 1.0f) y = 1.0f;
   else if (y < -1.0f) y = -1.0f;
   return y;
+}
+
+/* polyBLEP: сглаживает разрыв фазы на 0.5 периода. Без него наивный
+   меандр даёт полосу зеркальных частот выше Найквиста — «цифровой звон»
+   тарелок. add — фаза 0..1, dt — приращение фазы за сэмпл. */
+static inline float inst_polyblep(float t, float dt)
+{
+  if (dt <= 0.0f) return 0.0f;
+  if (t < dt) { t /= dt; return t + t - t * t - 1.0f; }
+  if (t > 1.0f - dt) { t = (t - 1.0f) / dt; return t * t + t + t + 1.0f; }
+  return 0.0f;
 }
 
 /* Панорама → усиления каналов (закон «постоянной мощности»). */
@@ -775,7 +786,7 @@ typedef struct {
   float noise;      /* доля шума */
   float toneFreq;   /* срез полосы шума, Гц */
   float metal;      /* доля металлической группы */
-  float tone;       /* доля тона в миксе */
+  float level;      /* масштаб уровня детали (баланс бочка/малый/тарелки) */
   float drive;
   float gain;
   float pan;        /* место в стереокартине */
@@ -789,11 +800,11 @@ static const DrumSpec DRUM_SPECS[EUT_DRUM_PIECE_COUNT] = {
   /* TOM_LOW   */ {  92.0f, 1.50f, 0.040f, 0.52f, 0.16f,  2600.0f, 0.00f, 1.00f, 0.22f, 0.85f, -0.35f },
   /* TOM_MID   */ { 138.0f, 1.50f, 0.040f, 0.44f, 0.16f,  3000.0f, 0.00f, 1.00f, 0.22f, 0.85f, -0.15f },
   /* TOM_HIGH  */ { 196.0f, 1.50f, 0.040f, 0.36f, 0.16f,  3400.0f, 0.00f, 1.00f, 0.22f, 0.85f,  0.10f },
-  /* HAT_CLOSED*/ { 540.0f, 1.00f, 0.000f, 0.055f, 1.00f, 14000.0f, 0.95f, 0.05f, 0.12f, 0.45f,  0.30f },
-  /* HAT_PEDAL */ { 500.0f, 1.00f, 0.000f, 0.085f, 1.00f, 11000.0f, 0.95f, 0.05f, 0.12f, 0.40f,  0.30f },
-  /* HAT_OPEN  */ { 540.0f, 1.00f, 0.000f, 0.40f, 1.00f,  13000.0f, 0.95f, 0.05f, 0.10f, 0.45f,  0.32f },
-  /* CRASH     */ { 620.0f, 1.00f, 0.000f, 1.80f, 1.00f,  9000.0f, 1.00f, 0.10f, 0.08f, 0.42f, -0.40f },
-  /* RIDE      */ { 880.0f, 1.00f, 0.000f, 1.50f, 0.55f, 12000.0f, 1.00f, 0.15f, 0.08f, 0.38f,  0.40f }
+  /* HAT_CLOSED*/ { 540.0f, 1.00f, 0.000f, 0.055f, 1.00f, 14000.0f, 0.95f, 0.40f, 0.12f, 0.45f,  0.30f },
+  /* HAT_PEDAL */ { 500.0f, 1.00f, 0.000f, 0.085f, 1.00f, 11000.0f, 0.95f, 0.36f, 0.12f, 0.40f,  0.30f },
+  /* HAT_OPEN  */ { 540.0f, 1.00f, 0.000f, 0.40f, 1.00f,  13000.0f, 0.95f, 0.42f, 0.10f, 0.45f,  0.32f },
+  /* CRASH     */ { 620.0f, 1.00f, 0.000f, 1.80f, 1.00f,  9000.0f, 1.00f, 0.75f, 0.08f, 0.42f, -0.40f },
+  /* RIDE      */ { 880.0f, 1.00f, 0.000f, 1.50f, 0.55f, 12000.0f, 1.00f, 0.55f, 0.08f, 0.38f,  0.40f }
 };
 
 int eut_drums_piece_for_note(int note)
@@ -929,7 +940,7 @@ void eut_drums_note_on(EutDrums *g, int note, float velocity)
   v->drive = pre;
   v->gain = sp->gain / pre;
   const float velScale = 0.28f + 0.72f * (vel * vel * 0.6f + vel * 0.4f);
-  const float toneMix = inst_clamp(sp->tone, 0.0f, 1.0f) * g->level * velScale;
+  const float toneMix = inst_clamp(sp->level, 0.0f, 1.0f) * g->level * velScale;
   float pl = 0.0f;
   float pr = 0.0f;
   inst_pan_gains(inst_clamp(g->pan + sp->pan, -1.0f, 1.0f), &pl, &pr);
@@ -1015,9 +1026,15 @@ void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n)
       if (v->mixMetal > 0.0f) {
         float sq = 0.0f;
         for (int k = 0; k < EUT_INST_DRUM_METAL; ++k) {
-          v->metalPh[k] += v->pitch * METAL_RATIO[k] * invSr;
+          const float dt = v->pitch * METAL_RATIO[k] * invSr;
+          v->metalPh[k] += dt;
           if (v->metalPh[k] >= 1.0f) v->metalPh[k] -= 1.0f;
-          sq += (v->metalPh[k] < 0.5f) ? 1.0f : -1.0f;
+          /* Меандр с polyBLEP: без сглаживания разрыва энергия зеркалится
+             за Найквист и тарелки звучат «цифровым звоном». */
+          const float base = (v->metalPh[k] < 0.5f) ? 1.0f : -1.0f;
+          float anti = v->metalPh[k] + 0.5f;
+          if (anti >= 1.0f) anti -= 1.0f;
+          sq += base - inst_polyblep(v->metalPh[k], dt) + inst_polyblep(anti, dt);
         }
         sq *= (1.0f / EUT_INST_DRUM_METAL);
         /* ФВЧ оставляет от квадратов только «звон»: основной тон группы

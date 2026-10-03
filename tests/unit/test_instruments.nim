@@ -179,6 +179,31 @@ suite "инструменты: C-движки (eut_inst.c)":
     check drumsPieceForNote(49) == EutDrumCrash
     check drumsPieceForNote(99) == -1
 
+  test "тарелки и хэты не на порядок тише малого (регрессия #287)":
+    proc drumPeak(note: int): float32 =
+      var g = newDrums(16, Sr)
+      drumsSet(addr g, 1.0f, 1.0f, 1.0f, 0.6f, 0.2f, 0.0f, 0.85f)
+      drumsNoteOn(addr g, note, 0.95f)
+      var l, r: array[512, float32]
+      for b in 0 ..< 20:
+        for i in 0 ..< l.len:
+          l[i] = 0.0f
+          r[i] = 0.0f
+        drumsProcess(addr g, addr l[0], addr r[0], 1, l.len)
+        for i in 0 ..< l.len:
+          result = max(result, abs(l[i]))
+      freeDrums(addr g)
+
+    let snare = drumPeak(38)
+    let hat = drumPeak(42)
+    let crash = drumPeak(49)
+    check snare > 0.02f
+    # Металлические детали должны быть сопоставимы, а не тише на порядок:
+    # раньше хэт/тарелка давали ~0.003 против ~0.06 у малого (разрыв ×20).
+    check hat > 0.25f * snare
+    check crash > 0.25f * snare
+
+
   test "гитара переинициализируется в пределах выделенной памяти струн":
     var g = newGuitar(4, 44100.0f)
     check g.isReady
