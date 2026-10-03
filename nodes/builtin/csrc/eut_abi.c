@@ -18,4 +18,8 @@ int eut_abi_sizeof_guitar_voice(void) { return (int)sizeof(EutGuitarVoice); }
 int eut_abi_sizeof_guitar(void)       { return (int)sizeof(EutGuitar); }
 int eut_abi_sizeof_drum_voice(void)   { return (int)sizeof(EutDrumVoice); }
 int eut_abi_sizeof_drums(void)        { return (int)sizeof(EutDrums); }
+int eut_abi_sizeof_flute_voice(void)  { return (int)sizeof(EutFluteVoice); }
+int eut_abi_sizeof_flute(void)        { return (int)sizeof(EutFlute); }
+int eut_abi_sizeof_bagpipe_voice(void){ return (int)sizeof(EutBagpipeVoice); }
+int eut_abi_sizeof_bagpipe(void)      { return (int)sizeof(EutBagpipe); }
 

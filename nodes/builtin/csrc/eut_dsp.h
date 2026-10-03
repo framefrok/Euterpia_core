@@ -599,6 +599,74 @@ void eut_drums_all_off(EutDrums *g);
 EUT_TARGET_CLONES
 void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n);
 
+/* --- флейта ---------------------------------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float ph, dph;        /* основная фаза (почти синус) */
+  float breathLp, breathHp;  /* полоса дыхательного шума */
+  float chiff;          /* короткий шумовой «чиф» атаки */
+} EutFluteVoice;
+
+typedef struct {
+  EutFluteVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;       /* яркость: доля верхних гармоник и шума */
+  float breath;     /* уровень дыхания */
+  float vibrato;    /* глубина вибрато, центы */
+  float pan;
+  float level;
+  float lfoPhase, lfoInc;
+  int   seqCounter;
+  int   active;
+} EutFlute;
+
+void eut_flute_init(EutFlute *g, EutFluteVoice *voices, int voiceCount, float sampleRate);
+void eut_flute_reset(EutFlute *g);
+void eut_flute_set(EutFlute *g, float tone, float breath, float vibratoCents,
+                   float pan, float level);
+void eut_flute_note_on(EutFlute *g, int note, float velocity);
+void eut_flute_note_off(EutFlute *g, int note);
+void eut_flute_all_off(EutFlute *g);
+EUT_TARGET_CLONES
+void eut_flute_process(EutFlute *g, float *outL, float *outR, int stride,
+                       int n, float bendSemitones, float modCents);
+
+/* --- волынка --------------------------------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float ph, dph;        /* шантир (мелодия) */
+  float lp, hp;         /* формирование «тростникового» тембра */
+} EutBagpipeVoice;
+
+typedef struct {
+  EutBagpipeVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;        /* яркость шантира */
+  float droneLevel;  /* уровень бурдона */
+  float droneFreq;   /* частота бурдона, Гц */
+  float pan;
+  float level;
+  float dronePh1, dronePh2;  /* бурдон: тон и квинта выше */
+  float droneAmp;            /* плавное включение бурдона (без щелчка) */
+  float droneCoef;
+  int   seqCounter;
+  int   active;
+} EutBagpipe;
+
+void eut_bagpipe_init(EutBagpipe *g, EutBagpipeVoice *voices, int voiceCount, float sampleRate);
+void eut_bagpipe_reset(EutBagpipe *g);
+void eut_bagpipe_set(EutBagpipe *g, float tone, float droneLevel, float droneFreq,
+                     float pan, float level);
+void eut_bagpipe_note_on(EutBagpipe *g, int note, float velocity);
+void eut_bagpipe_note_off(EutBagpipe *g, int note);
+void eut_bagpipe_all_off(EutBagpipe *g);
+EUT_TARGET_CLONES
+void eut_bagpipe_process(EutBagpipe *g, float *outL, float *outR, int stride, int n);
+
 
 /* ===========================================================================
  * ABI-проверка
@@ -627,6 +695,10 @@ int eut_abi_sizeof_guitar_voice(void);
 int eut_abi_sizeof_guitar(void);
 int eut_abi_sizeof_drum_voice(void);
 int eut_abi_sizeof_drums(void);
+int eut_abi_sizeof_flute_voice(void);
+int eut_abi_sizeof_flute(void);
+int eut_abi_sizeof_bagpipe_voice(void);
+int eut_abi_sizeof_bagpipe(void);
 
 #ifdef __cplusplus
 }

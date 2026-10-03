@@ -23,6 +23,8 @@ import builtin/instruments/organ
 import builtin/instruments/piano
 import builtin/instruments/guitar
 import builtin/instruments/drums
+import builtin/instruments/flute
+import builtin/instruments/bagpipe
 
 const
   Sr = 48000.0'f32
@@ -225,6 +227,8 @@ suite "инструменты: ноды играют по событиям":
       (getOrganFactory(), getOrganDesc(), 60),
       (getPianoFactory(), getPianoDesc(), 60),
       (getGuitarFactory(), getGuitarDesc(), 60),
+      (getFluteFactory(), getFluteDesc(), 60),
+      (getBagpipeFactory(), getBagpipeDesc(), 60),
       (getDrumsFactory(), getDrumsDesc(), 38)
     ]
     for (factory, desc, note) in rigs:
@@ -287,6 +291,8 @@ suite "инструменты: выход прямо в драйвер (interlea
       (getOrganFactory(), getOrganDesc(), 57),
       (getPianoFactory(), getPianoDesc(), 57),
       (getGuitarFactory(), getGuitarDesc(), 57),
+      (getFluteFactory(), getFluteDesc(), 57),
+      (getBagpipeFactory(), getBagpipeDesc(), 57),
       (getDrumsFactory(), getDrumsDesc(), 38)
     ]
     for (factory, desc, note) in rigs:

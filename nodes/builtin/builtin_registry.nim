@@ -27,6 +27,8 @@ import
   instruments/piano,
   instruments/guitar,
   instruments/drums,
+  instruments/flute,
+  instruments/bagpipe,
   sequencer/notes
 
 type
@@ -37,6 +39,7 @@ type
     bnGain, bnPan, bnMix,
     bnCompressor, bnDelay,
     bnOrgan, bnPiano, bnGuitar, bnDrums,
+    bnFlute, bnBagpipe,
     bnNotes
 
   ## Порядок ниже совпадает с порядком нод в реестре и используется
@@ -53,6 +56,7 @@ const
     bnGain, bnPan, bnMix,
     bnCompressor, bnDelay,
     bnOrgan, bnPiano, bnGuitar, bnDrums,
+    bnFlute, bnBagpipe,
     bnNotes
   ]
 
@@ -72,6 +76,8 @@ proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
   of bnPiano:       getPianoDesc()
   of bnGuitar:      getGuitarDesc()
   of bnDrums:       getDrumsDesc()
+  of bnFlute:       getFluteDesc()
+  of bnBagpipe:     getBagpipeDesc()
   of bnNotes:       getNotesDesc()
 
 proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
@@ -90,6 +96,8 @@ proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   of bnPiano:       getPianoFactory()
   of bnGuitar:      getGuitarFactory()
   of bnDrums:       getDrumsFactory()
+  of bnFlute:       getFluteFactory()
+  of bnBagpipe:     getBagpipeFactory()
   of bnNotes:       getNotesFactory()
 
 proc registerBuiltinNodes*(reg: var NodeRegistry): int =

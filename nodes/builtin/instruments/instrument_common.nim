@@ -221,6 +221,52 @@ proc drumsAbi*(g: ptr Drums): InstAbi {.inline.} =
     pedal: nil, process: drumsProcessAbi
   )
 
+proc fluteNoteOnAbi(state: pointer; note: cint; velocity: float32) {.nimcall, raises: [], gcsafe.} =
+  fluteNoteOn(cast[ptr Flute](state), note.int, velocity)
+
+proc fluteNoteOffAbi(state: pointer; note: cint) {.nimcall, raises: [], gcsafe.} =
+  fluteNoteOff(cast[ptr Flute](state), note.int)
+
+proc fluteAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  fluteAllOff(cast[ptr Flute](state))
+
+proc fluteProcessAbi(state: pointer; outL, outR: ptr float32; stride, frames: cint;
+                     bendSemitones, modCents: float32) {.nimcall, raises: [], gcsafe.} =
+  fluteProcess(cast[ptr Flute](state), outL, outR, stride.int, frames.int,
+               bendSemitones, modCents)
+
+proc fluteAbi*(g: ptr Flute): InstAbi {.inline.} =
+  ## Таблица вызовов флейты. Духовой без сустейн-педали.
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: fluteNoteOnAbi, noteOff: fluteNoteOffAbi, allOff: fluteAllOffAbi,
+    pedal: nil, process: fluteProcessAbi
+  )
+
+proc bagpipeNoteOnAbi(state: pointer; note: cint; velocity: float32) {.nimcall, raises: [], gcsafe.} =
+  bagpipeNoteOn(cast[ptr Bagpipe](state), note.int, velocity)
+
+proc bagpipeNoteOffAbi(state: pointer; note: cint) {.nimcall, raises: [], gcsafe.} =
+  bagpipeNoteOff(cast[ptr Bagpipe](state), note.int)
+
+proc bagpipeAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  bagpipeAllOff(cast[ptr Bagpipe](state))
+
+proc bagpipeProcessAbi(state: pointer; outL, outR: ptr float32; stride, frames: cint;
+                       bendSemitones, modCents: float32) {.nimcall, raises: [], gcsafe.} =
+  # Волынка не строит высоту колесом: бурдон фиксирован, шантир — по нотам.
+  discard bendSemitones
+  discard modCents
+  bagpipeProcess(cast[ptr Bagpipe](state), outL, outR, stride.int, frames.int)
+
+proc bagpipeAbi*(g: ptr Bagpipe): InstAbi {.inline.} =
+  ## Таблица вызовов волынки: бурдон + шантир, legato.
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: bagpipeNoteOnAbi, noteOff: bagpipeNoteOffAbi, allOff: bagpipeAllOffAbi,
+    pedal: nil, process: bagpipeProcessAbi
+  )
+
 # =============================================================================
 # Управление голосами
 # =============================================================================

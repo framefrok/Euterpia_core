@@ -1059,3 +1059,295 @@ void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n)
   }
 }
 
+
+/* ===========================================================================
+ * Флейта
+ *
+ * Почти синус + верхние нечётные гармоники (яркость), дыхательный шум и
+ * короткий «чиф» на атаке. Вибрато — общий LFO движка. Гармоники берутся
+ * только ниже Найквиста, поэтому алиасинга нет.
+ * ========================================================================= */
+
+static inline float inst_sin_mult(float phase, float mult)
+{
+  float t = phase * mult;
+  t -= (float)(long)t;   /* phase >= 0 — приводим к 0..1 */
+  return inst_sin(t);
+}
+
+void eut_flute_reset(EutFlute *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutFluteVoice *v = &g->voices[i];
+    memset(&v->v, 0, sizeof(v->v));
+    v->ph = v->dph = 0.0f;
+    v->breathLp = v->breathHp = 0.0f;
+    v->chiff = 0.0f;
+  }
+  g->lfoPhase = 0.0f;
+  g->active = 0;
+}
+
+void eut_flute_init(EutFlute *g, EutFluteVoice *voices, int voiceCount,
+                    float sampleRate)
+{
+  if (g == NULL) return;
+  g->voices = voices;
+  g->voiceCount = voiceCount > 0 ? voiceCount : 1;
+  g->sampleRate = sampleRate > 0.0f ? sampleRate : 48000.0f;
+  g->tone = 0.5f;
+  g->breath = 0.35f;
+  g->vibrato = 12.0f;
+  g->pan = 0.0f;
+  g->level = 0.8f;
+  g->lfoInc = EUT_INST_TWO_PI * 5.5f / g->sampleRate;   /* вибрато ~5.5 Гц */
+  g->seqCounter = 0;
+  eut_flute_reset(g);
+}
+
+void eut_flute_set(EutFlute *g, float tone, float breath, float vibratoCents,
+                   float pan, float level)
+{
+  if (g == NULL) return;
+  g->tone = inst_clamp(tone, 0.0f, 1.0f);
+  g->breath = inst_clamp(breath, 0.0f, 1.0f);
+  g->vibrato = inst_clamp(vibratoCents, 0.0f, 100.0f);
+  g->pan = inst_clamp(pan, -1.0f, 1.0f);
+  g->level = level;
+}
+
+void eut_flute_note_on(EutFlute *g, int note, float velocity)
+{
+  if (g == NULL || g->voices == NULL) return;
+  EutFluteVoice *v = (EutFluteVoice *)inst_pick_voice(
+    g->voices, (int)sizeof(EutFluteVoice), g->voiceCount);
+  if (v == NULL) return;
+  v->v.seq = g->seqCounter++;
+  /* Флейта — инструмент с дыханием: мягкая атака, длинный хвост. */
+  inst_voice_setup(&v->v, note, velocity, 0.045f, 0.92f, 0.6f, 0.10f, g->sampleRate);
+  v->ph = 0.0f;
+  v->dph = 0.0f;
+  v->breathLp = v->breathHp = 0.0f;
+  v->chiff = 0.9f;
+  g->active = 1;
+}
+
+void eut_flute_note_off(EutFlute *g, int note)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutFluteVoice *v = &g->voices[i];
+    if (v->v.active && v->v.note == note) v->v.held = 0;
+  }
+}
+
+void eut_flute_all_off(EutFlute *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutFluteVoice *v = &g->voices[i];
+    if (v->v.active) {
+      v->v.held = 0;
+      v->v.relCoef = inst_coef(0.020f, g->sampleRate);
+    }
+  }
+}
+
+EUT_TARGET_CLONES
+void eut_flute_process(EutFlute *g, float *outL, float *outR, int stride, int n,
+                       float bendSemitones, float modCents)
+{
+  if (g == NULL || g->voices == NULL || n <= 0) return;
+  if (g->active == 0) return;
+  const float invSr = 1.0f / g->sampleRate;
+  const float nyq = g->sampleRate * 0.5f;
+  float gl, gr;
+  inst_pan_gains(g->pan, &gl, &gr);
+
+  for (int i = 0; i < n; ++i) {
+    float sumL = 0.0f, sumR = 0.0f;
+    int alive = 0;
+    const float lfo = inst_sin(g->lfoPhase);
+
+    for (int vi = 0; vi < g->voiceCount; ++vi) {
+      EutFluteVoice *v = &g->voices[vi];
+      if (!inst_voice_alive(&v->v)) continue;
+      ++alive;
+
+      float cents = g->vibrato * lfo + modCents + bendSemitones * 100.0f;
+      float f = v->v.freq;
+      if (cents != 0.0f) f *= (float)exp2((double)(cents / 1200.0f));
+      v->ph += f * invSr;
+      if (v->ph >= 1.0f) v->ph -= 1.0f;
+
+      float s = inst_sin(v->ph);
+      if (f * 3.0f < nyq) s += inst_sin_mult(v->ph, 3.0f) * 0.12f * g->tone;
+      if (f * 5.0f < nyq) s += inst_sin_mult(v->ph, 5.0f) * 0.05f * g->tone;
+
+      const float nz = inst_noise(&v->v.rng);
+      v->breathHp += (nz - v->breathHp) * 0.20f;   /* ВЧ над шумом */
+      s += (nz - v->breathHp) * g->breath * 0.5f;
+
+      s += v->chiff * nz * 0.5f;                    /* «чиф» атаки */
+      v->chiff *= 0.9990f;
+
+      s *= v->v.amp;
+      sumL += s * gl;
+      sumR += s * gr;
+    }
+
+    g->active = alive;
+    g->lfoPhase += g->lfoInc;
+    if (g->lfoPhase >= 1.0f) g->lfoPhase -= 1.0f;
+    if (outL != NULL) outL[i * stride] += sumL * g->level;
+    if (outR != NULL) outR[i * stride] += sumR * g->level;
+  }
+}
+
+
+/* ===========================================================================
+ * Волынка
+ *
+ * Две составляющие: шантир (мелодия, «тростниковый» тембр из нечётных
+ * гармоник через формирующие фильтры) и бурдон — два постоянных тона, что
+ * звучат, пока держится хотя бы одна нота. Отсюда непрерывность: между
+ * нотами нет пауз, drone не даёт им «повиснуть».
+ * ========================================================================= */
+
+void eut_bagpipe_reset(EutBagpipe *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutBagpipeVoice *v = &g->voices[i];
+    memset(&v->v, 0, sizeof(v->v));
+    v->ph = v->dph = 0.0f;
+    v->lp = v->hp = 0.0f;
+  }
+  g->dronePh1 = g->dronePh2 = 0.0f;
+  g->droneAmp = 0.0f;
+  g->active = 0;
+}
+
+void eut_bagpipe_init(EutBagpipe *g, EutBagpipeVoice *voices, int voiceCount,
+                      float sampleRate)
+{
+  if (g == NULL) return;
+  g->voices = voices;
+  g->voiceCount = voiceCount > 0 ? voiceCount : 1;
+  g->sampleRate = sampleRate > 0.0f ? sampleRate : 48000.0f;
+  g->tone = 0.6f;
+  g->droneLevel = 0.35f;
+  g->droneFreq = 110.0f;                 /* A2 — типичный бурдон */
+  g->pan = 0.0f;
+  g->level = 0.65f;
+  g->droneCoef = inst_coef(0.06f, g->sampleRate);  /* плавное вкл/выкл */
+  g->seqCounter = 0;
+  eut_bagpipe_reset(g);
+}
+
+void eut_bagpipe_set(EutBagpipe *g, float tone, float droneLevel, float droneFreq,
+                     float pan, float level)
+{
+  if (g == NULL) return;
+  g->tone = inst_clamp(tone, 0.0f, 1.0f);
+  g->droneLevel = inst_clamp(droneLevel, 0.0f, 1.0f);
+  g->droneFreq = inst_clamp(droneFreq, 20.0f, 2000.0f);
+  g->pan = inst_clamp(pan, -1.0f, 1.0f);
+  g->level = level;
+}
+
+void eut_bagpipe_note_on(EutBagpipe *g, int note, float velocity)
+{
+  if (g == NULL || g->voices == NULL) return;
+  EutBagpipeVoice *v = (EutBagpipeVoice *)inst_pick_voice(
+    g->voices, (int)sizeof(EutBagpipeVoice), g->voiceCount);
+  if (v == NULL) return;
+  v->v.seq = g->seqCounter++;
+  /* Быстрая атака, «ровный» тон, короткий релиз — legato как у духового. */
+  inst_voice_setup(&v->v, note, velocity, 0.020f, 0.95f, 0.5f, 0.08f, g->sampleRate);
+  v->ph = 0.0f;
+  v->dph = 0.0f;
+  v->lp = v->hp = 0.0f;
+  g->active = 1;
+}
+
+void eut_bagpipe_note_off(EutBagpipe *g, int note)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutBagpipeVoice *v = &g->voices[i];
+    if (v->v.active && v->v.note == note) v->v.held = 0;
+  }
+}
+
+void eut_bagpipe_all_off(EutBagpipe *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutBagpipeVoice *v = &g->voices[i];
+    if (v->v.active) {
+      v->v.held = 0;
+      v->v.relCoef = inst_coef(0.030f, g->sampleRate);
+    }
+  }
+}
+
+EUT_TARGET_CLONES
+void eut_bagpipe_process(EutBagpipe *g, float *outL, float *outR, int stride, int n)
+{
+  if (g == NULL || g->voices == NULL || n <= 0) return;
+  const float invSr = 1.0f / g->sampleRate;
+  const float nyq = g->sampleRate * 0.5f;
+  float gl, gr;
+  inst_pan_gains(g->pan, &gl, &gr);
+
+  for (int i = 0; i < n; ++i) {
+    float chanterL = 0.0f, chanterR = 0.0f;
+    int alive = 0;
+    int held = 0;
+
+    for (int vi = 0; vi < g->voiceCount; ++vi) {
+      EutBagpipeVoice *v = &g->voices[vi];
+      if (!inst_voice_alive(&v->v)) continue;
+      ++alive;
+      if (v->v.held) held = 1;
+
+      v->ph += v->v.freq * invSr;
+      if (v->ph >= 1.0f) v->ph -= 1.0f;
+
+      /* Нечётные гармоники — «тростниковый» тембр шантира. */
+      float s = inst_sin(v->ph);
+      if (v->v.freq * 3.0f < nyq) s += inst_sin_mult(v->ph, 3.0f) * 0.55f * g->tone;
+      if (v->v.freq * 5.0f < nyq) s += inst_sin_mult(v->ph, 5.0f) * 0.35f * g->tone;
+      if (v->v.freq * 7.0f < nyq) s += inst_sin_mult(v->ph, 7.0f) * 0.20f * g->tone;
+
+      /* Формирующие фильтры срезают «низ» и мягчат верх. */
+      v->hp += (s - v->hp) * 0.15f;
+      float shaped = s - v->hp * 0.5f;
+      v->lp += (shaped - v->lp) * 0.65f;
+      s = v->lp * v->v.amp;
+
+      chanterL += s * gl;
+      chanterR += s * gr;
+    }
+    g->active = alive;
+
+    /* Бурдон: включается плавно, пока держится нота; затухает с релизом. */
+    const float target = held ? 1.0f : 0.0f;
+    g->droneAmp = target - (target - g->droneAmp) * g->droneCoef;
+    float drone = 0.0f;
+    if (g->droneAmp > 1.0e-4f) {
+      g->dronePh1 += g->droneFreq * invSr;
+      if (g->dronePh1 >= 1.0f) g->dronePh1 -= 1.0f;
+      g->dronePh2 += g->droneFreq * 1.5f * invSr;   /* квинта выше */
+      if (g->dronePh2 >= 1.0f) g->dronePh2 -= 1.0f;
+      drone = (inst_sin(g->dronePh1) + 0.7f * inst_sin(g->dronePh2)) *
+              g->droneAmp * g->droneLevel;
+    }
+
+    if (outL != NULL) outL[i * stride] += (chanterL + drone * gl) * g->level;
+    if (outR != NULL) outR[i * stride] += (chanterR + drone * gr) * g->level;
+  }
+}
+

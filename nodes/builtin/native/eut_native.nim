@@ -200,6 +200,10 @@ type
   EutGuitar {.importc: "EutGuitar", bycopy.} = object
   EutDrumVoice {.importc: "EutDrumVoice", bycopy.} = object
   EutDrums {.importc: "EutDrums", bycopy.} = object
+  EutFluteVoice {.importc: "EutFluteVoice", bycopy.} = object
+  EutFlute {.importc: "EutFlute", bycopy.} = object
+  EutBagpipeVoice {.importc: "EutBagpipeVoice", bycopy.} = object
+  EutBagpipe {.importc: "EutBagpipe", bycopy.} = object
 
 # ==============================================================================
 # Обёртки состояния
@@ -240,6 +244,12 @@ type
       ## Переинициализация на частоте, которой этой ёмкости мало, обязана
       ## отказать, а не выйти за границу памяти.
   Drums* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
+  Flute* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
+  Bagpipe* {.bycopy.} = object
     p: pointer
     voiceCount: int
 
@@ -389,6 +399,36 @@ proc c_drums_all_off(g: ptr EutDrums) {.importc: "eut_drums_all_off", header: "e
 proc c_drums_process(g: ptr EutDrums; outL, outR: ptr float32; stride, n: cint)
       {.importc: "eut_drums_process", header: "eut_dsp.h".}
 
+proc c_flute_init(g: ptr EutFlute; voices: ptr EutFluteVoice; voiceCount: cint;
+                  sampleRate: float32)
+      {.importc: "eut_flute_init", header: "eut_dsp.h".}
+proc c_flute_reset(g: ptr EutFlute) {.importc: "eut_flute_reset", header: "eut_dsp.h".}
+proc c_flute_set(g: ptr EutFlute; tone, breath, vibratoCents, pan, level: float32)
+      {.importc: "eut_flute_set", header: "eut_dsp.h".}
+proc c_flute_note_on(g: ptr EutFlute; note: cint; velocity: float32)
+      {.importc: "eut_flute_note_on", header: "eut_dsp.h".}
+proc c_flute_note_off(g: ptr EutFlute; note: cint)
+      {.importc: "eut_flute_note_off", header: "eut_dsp.h".}
+proc c_flute_all_off(g: ptr EutFlute) {.importc: "eut_flute_all_off", header: "eut_dsp.h".}
+proc c_flute_process(g: ptr EutFlute; outL, outR: ptr float32; stride, n: cint;
+                     bendSemitones, modCents: float32)
+      {.importc: "eut_flute_process", header: "eut_dsp.h".}
+
+proc c_bagpipe_init(g: ptr EutBagpipe; voices: ptr EutBagpipeVoice; voiceCount: cint;
+                    sampleRate: float32)
+      {.importc: "eut_bagpipe_init", header: "eut_dsp.h".}
+proc c_bagpipe_reset(g: ptr EutBagpipe) {.importc: "eut_bagpipe_reset", header: "eut_dsp.h".}
+proc c_bagpipe_set(g: ptr EutBagpipe; tone, droneLevel, droneFreq, pan, level: float32)
+      {.importc: "eut_bagpipe_set", header: "eut_dsp.h".}
+proc c_bagpipe_note_on(g: ptr EutBagpipe; note: cint; velocity: float32)
+      {.importc: "eut_bagpipe_note_on", header: "eut_dsp.h".}
+proc c_bagpipe_note_off(g: ptr EutBagpipe; note: cint)
+      {.importc: "eut_bagpipe_note_off", header: "eut_dsp.h".}
+proc c_bagpipe_all_off(g: ptr EutBagpipe)
+      {.importc: "eut_bagpipe_all_off", header: "eut_dsp.h".}
+proc c_bagpipe_process(g: ptr EutBagpipe; outL, outR: ptr float32; stride, n: cint)
+      {.importc: "eut_bagpipe_process", header: "eut_dsp.h".}
+
 proc c_size_inst_voice(): cint {.importc: "eut_abi_sizeof_inst_voice", header: "eut_dsp.h".}
 proc c_size_organ_voice(): cint {.importc: "eut_abi_sizeof_organ_voice", header: "eut_dsp.h".}
 proc c_size_organ(): cint {.importc: "eut_abi_sizeof_organ", header: "eut_dsp.h".}
@@ -398,6 +438,10 @@ proc c_size_guitar_voice(): cint {.importc: "eut_abi_sizeof_guitar_voice", heade
 proc c_size_guitar(): cint {.importc: "eut_abi_sizeof_guitar", header: "eut_dsp.h".}
 proc c_size_drum_voice(): cint {.importc: "eut_abi_sizeof_drum_voice", header: "eut_dsp.h".}
 proc c_size_drums(): cint {.importc: "eut_abi_sizeof_drums", header: "eut_dsp.h".}
+proc c_size_flute_voice(): cint {.importc: "eut_abi_sizeof_flute_voice", header: "eut_dsp.h".}
+proc c_size_flute(): cint {.importc: "eut_abi_sizeof_flute", header: "eut_dsp.h".}
+proc c_size_bagpipe_voice(): cint {.importc: "eut_abi_sizeof_bagpipe_voice", header: "eut_dsp.h".}
+proc c_size_bagpipe(): cint {.importc: "eut_abi_sizeof_bagpipe", header: "eut_dsp.h".}
 
 # ==============================================================================
 # Предикаты готовности
@@ -417,6 +461,8 @@ proc isReady*(g: Organ): bool {.inline.} = not g.p.isNil
 proc isReady*(g: Piano): bool {.inline.} = not g.p.isNil
 proc isReady*(g: Guitar): bool {.inline.} = not g.p.isNil
 proc isReady*(g: Drums): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Flute): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Bagpipe): bool {.inline.} = not g.p.isNil
 
 # ==============================================================================
 # Внутренние помощники
@@ -934,6 +980,106 @@ proc guitarInitAt*(g: ptr Guitar; sampleRate: float32): bool =
                 g.lineCap.cint, sampleRate)
   true
 
+# --- флейта -----------------------------------------------------------------
+
+proc newFlute*(voiceCount: int = 8; sampleRate: float32 = 48000.0f): Flute =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_flute().int
+  let voiceBytes = c_size_flute_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_flute_init(cast[ptr EutFlute](result.p),
+               cast[ptr EutFluteVoice](instVoices(result.p, stateBytes)),
+               n.cint, sampleRate)
+
+proc freeFlute*(g: ptr Flute) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  deallocShared(g.p)
+  g.p = nil
+
+proc fluteInitAt*(g: ptr Flute; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_flute().int
+  c_flute_init(cast[ptr EutFlute](g.p),
+               cast[ptr EutFluteVoice](instVoices(g.p, stateBytes)),
+               g.voiceCount.cint, sampleRate)
+  true
+
+proc fluteSet*(g: ptr Flute; tone, breath, vibratoCents, pan, level: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_flute_set(cast[ptr EutFlute](g.p), tone, breath, vibratoCents, pan, level)
+
+proc fluteNoteOn*(g: ptr Flute; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_flute_note_on(cast[ptr EutFlute](g.p), note.cint, velocity)
+
+proc fluteNoteOff*(g: ptr Flute; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_flute_note_off(cast[ptr EutFlute](g.p), note.cint)
+
+proc fluteAllOff*(g: ptr Flute) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_flute_all_off(cast[ptr EutFlute](g.p))
+
+proc fluteProcess*(g: ptr Flute; outL, outR: ptr float32; stride, n: int;
+                   bendSemitones: float32 = 0.0f; modCents: float32 = 0.0f) {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_flute_process(cast[ptr EutFlute](g.p), outL, outR, stride.cint, n.cint,
+                  bendSemitones, modCents)
+
+# --- волынка ----------------------------------------------------------------
+
+proc newBagpipe*(voiceCount: int = 4; sampleRate: float32 = 48000.0f): Bagpipe =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_bagpipe().int
+  let voiceBytes = c_size_bagpipe_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_bagpipe_init(cast[ptr EutBagpipe](result.p),
+                 cast[ptr EutBagpipeVoice](instVoices(result.p, stateBytes)),
+                 n.cint, sampleRate)
+
+proc freeBagpipe*(g: ptr Bagpipe) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  deallocShared(g.p)
+  g.p = nil
+
+proc bagpipeInitAt*(g: ptr Bagpipe; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_bagpipe().int
+  c_bagpipe_init(cast[ptr EutBagpipe](g.p),
+                 cast[ptr EutBagpipeVoice](instVoices(g.p, stateBytes)),
+                 g.voiceCount.cint, sampleRate)
+  true
+
+proc bagpipeSet*(g: ptr Bagpipe; tone, droneLevel, droneFreq, pan,
+                 level: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_bagpipe_set(cast[ptr EutBagpipe](g.p), tone, droneLevel, droneFreq, pan, level)
+
+proc bagpipeNoteOn*(g: ptr Bagpipe; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_bagpipe_note_on(cast[ptr EutBagpipe](g.p), note.cint, velocity)
+
+proc bagpipeNoteOff*(g: ptr Bagpipe; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_bagpipe_note_off(cast[ptr EutBagpipe](g.p), note.cint)
+
+proc bagpipeAllOff*(g: ptr Bagpipe) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_bagpipe_all_off(cast[ptr EutBagpipe](g.p))
+
+proc bagpipeProcess*(g: ptr Bagpipe; outL, outR: ptr float32; stride,
+                     n: int) {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_bagpipe_process(cast[ptr EutBagpipe](g.p), outL, outR, stride.cint, n.cint)
+
 # --- ABI --------------------------------------------------------------------
 
 proc abiCheck*(): bool =
@@ -968,6 +1114,12 @@ proc abiCheck*(): bool =
   c_size_guitar() mod 8 == 0 and
   c_size_drum_voice() == 184 and
   c_size_drums() == 56 and
-  c_size_drums() mod 8 == 0
+  c_size_drums() mod 8 == 0 and
+  c_size_flute_voice() == 92 and
+  c_size_flute() == 56 and
+  c_size_flute() mod 8 == 0 and
+  c_size_bagpipe_voice() == 88 and
+  c_size_bagpipe() == 64 and
+  c_size_bagpipe() mod 8 == 0
 
 {.pop.}
