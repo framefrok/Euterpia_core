@@ -23,7 +23,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
 | Тесты | ✅ 300 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
-| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89) и настройки окружения `config` (#258), human/`--json`, exit-коды 0/1/2/3, джоба `cli` в CI; команды графа, `transport`, `render`, `play`, записи, плагинов и справочник — впереди |
+| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90) и настройки окружения `config` (#258), human/`--json`, exit-коды 0/1/2/3, джоба `cli` в CI; `transport`, `render`, `play`, записи, плагинов и справочник — впереди |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
 | Надёжность и диагностика | 🟡 план линии v0.5 — библиотека тестов ядра (golden, Node Contract Suite, fault injection, санитайзеры) и «отказ вместо краха»: модель ошибок, чёрный ящик, crash guard, containment нод и плагинов, изоляция скана (#115) |
 | Текущее ядро (долг) | ✅ v0.2 закрыта: планировщик (#9), realtime-guard (#11), macOS CI (#42), CI-долг (#249/#252/#254/#255); остаточный долг #5 — в плане |
@@ -207,8 +207,12 @@ CLI — полноценный интерфейс управления (MANIFEST
       граф, секвенсор и состояния плагинов в human и `--json`, атомарная
       запись (tmp + rename), `--dry-run`, diff при `set`, `validate` с секциями
       file/format/metadata/graph/sequencer/plugins и кодом 1 на провал
-- [ ] #90 граф: `node list/add/rm`, `connect/disconnect`, `param set/get`,
-      `graph check`
+- [x] #90 граф: `node list/types/add/rm/show`, `connect/disconnect`,
+      `param list/get/set`, `graph check` — ✅ сделано: порты, задержка и
+      умолчания параметров берутся из описателя типа, значение проверяется по
+      диапазону до записи, `graph check` компилирует граф через Core
+      (вердикты `compiles`/`cycle`/`unknownType`), отчёт — те же секции, что у
+      `project validate` (#96)
 - [ ] #257 транспорт: `transport tempo/meter/position/play/stop/seek/loop`
       и `transport state --json`
 - [ ] #91 offline-рендер в WAV: `render` (детерминизм + CI-проверка)
@@ -465,7 +469,10 @@ realtime-дисциплина и сборка. Milestone закрыт целик
   использует только публичные API ядра (контракты бэкендов, `logger`, проект),
   ядро при этом не меняется (MANIFEST §89). Команды проекта — чистый I/O над
   форматом (`core/project.nim`): движок не создаётся, устройство не
-  открывается. `editor.nim` ещё пуст, и добавление GUI ядро тоже не затронет.
+  открывается. Команды графа (#90) добавляют к этому каталог типов нод
+  (`nodes/sdk`) и проверку компиляции через Core (`compileGraph`), но движок и
+  устройство по-прежнему не трогают. `editor.nim` ещё пуст, и добавление GUI
+  ядро тоже не затронет.
 
 ### Команды проекта (#89)
 
@@ -483,6 +490,33 @@ euterpia --json project show demo.eut                     # то же машин
 повреждённый проект без разбора и печатает diff «было → стало»; `init` не
 затирает существующий файл без `--force`. Полный справочник команд, JSON-схемы
 и сценарии — в #96.
+
+### Команды графа (#90)
+
+```bash
+euterpia node types                               # каталог типов: порты и параметры
+euterpia node add osc                             # нода #1 Oscillator (euterpia.osc)
+euterpia node add gain --name Mix
+euterpia connect osc:out gain:in                   # выход → вход
+euterpia param set 1 freq 220                      # значение проверяется по диапазону
+euterpia graph check                               # структура + компиляция (§20)
+euterpia --json node list                          # та же картина машиночитаемо
+```
+
+Файл проекта задаётся `--file <путь>` или позиционным аргументом с расширением
+`.eut`; без них правится `project.eut` — примеры MANIFEST §19 работают как
+написаны. Ноду можно назвать id, именем или коротким id типа (`osc`) — но
+только если нода такого типа в графе одна; иначе CLI требует id, а не угадывает.
+`connect` понимает `нода:out`/`нода:in` и явные формы `нода:audio:1`,
+`нода:ctrl:0`, `нода:event:0`; виды портов обязаны совпадать, а самосоединение
+разрешено — компилируемость решает `graph check`, а не догадка CLI.
+`node rm` удаляет ноду вместе со связями, автоматизацией и состояниями
+плагинов; `param set` отвергает значение вне диапазона типа (и дробное значение
+для дискретного параметра) до записи файла; `--dry-run` показывает правку и не
+трогает диск. Проверка «граф соберётся» идёт через Core
+(`nodes/sdk/graph_check.nim` → `compileGraph`): CLI не собирает пайплайн сам
+(§20) и не повторяет компилятор у себя. Полный справочник команд, JSON-схемы и
+сценарии — в #96.
 
 ### Настройки окружения (#258)
 
@@ -542,7 +576,7 @@ nimble unit            # только unit-тесты DSP и контракто�
 nimble integration     # интеграционный тест ядра
 nimble buildRelease    # release-сборка с LTO
 nimble cli             # сборка CLI: build/euterpia (#88)
-nimble cliSmoke        # CLI smoke: точка входа, doctor, completion, проект и настройки (#88, #89, #105, #258, #259)
+nimble cliSmoke        # CLI smoke: точка входа, doctor, completion, проект, граф и настройки (#88, #89, #90, #105, #258, #259)
 nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адаптера (#31)
 nimble ubsan           # unit-набор под UndefinedBehaviorSanitizer (#13)
 nimble asan            # unit-набор под AddressSanitizer (#13)
@@ -559,7 +593,9 @@ nimble clapMock        # сборка mock CLAP-плагина + сквозно�
 возврата, разделение stdout/stderr, детерминизм вывода, машинный формат
 `--json`, секции `doctor`, кандидаты автодополнения, команды проекта
 (`init`/`project show|set|validate`, включая «повреждённый файл не
-перезаписан») и настройки окружения (`config`, включая приоритет
+перезаписан»), команды графа (#90: `node add/list/rm`, `connect`,
+`disconnect`, `param set/get`, `graph check` с вердиктами компилятора) и
+настройки окружения (`config`, включая приоритет
 argv > env > файл). `euterpia` линкует
 ТОЛЬКО статически собираемые адаптеры (miniaudio): `{.dynlib.}`-адаптеры
 (PortAudio, RtMidi) резолвят символы внешней библиотеки на старте процесса,

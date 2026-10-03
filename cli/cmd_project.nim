@@ -72,18 +72,18 @@ const
     ## видно пользователю, а не выясняется на опыте.
 
 type
-  LoadedProject = object
-    ok: bool
-    proj: ProjectFormat
-    rep: Report
+  LoadedProject* = object
+    ok*: bool
+    proj*: ProjectFormat
+    rep*: Report
       ## Готовый отчёт об ошибке чтения — печатается как есть, чтобы
       ## команда не переизобретала текст для каждого вида сбоя.
-    code: ExitCode
+    code*: ExitCode
       ## Код возврата для этого сбоя. Нужен `validate`: он печатает отчёт
       ## в общем виде, но статус процесса обязан остаться «данные» (1) или
       ## «среда» (2), а не превратиться в «провал проверок» (тоже 1) для
       ## недоступного файла.
-    kind: ProjectErrorKind
+    kind*: ProjectErrorKind
       ## Вид ошибки ядра. По нему `validate` выбирает подсказку: советовать
       ## «запустите validate» внутри самого validate бессмысленно.
 
@@ -149,7 +149,7 @@ proc projectError*(
   let code = codeFor(kind)
   errReport(code, kindName(code), message, hint = hint)
 
-proc loadAt(path: string): LoadedProject =
+proc loadAt*(path: string): LoadedProject =
   let loaded = loadProject(path)
   if not loaded.success:
     let code = codeFor(loaded.error.kind)
@@ -161,7 +161,7 @@ proc loadAt(path: string): LoadedProject =
                      hint = loadHint(loaded.error.kind, path)))
   LoadedProject(ok: true, proj: loaded.value)
 
-proc saveError(saved: ProjectResult[void]; path: string): Report =
+proc saveError*(saved: ProjectResult[void]; path: string): Report =
   ## Ошибку записи формирует ядро (`pekIOError`), CLI добавляет путь и код.
   projectError(saved.error.kind, saved.error.message, path,
                "проверьте каталог и права: " & path)

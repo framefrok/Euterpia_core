@@ -14,6 +14,7 @@ import registry
 import cmd_completion
 import cmd_config
 import cmd_doctor
+import cmd_graph
 import cmd_project
 import config
 import euterpia_version
@@ -194,6 +195,69 @@ proc setupRegistry*() =
           "` — как в примере MANIFEST §19",
       ],
       run: runProject),
+    CommandDef(
+      name: "node",
+      summary: "ноды графа: список, каталог типов, добавление, удаление, показ",
+      usage: "node <list|types|add|rm|show> [аргументы] [--file проект.eut]",
+      subcommands: NodeSubcommands,
+      flags: GraphKeys,
+      notes: @[
+        "тип ноды — полный id (`euterpia.osc`), короткий (`osc`) или имя (`Oscillator`)",
+        "порты, задержка и умолчания параметров берутся из типа: файл получает то, что умеет нода",
+        "id назначается как максимум + 1; --id задаёт явно (занятый id — ошибка)",
+        "node rm удаляет и связи, автоматизацию и состояния плагинов этой ноды",
+        "файл проекта: --file или аргумент с расширением .eut (по умолчанию " &
+          DefaultProjectFile & ")",
+        "`node types` печатает каталог: id, порты, параметры — и человеческим текстом, и в --json",
+      ],
+      run: runNode),
+    CommandDef(
+      name: "connect",
+      summary: "соединить выход одной ноды со входом другой",
+      usage: "connect <источник> <приёмник> [--file проект.eut]",
+      flags: GraphKeys,
+      notes: @[
+        "порт: `нода:out` | `нода:in` | `нода:audio:1` | `нода:ctrl:0` | `нода:event:0`",
+        "пример MANIFEST §19: euterpia connect oscillator:out filter:in",
+        "виды портов обязаны совпадать; самосоединение разрешено — компиляцию проверяет `graph check`",
+      ],
+      run: runConnectCommand),
+    CommandDef(
+      name: "disconnect",
+      summary: "снять связь между нодами",
+      usage: "disconnect <источник>[:порт] <приёмник>[:порт] [--file проект.eut]",
+      flags: GraphKeys,
+      notes: @[
+        "без портов снимаются все связи между парой нод",
+        "с портами — только указанная связь",
+      ],
+      run: runDisconnectCommand),
+    CommandDef(
+      name: "param",
+      summary: "параметры ноды: список, чтение, запись",
+      usage: "param <list|get|set> [аргументы] [--file проект.eut]",
+      subcommands: ParamSubcommands,
+      flags: GraphKeys,
+      notes: @[
+        "пример MANIFEST §19: euterpia param set filter cutoff 1200",
+        "значение проверяется по диапазону типа: вне диапазона — отказ, а не запись",
+        "параметр можно назвать именем (`freq`) или числовым id (стабильная ссылка)",
+        "`param get` показывает и значение из файла, и умолчание типа",
+      ],
+      run: runParam),
+    CommandDef(
+      name: "graph",
+      summary: "проверка графа: типы, порты, связи и компиляция",
+      usage: "graph check [--file проект.eut]",
+      subcommands: GraphSubcommands,
+      flags: GraphKeys,
+      notes: @[
+        "проверяет структуру (типы, порты, связи, значения параметров) и компилирует граф",
+        "компиляция идёт через Core: CLI не собирает пайплайн сам (§20)",
+        "провал проверки — код 1; предупреждения (пустой граф, самосоединение) код не меняют",
+        "отчёт — те же секции и `summary`, что у `project validate` и `doctor` (#96)",
+      ],
+      run: runGraph),
     CommandDef(
       name: "completion",
       summary: "скрипт автодополнения оболочки",
