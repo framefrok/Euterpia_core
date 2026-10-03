@@ -18,6 +18,7 @@
 switch("path", "core")
 switch("path", "commons")
 switch("path", "nodes")
+switch("path", "libs")
 switch("path", "adapters")
 switch("path", "adapters/portaudio")
 switch("path", "adapters/clap")

@@ -36,12 +36,28 @@ const
 
 type
   NodeParamFlag* = enum
-    npfAutomatable     # можно вести автоматизацией
-    npfModulatable     # принимает модуляцию (LFO, MIDI CC)
-    npfInteger         # целочисленный (шаг >= 1)
-    npfChoice          # дискретный набор значений
-    npfHidden          # не показывать в UI
+    ## Флаги параметра — БИТОВАЯ МАСКА, а не порядковые номера.
+    ##
+    ## `flags` в описателе — это `uint32` с установленными битами, и весь код
+    ## проверяет их через `(flags and uint32(flag)) != 0`. Если объявить
+    ## значения порядковыми (1,2,3,4,5), проверка «и» читает ЧУЖИЕ биты:
+    ## пара `automatable|modulatable` = 0|1 = 1 ложно срабатывала как
+    ## `modulatable|choice`, из-за чего `param set` считал дробные параметры
+    ## «целочисленными» и отвергал любое значение с точкой. Явные степени
+    ## двойки делают запись и проверку согласованными.
+    npfAutomatable = 1     # 0b00001 — можно вести автоматизацией
+    npfModulatable = 2     # 0b00010 — принимает модуляцию (LFO, MIDI CC)
+    npfInteger     = 4     # 0b00100 — целочисленный (шаг >= 1)
+    npfChoice      = 8     # 0b01000 — дискретный набор значений
+    npfHidden      = 16    # 0b10000 — не показывать в UI
 
+const
+  NodeParamFlagOrder* = [npfAutomatable, npfModulatable, npfInteger,
+                         npfChoice, npfHidden]
+    ## Порядок флагов для показа и разбора. Отдельный список нужен потому,
+    ## что enum с явными значениями-битами («дырки») в Nim не итерируется.
+
+type
   NodeParamDesc* {.bycopy.} = object
     id*: uint32
     name*: array[NodeMaxParamChars, char]

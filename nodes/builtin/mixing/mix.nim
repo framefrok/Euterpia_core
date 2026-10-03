@@ -31,9 +31,18 @@ const
     ## шины эффектов. Меньше — не хватило бы; больше — рос бы размер шага
     ## пайплайна без пользы.
 
+  MixMaxChannels* = 2
+
+  DcBlockerHz* = 10.0f
+    ## Частота среза DC-блокера. Сумма инструментов даёт постоянную
+    ## составляющую (асимметрия soft-clip, утечка огибающих), а она съедает
+    ## запас по уровню и «уводит» ноль. 10 Гц — ниже слышимого низа.
+
 type
   MixState* = object
     smoothDb: ParamSmoother
+    ## Состояние DC-блокера на канал: y = x - x1 + R·y1.
+    dcX1, dcY1: array[MixMaxChannels, float32]
 
 var
   mixDesc: NodeDesc
@@ -119,17 +128,27 @@ proc processMixNode(
   let channels = max(channelCount(outBuf), 1'i32)
   let lin = dbToLin(st.smoothDb.advance(frames))
 
+  # DC-блокер: сумма даёт постоянную составляющую, и её надо снять здесь,
+  # на мастер-шине. R зависит от частоты дискретизации.
+  let sr = if ctx.sampleRate > 0.0f: ctx.sampleRate else: 48000.0f
+  let dcR = clamp(1.0f - (2.0f * PI * DcBlockerHz / sr), 0.9f, 0.9999f)
+
   # Каждый сэмпл выхода — сумма соответствующего сэмпла всех входов.
   # `sampleAt` ничего не аллоцирует и безопасен для nil-входа (вернёт 0),
   # поэтому неподключённый вход не создаёт ветвлений в горячем цикле.
   for ch in 0 ..< channels:
+    let ci = int(ch) mod MixMaxChannels
     forEachFrame(outBuf, frames):
       var acc = 0.0f
       for k in 0 ..< audio.inputCount:
         let inBuf = audio.inputs[k]
         if not inBuf.isNil:
           acc += inBuf.sampleAt(ch, i)
-      outBuf.setSampleAt(ch, i, acc * lin)
+      let x = acc * lin
+      let y = x - st.dcX1[ci] + dcR * st.dcY1[ci]
+      st.dcX1[ci] = x
+      st.dcY1[ci] = y
+      outBuf.setSampleAt(ch, i, y)
 
 proc getMixDesc*(): ptr NodeDesc =
   if not mixReady:

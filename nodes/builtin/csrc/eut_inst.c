@@ -793,18 +793,18 @@ typedef struct {
 } DrumSpec;
 
 static const DrumSpec DRUM_SPECS[EUT_DRUM_PIECE_COUNT] = {
-  /* KICK      */ { 108.0f, 2.60f, 0.048f, 0.42f, 0.10f,  2400.0f, 0.00f, 1.00f, 0.30f, 1.00f,  0.00f },
-  /* SNARE     */ { 188.0f, 1.35f, 0.030f, 0.19f, 0.72f,  5200.0f, 0.22f, 0.85f, 0.28f, 0.80f, -0.05f },
-  /* RIM       */ { 420.0f, 1.20f, 0.012f, 0.05f, 0.50f,  8000.0f, 0.35f, 0.70f, 0.22f, 0.55f,  0.15f },
-  /* CLAP      */ { 340.0f, 1.10f, 0.020f, 0.24f, 0.96f,  7000.0f, 0.00f, 0.15f, 0.25f, 0.65f, -0.20f },
-  /* TOM_LOW   */ {  92.0f, 1.50f, 0.040f, 0.52f, 0.16f,  2600.0f, 0.00f, 1.00f, 0.22f, 0.85f, -0.35f },
-  /* TOM_MID   */ { 138.0f, 1.50f, 0.040f, 0.44f, 0.16f,  3000.0f, 0.00f, 1.00f, 0.22f, 0.85f, -0.15f },
-  /* TOM_HIGH  */ { 196.0f, 1.50f, 0.040f, 0.36f, 0.16f,  3400.0f, 0.00f, 1.00f, 0.22f, 0.85f,  0.10f },
-  /* HAT_CLOSED*/ { 540.0f, 1.00f, 0.000f, 0.055f, 1.00f, 14000.0f, 0.95f, 0.40f, 0.12f, 0.45f,  0.30f },
-  /* HAT_PEDAL */ { 500.0f, 1.00f, 0.000f, 0.085f, 1.00f, 11000.0f, 0.95f, 0.36f, 0.12f, 0.40f,  0.30f },
-  /* HAT_OPEN  */ { 540.0f, 1.00f, 0.000f, 0.40f, 1.00f,  13000.0f, 0.95f, 0.42f, 0.10f, 0.45f,  0.32f },
-  /* CRASH     */ { 620.0f, 1.00f, 0.000f, 1.80f, 1.00f,  9000.0f, 1.00f, 0.75f, 0.08f, 0.42f, -0.40f },
-  /* RIDE      */ { 880.0f, 1.00f, 0.000f, 1.50f, 0.55f, 12000.0f, 1.00f, 0.55f, 0.08f, 0.38f,  0.40f }
+  /* KICK      */ {  72.0f, 2.10f, 0.032f, 0.22f, 0.06f,  1800.0f, 0.00f, 0.80f, 0.08f, 1.00f,  0.00f },
+  /* SNARE     */ { 190.0f, 1.30f, 0.030f, 0.15f, 0.68f,  5200.0f, 0.12f, 0.70f, 0.10f, 0.80f, -0.05f },
+  /* RIM       */ { 420.0f, 1.20f, 0.012f, 0.05f, 0.50f,  8000.0f, 0.35f, 0.60f, 0.10f, 0.55f,  0.15f },
+  /* CLAP      */ { 340.0f, 1.10f, 0.020f, 0.22f, 0.96f,  7000.0f, 0.00f, 0.70f, 0.10f, 0.65f, -0.20f },
+  /* TOM_LOW   */ {  92.0f, 1.50f, 0.040f, 0.40f, 0.16f,  2600.0f, 0.00f, 0.80f, 0.10f, 0.85f, -0.35f },
+  /* TOM_MID   */ { 138.0f, 1.50f, 0.040f, 0.34f, 0.16f,  3000.0f, 0.00f, 0.80f, 0.10f, 0.85f, -0.15f },
+  /* TOM_HIGH  */ { 196.0f, 1.50f, 0.040f, 0.28f, 0.16f,  3400.0f, 0.00f, 0.80f, 0.10f, 0.85f,  0.10f },
+  /* HAT_CLOSED*/ { 540.0f, 1.00f, 0.000f, 0.055f, 1.00f, 14000.0f, 0.90f, 0.36f, 0.05f, 0.45f,  0.30f },
+  /* HAT_PEDAL */ { 500.0f, 1.00f, 0.000f, 0.085f, 1.00f, 11000.0f, 0.90f, 0.32f, 0.05f, 0.40f,  0.30f },
+  /* HAT_OPEN  */ { 540.0f, 1.00f, 0.000f, 0.34f, 1.00f,  13000.0f, 0.90f, 0.38f, 0.05f, 0.45f,  0.32f },
+  /* CRASH     */ { 620.0f, 1.00f, 0.000f, 1.10f, 1.00f,  9000.0f, 0.95f, 0.55f, 0.04f, 0.42f, -0.40f },
+  /* RIDE      */ { 820.0f, 1.00f, 0.000f, 0.80f, 0.70f, 13000.0f, 0.85f, 0.40f, 0.04f, 0.38f,  0.40f }
 };
 
 int eut_drums_piece_for_note(int note)
@@ -901,8 +901,10 @@ void eut_drums_note_on(EutDrums *g, int note, float velocity)
 
   const float ampTime = inst_clamp(sp->ampTime * g->decay * jitterDecay, 0.008f, 8.0f);
   /* Удар ударных держится не пальцем: held = 0, затухание идёт по
-     отпусканию. Так одна и та же огибающая обслуживает и «чок» хэта. */
-  inst_voice_setup(&v->v, note, vel, 0.0005f, 0.0f, ampTime, ampTime, sr);
+     отпусканию. Так одна и та же огибающая обслуживает и «чок» хэта.
+     Атака — не нулевая: она даёт короткий фейд, иначе старт с полной
+     амплитудой превращался в щелчок (поймано инспектором аудио). */
+  inst_voice_setup(&v->v, note, vel, 0.0008f, 0.0f, ampTime, ampTime, sr);
   v->v.held = 0;
   v->v.seq = g->seqCounter;
 
@@ -946,7 +948,10 @@ void eut_drums_note_on(EutDrums *g, int note, float velocity)
   inst_pan_gains(inst_clamp(g->pan + sp->pan, -1.0f, 1.0f), &pl, &pr);
   v->v.gainL = pl * toneMix * 0.5f;
   v->v.gainR = pr * toneMix * 0.5f;
-  v->v.ampInc = 1.0f;   /* мгновенная атака: у удара нет «нарастания» */
+  /* Мгновенной атаки (ampInc = 1) быть не должно: amp прыгал с 0 до 1 за
+     один сэмпл, и это слышалось как щелчок на каждом ударе. Атака из
+     setup (доли миллисекунды) уже достаточно быстрая для удара, но
+     разрыв убирает. */
   g->active = 1;
 }
 
@@ -987,9 +992,10 @@ void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n)
   const float invSr = 1.0f / g->sampleRate;
   /* Несоизмеримые отношения металлической группы: так сумма шести
      квадратов не даёт слышимой высоты — получается тарелка, а не аккорд. */
+  /* Ингармонические отношения: тарелка — это звон без ясной высоты, а не
+     аккорд. Отношения разрежены вверх — вместе с шумом это даёт «шипение». */
   static const float METAL_RATIO[EUT_INST_DRUM_METAL] =
-    { 2.00f, 2.68f, 3.26f, 3.88f, 4.62f, 5.42f };
-  const float metalHp = 0.55f + 0.30f * g->tone;
+    { 2.00f, 2.83f, 3.76f, 5.10f, 6.80f, 9.10f };
 
   for (int i = 0; i < n; ++i) {
     float sumL = 0.0f;
@@ -1024,26 +1030,24 @@ void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n)
 
       float metal = 0.0f;
       if (v->mixMetal > 0.0f) {
-        float sq = 0.0f;
+        /* Ингармонические ЧАСТИЧНЫЕ вместо меандра: сумма квадратов давала
+           густой низко-серединистый «жужжащий» призвук (особенно ride),
+           который тянулся и накладывался при игре восьмыми. Синусы такой
+           грязи не дают, а «шипение» тарелки добавляет шумовая часть. */
+        float partials = 0.0f;
         for (int k = 0; k < EUT_INST_DRUM_METAL; ++k) {
           const float dt = v->pitch * METAL_RATIO[k] * invSr;
           v->metalPh[k] += dt;
           if (v->metalPh[k] >= 1.0f) v->metalPh[k] -= 1.0f;
-          /* Меандр с polyBLEP: без сглаживания разрыва энергия зеркалится
-             за Найквист и тарелки звучат «цифровым звоном». */
-          const float base = (v->metalPh[k] < 0.5f) ? 1.0f : -1.0f;
-          float anti = v->metalPh[k] + 0.5f;
-          if (anti >= 1.0f) anti -= 1.0f;
-          sq += base - inst_polyblep(v->metalPh[k], dt) + inst_polyblep(anti, dt);
+          partials += inst_sin(v->metalPh[k]) * (1.0f - 0.12f * (float)k);
         }
-        sq *= (1.0f / EUT_INST_DRUM_METAL);
-        /* ФВЧ оставляет от квадратов только «звон»: основной тон группы
-           вырезан, поэтому нет слышимой высоты. */
-        v->toneDph[0] += (sq - v->toneDph[0]) * metalHp;
-        metal = (sq - v->toneDph[0]) * 2.0f;
+        metal = partials * (1.0f / EUT_INST_DRUM_METAL);
       }
 
-      float s = tone + noise * v->mixNoise + metal * v->mixMetal;
+      /* Тональная часть даётся только «кожаным» деталям: у тарелок
+         mixMetal близок к 1, и синус под ними звучал пищащим «биип». */
+      const float tonalMix = 1.0f - v->mixMetal;
+      float s = tone * tonalMix + noise * v->mixNoise + metal * v->mixMetal;
       s = inst_soft_clip(s * v->drive) * v->gain;
       const float a = v->v.amp;
       sumL += s * a * v->v.gainL;

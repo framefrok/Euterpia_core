@@ -963,6 +963,18 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
     check notNumber.code == 1
     check "должно быть числом" in notNumber.errput
 
+    # Отрицательное значение — это ЗНАЧЕНИЕ, а не ключ (регрессия #292):
+    # раньше `-12` отвергалось как «неизвестный ключ», хотя у level/pan
+    # отрицательный диапазон по определению.
+    let negative = runCliIn(work, ["param", "set", "1", "level", "-12"])
+    check negative.code == 0
+    check parseJson(readFile(project))["graph"]["nodes"][0]["parameters"]["level"].getFloat == -12.0
+
+    # Дробное значение дробного параметра принимается (регрессия #292):
+    # из-за порядковых значений флагов любой параметр считался целым.
+    let fractional = runCliIn(work, ["param", "set", "1", "level", "-6.5"])
+    check fractional.code == 0
+
   test "--dry-run показывает правку и не пишет файл":
     let before = readFile(project)
     let r = runCliIn(work, ["--dry-run", "node", "add", "noise", "--file", "project.eut"])
