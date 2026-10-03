@@ -140,6 +140,30 @@ jobs:
         run: nimble miniaudioSmoke
 
   # ---------------------------------------------------------------------------
+  # CLI (issue #88): сборка бинаря и smoke-тест контракта — коды возврата,
+  # разделение stdout/stderr, детерминизм вывода, машинный формат (`--json`),
+  # `doctor` (#105) и автодополнение (#259).
+  #
+  # Раннер без аудио, MIDI и плагинов — это и есть проверка критерия #105
+  # «на машине без звука команда честно сообщает о недоступном и не падает».
+  # Только Linux: CLI линкует адаптер miniaudio, а его сборка на Windows и
+  # macOS требует отдельных фреймворков линковки (#52).
+  # ---------------------------------------------------------------------------
+  cli:
+    name: cli smoke (build + contract)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
+        with:
+          nim-version: '2.2.12'
+
+      - name: nimble cliSmoke
+        run: nimble cliSmoke
+
+  # ---------------------------------------------------------------------------
   # Архитектурные guard'ы границ слоёв (MANIFEST §40, §41, §42).
   #
   # Это executable-версия критериев приёмки issue #29: конкретный формат
@@ -151,6 +175,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Core не знает о CLI, CLI — только публичные API ядра (#88)
+        run: |
+          # Направление зависимостей: Core <- Nodes <- CLI (§19-21, §27).
+          # Проверяются все слои ниже CLI: ядро, ноды и Commons о CLI не знают.
+          if grep -rnE "cli/" core/ nodes/ commons/; then
+            echo "::error::CLI протёк в ядро: Core не должен знать о CLI (§20)"
+            exit 1
+          fi
+
+          # CLI не тянет внутренние модули ядра: только публичные API
+          # (контракты бэкендов, logger, проект). Регистрация фабрик
+          # адаптеров — единственное разрешённое касание адаптеров (§20, #88).
+          internal='audio_engine|dsp_scheduler|compiled_pipeline|graph_compiler|memory_pool|rt_guard|ipc_bus|audio_recorder|node_interface|param_registry|waveform_cache'
+          if grep -rnE "import[[:space:]]+($internal)\b" cli/ cli.nim; then
+            echo "::error::CLI импортирует внутренности Core вместо публичного API (§20, #88)"
+            exit 1
+          fi
+
+      - name: CLI не линкует dynlib-адаптеры (#105)
+        run: |
+          # `{.dynlib.}` резолвит символы внешней библиотеки в инициализации
+          # модуля: импорт такого адаптера роняет процесс ДО main(), поэтому
+          # `doctor` проверяет такие библиотеки пробой dlopen, а не импортом.
+          # Проверено на adapters/rtmidi без librtmidi: вывод
+          # «could not load: librtmidi.so» до первой строки кода.
+          if grep -rnE "import[[:space:]].*(backend_portaudio|backend_rtmidi)" cli/ cli.nim; then
+            echo "::error::CLI импортирует dynlib-адаптер: без библиотеки процесс упадёт до main() (#105)"
+            exit 1
+          fi
+          echo "ok: CLI линкует только статически собранные адаптеры"
 
       - name: Core не знает о формате плагинов (plugin_api, #29)
         run: |

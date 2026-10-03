@@ -23,7 +23,8 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
 | Тесты | ✅ 300 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
-| CLI / Editor | ❌ точки входа (`cli.nim`, `editor.nim`, `main.nim`) пусты; CLI — линия v0.3 (#86): каркас, проект, граф, `transport`, `render`, `play`, запись, плагины, справочник; Editor — линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
+| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), human/`--json`, exit-коды 0/1/2/3, джоба `cli` в CI; команды проекта, графа, `transport`, `render`, `play`, записи, плагинов и справочник — впереди |
+| Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
 | Надёжность и диагностика | 🟡 план линии v0.5 — библиотека тестов ядра (golden, Node Contract Suite, fault injection, санитайзеры) и «отказ вместо краха»: модель ошибок, чёрный ящик, crash guard, containment нод и плагинов, изоляция скана (#115) |
 | Текущее ядро (долг) | ✅ v0.2 закрыта: планировщик (#9), realtime-guard (#11), macOS CI (#42), CI-долг (#249/#252/#254/#255); остаточный долг #5 — в плане |
 | Фундамент под GUI | 🟡 линия v0.4 (после CLI): снапшоты/события, telemetry нод, компонентные ноды, состояние редактора, модель клипа, роли узлов (#142) |
@@ -199,8 +200,9 @@ CLI — полноценный интерфейс управления (MANIFEST
 
 **Поверхность команд**
 
-- [ ] #88 каркас: точка входа, диспетчер команд, human/`--json`, логгер,
-      exit-коды, CI-smoke
+- [x] #88 каркас: точка входа, диспетчер команд, human/`--json`, логгер,
+      exit-коды, CI-smoke — ✅ сделано: `cli.nim` + `cli/`, `nimble cli`,
+      `nimble cliSmoke`, джоба `cli` и guard'ы архитектуры в CI
 - [ ] #89 проект: `init`, `project show/set/validate`
 - [ ] #90 граф: `node list/add/rm`, `connect/disconnect`, `param set/get`,
       `graph check`
@@ -216,8 +218,11 @@ CLI — полноценный интерфейс управления (MANIFEST
 - [ ] #111 MIDI-файлы (импорт/экспорт SMF); #114 автоматизация; #112 метроном;
       #109 undo/redo; #110 автосохранение и восстановление проекта
 - [ ] #97 батч/REPL (`--script`), #96 справочник CLI и JSON-схемы
-- [ ] #105 `doctor` (самодиагностика окружения); #258 `config` (умолчания
-      окружения); #259 автодополнение оболочки; #260 `plugin validate`
+- [x] #105 `doctor` (самодиагностика окружения) — ✅ сделано: секции
+      build/audio/midi/plugins/fs/csrc, human и `--json`, exit 0/2
+- [x] #259 автодополнение оболочки — ✅ сделано: `completion bash|zsh|fish`
+      и служебная `__complete` (кандидаты — из реестра команд)
+- [ ] #258 `config` (умолчания окружения); #260 `plugin validate`
 - [ ] #87 sequencer player (Nodes) — зависимость: клипы проекта пока не
       попадают в граф
 
@@ -450,8 +455,10 @@ realtime-дисциплина и сборка. Milestone закрыт целик
   внешних зависимостей (важно для сборки «без сети» и для поставки).
 - **Node SDK разделяет descriptor и state** — SDK можно открывать для
   сторонних DSP-нод, не трогая граф и планировщик.
-- **Пустые `cli.nim`/`editor.nim` при готовых контрактах** — CLI и редактор
-  строятся поверх, ядро при этом не меняется (MANIFEST §89).
+- **CLI строится поверх готовых контрактов** — каркас (`cli.nim` + `cli/`)
+  использует только публичные API ядра (контракты бэкендов, `logger`, проект),
+  ядро при этом не меняется (MANIFEST §89). `editor.nim` ещё пуст, и добавление
+  GUI ядро тоже не затронет.
 
 ## Сборка и тесты
 
@@ -472,6 +479,8 @@ nimble test            # unit + integration
 nimble unit            # только unit-тесты DSP и контрактов
 nimble integration     # интеграционный тест ядра
 nimble buildRelease    # release-сборка с LTO
+nimble cli             # сборка CLI: build/euterpia (#88)
+nimble cliSmoke        # CLI smoke: точка входа, doctor и completion (#88, #105, #259)
 nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адаптера (#31)
 nimble ubsan           # unit-набор под UndefinedBehaviorSanitizer (#13)
 nimble asan            # unit-набор под AddressSanitizer (#13)
@@ -483,6 +492,15 @@ nimble clapMock        # сборка mock CLAP-плагина + сквозно�
 обязательно проверяется, что отсутствие устройства даёт код ошибки, а не
 падение; при наличии устройства проверяются enumeration, open/start/stop
 и рост `xrunCount` при искусственной перегрузке.
+
+`nimble cliSmoke` собирает CLI и запускает чёрный smoke-тест: коды
+возврата, разделение stdout/stderr, детерминизм вывода, машинный формат
+`--json`, секции `doctor` и кандидаты автодополнения. `euterpia` линкует
+ТОЛЬКО статически собираемые адаптеры (miniaudio): `{.dynlib.}`-адаптеры
+(PortAudio, RtMidi) резолвят символы внешней библиотеки на старте процесса,
+поэтому их отсутствие уронило бы CLI ещё до `main()`. Именно поэтому
+`doctor` проверяет такие библиотеки пробой `dlopen` и честно сообщает
+«адаптер в CLI не залинкован», а не падает.
 
 Бинарники тестов кладутся в `build/` (каталог в `.gitignore`).
 
