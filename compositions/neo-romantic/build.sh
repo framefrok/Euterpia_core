@@ -1,30 +1,20 @@
 #!/usr/bin/env bash
 # compositions/neo-romantic/build.sh
 #
-# Сборка «Neo-Romantic Ensemble» БИБЛИОТЕКОЙ libs/compose (Nim, #285):
-# проект (.eut) строит наш код, рендер и проверка — командами CLI.
-# Альтернативный путь (тот же состав только через CLI, §19) — build_via_cli.sh;
-# результат обязан совпадать.
+# Сборка и рендер «Neo-Romantic Ensemble» библиотекой libs/compose (issue #300):
+# генератор пишет .notes, .eut и .wav сам; обёртка добавляет отдельный nimcache
+# и проверку инспектором.
 #
 # Использование:  ./build.sh [путь-к-euterpia]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 E="${1:-${EUTERPIA:-$HERE/../../build/euterpia}}"
-PROJ="$HERE/ensemble.eut"
-OUT="$HERE/ensemble.wav"
+ROOT="$HERE/../.."
 
-rm -f "$PROJ"
-run() { "$E" "$@"; }
-
-echo "--- generate (libs/compose, Nim) ---"
-nim r --hints:off "$HERE/generate.nim"
-
-echo "--- graph check ---"
-run graph check --file "$PROJ" | tail -3
-
-echo "--- render ---"
-run render "$PROJ" "$OUT" --bits 16 | tail -6
+echo "--- generate + render (libs/compose) ---"
+nim c -r --hints:off --nimcache:"$ROOT/build/nc_compose_neo" \
+    --out:"$ROOT/build/compose_neo" "$HERE/generate.nim"
 
 echo "--- analyze ---"
-run analyze "$OUT" || true
+"$E" analyze "$HERE/ensemble.wav" --fail-on error

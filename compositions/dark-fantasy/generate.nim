@@ -1,27 +1,20 @@
 #!/usr/bin/env -S nim r
 # compositions/dark-fantasy/generate.nim
 #
-# Генератор «Cathedral of Ash» на Nim через библиотеку `libs/compose`
-# (issue #285, #295). Заменяет прежний скрипт: проект — это данные Core, и
-# строить их тем же типом, что читает ядро, надёжнее, чем текстовым скриптом.
+# «Cathedral of Ash» — medieval dark fantasy на Nim (библиотека libs/compose).
+# Версия 2: энергичнее, с флейтой и волынкой, меняющейся ударной партией и
+# «разгоном» через плотность (реальный rubato — отдельная задача ядра #302).
 #
 # Запуск:  nim r compositions/dark-fantasy/generate.nim
-# Пишет:   guitar/piano/organ/drums.notes  (человекочитаемая нотация)
-#          ensemble.eut                    (готовый проект для `euterpia render`)
-#
-# Форма (76 тактов 4/4 при 76 BPM ≈ 4:00), ре минор с модальными красками:
-# Пролог → Марш → Плач → Катаклизм → Эпилог.
+# Пишет:   *.notes, ensemble.eut и ensemble.wav — одной командой.
 
 import std/[math, os]
 
 import compose/score
 import compose/song
+import compose/engine
 
-const BARS = 76
-
-# ---------------------------------------------------------------------------
-# Гармония и форма
-# ---------------------------------------------------------------------------
+const BARS = 88
 
 proc chord(name: string): seq[int] =
   case name
@@ -37,15 +30,15 @@ proc chord(name: string): seq[int] =
 
 proc progression(section: string): seq[string] =
   case section
-  of "prologue":  @["Dm", "Dm", "Bb", "Dm", "Dm", "C", "Dm", "Dm", "Bb", "F", "C", "Dm"]
-  of "march":     @["Dm", "Bb", "C", "Dm", "Gm", "Bb", "C", "A"]
-  of "lament":    @["Bb", "F", "Gm", "Dm", "Bb", "C", "Dm", "Am"]
-  of "cataclysm": @["Dm", "Gm", "Bb", "C", "Dm", "Eb", "Gm", "A"]
-  of "epilogue":  @["Dm", "Bb", "Gm", "Dm", "Bb", "C", "Dm", "Dm"]
+  of "dawn":   @["Dm", "Bb", "Gm", "Dm"]
+  of "march":  @["Dm", "Bb", "F", "C", "Gm", "Dm", "Bb", "A"]
+  of "charge": @["Dm", "Gm", "Bb", "C", "Dm", "Eb", "Gm", "A"]
+  of "lament": @["Bb", "F", "Gm", "Dm", "Bb", "C", "Dm", "Am"]
+  of "finale": @["Dm", "Bb", "Gm", "A", "Dm", "F", "Gm", "Dm"]
   else: @["Dm"]
 
-const SECTIONS = [("prologue", 1, 12), ("march", 13, 32), ("lament", 33, 48),
-                  ("cataclysm", 49, 64), ("epilogue", 65, 76)]
+const SECTIONS = [("dawn", 1, 12), ("march", 13, 32), ("charge", 33, 52),
+                  ("lament", 53, 68), ("finale", 69, 88)]
 
 proc sectionOf(b: int): string =
   for s in SECTIONS:
@@ -64,17 +57,16 @@ proc chordNameAt(b: int): string =
   let p = progression(s)
   p[(b - sectionStart(s)) mod p.len]
 
-proc chordAt(b: int): seq[int] =
-  chord(chordNameAt(b))
+proc chordAt(b: int): seq[int] = chord(chordNameAt(b))
 
-# Динамика: пролог тихо, катаклизм — кульминация, эпилог затухает.
+# Динамика: зарядаемся к «Charge», стихаем в «Lament», поднимаем в «Finale».
 proc dyn(section: string): float =
   case section
-  of "prologue": 0.80
+  of "dawn": 0.80
   of "march": 1.00
-  of "lament": 0.85
-  of "cataclysm": 1.15
-  of "epilogue": 0.75
+  of "charge": 1.18
+  of "lament": 0.82
+  of "finale": 1.10
   else: 1.0
 
 proc velAt(b, base: int): int =
@@ -85,26 +77,43 @@ proc velAt(b, base: int): int =
 # eb5=75, e5=76, f5=77, g5=79, a5=81)
 # ---------------------------------------------------------------------------
 
-let CHANT: Motif = @[
-  bar(n(62, 4)),
-  bar(n(65, 2), n(64, 2)),
-  bar(n(62, 4)),
-  bar(n(60, 4)),
-  bar(n(62, 2), n(65, 2)),
-  bar(n(67, 4)),
-  bar(n(65, 2), n(64, 2)),
-  bar(n(62, 4)),
-  bar(n(69, 4)),
-  bar(n(67, 2), n(65, 2)),
-  bar(n(64, 4)),
-  bar(n(62, 4))]
+# Зов флейты в рассвете — парящий, с длинным дыханием.
+let FLUTE_CALL: Motif = @[
+  bar(n(74, 2), n(76, 2)),
+  bar(n(77, 1), n(76, 1), n(74, 2)),
+  bar(n(72, 2), n(69, 2)),
+  bar(n(70, 3), r(1)),
+  bar(n(74, 2), n(77, 2)),
+  bar(n(79, 1), n(77, 1), n(76, 2)),
+  bar(n(74, 2), n(72, 2)),
+  bar(n(74, 3), r(1))]
 
+# Маршевая тема лютни — волевая, с подъёмом на си♭.
 let MARCH: Motif = @[
-  bar(n(62, 0.75), n(64, 0.25), n(65, 1), n(69, 1), n(67, 1)),
-  bar(n(65, 0.75), n(64, 0.25), n(62, 1), n(60, 2)),
-  bar(n(69, 0.75), n(70, 0.25), n(72, 1), n(70, 1), n(69, 1)),
+  bar(n(62, 0.5), n(64, 0.5), n(65, 1), n(69, 1), n(67, 1)),
+  bar(n(65, 0.5), n(64, 0.5), n(62, 1), n(60, 2)),
+  bar(n(69, 0.5), n(70, 0.5), n(72, 1), n(70, 1), n(69, 1)),
   bar(n(65, 2), n(64, 1), n(62, 1))]
 
+# Разгон волынки: ровные восьмые, «топающий» ход — характeр атаки.
+let CHARGE_8: Motif = @[
+  bar(n(62, 0.5), n(62, 0.5), n(65, 0.5), n(64, 0.5), n(62, 0.5), n(60, 0.5), n(62, 1)),
+  bar(n(67, 0.5), n(65, 0.5), n(64, 0.5), n(62, 0.5), n(60, 0.5), n(62, 0.5), n(64, 1)),
+  bar(n(69, 0.5), n(70, 0.5), n(69, 0.5), n(67, 0.5), n(65, 0.5), n(64, 0.5), n(65, 1)),
+  bar(n(62, 0.5), n(64, 0.5), n(62, 0.5), n(60, 0.5), n(58, 0.5), n(60, 0.5), n(62, 1))]
+
+# Шестнадцатые — «ускорение»: та же тема мельче, ощущение разгона.
+let CHARGE_16: Motif = @[
+  bar(n(62, 0.25), n(62, 0.25), n(65, 0.25), n(64, 0.25), n(62, 0.25), n(60, 0.25),
+      n(62, 0.25), n(64, 0.25), n(65, 0.5), n(64, 0.5), n(62, 1)),
+  bar(n(67, 0.25), n(65, 0.25), n(64, 0.25), n(62, 0.25), n(60, 0.25), n(62, 0.25),
+      n(64, 0.25), n(65, 0.25), n(67, 0.5), n(65, 0.5), n(64, 1)),
+  bar(n(69, 0.25), n(70, 0.25), n(69, 0.25), n(67, 0.25), n(65, 0.25), n(64, 0.25),
+      n(65, 0.25), n(67, 0.25), n(69, 0.5), n(70, 0.5), n(69, 1)),
+  bar(n(62, 0.25), n(64, 0.25), n(62, 0.25), n(60, 0.25), n(58, 0.25), n(60, 0.25),
+      n(62, 0.25), n(64, 0.25), n(62, 0.5), n(60, 0.5), n(62, 1))]
+
+# Плач — высокий, на разрыв.
 let LAMENT: Motif = @[
   bar(n(74, 2), n(72, 2)),
   bar(n(70, 2), n(69, 2)),
@@ -115,158 +124,193 @@ let LAMENT: Motif = @[
   bar(n(72, 2), n(70, 2)),
   bar(n(69, 3), r(1))]
 
+# Финал: хорал-эпилог.
+let FINALE: Motif = @[
+  bar(n(62, 4)),
+  bar(n(69, 2), n(67, 2)),
+  bar(n(65, 2), n(64, 2)),
+  bar(n(62, 4))]
+
 let CADENCE: Motif = @[
   bar(n(81, 2), n(79, 2)),
   bar(n(77, 2), n(76, 2)),
   bar(n(74, 2), n(72, 2)),
   bar(n(74, 3), r(1))]
 
-# ---------------------------------------------------------------------------
-# Партии
-# ---------------------------------------------------------------------------
-
 proc genOrgan(): Part =
-  ## Соборный орган: бурдон (органум-квинта) в прологе/эпилоге, полные
-  ## аккорды и педаль в марше/катаклизме.
+  ## Соборный орган: бурдон (органум) в рассвете, полные аккорды и педаль
+  ## в остальном.
   result = part("choir")
   for b in 1 .. BARS:
     let tones = chordAt(b)
     let sec = sectionOf(b)
     var notes: seq[int]
-    if sec == "prologue" or sec == "epilogue":
+    if sec == "dawn":
       notes = @[tones[0], tones[2]]
     else:
       notes = tones
-    if sec == "march" or sec == "cataclysm":
+    if sec in ["march", "charge", "finale"]:
       notes.insert(tones[0] - 12, 0)
     result.add bar(velAt(b, 74), ch(notes, 4))
 
+
 proc genPiano(): Part =
-  ## Пиано как арфа/колокольчики: разложенные аккорды по разделам.
   result = part("harp")
   for b in 1 .. BARS:
     let tones = chordAt(b)
     let sec = sectionOf(b)
     let pool = tones & @[tones[0] + 12]
     var evs: seq[NoteEvent]
-    if sec == "prologue":
+    if sec == "dawn":
       if b < 5:
         result.add bar(velAt(b, 70), r(4))
         continue
-      for k in [0, 1, 2, 3]:
-        evs.add ch(@[pool[k]], 1)
+      for k in [0, 1, 2, 3]: evs.add ch(@[pool[k]], 1)
     elif sec == "lament":
-      for k in [3, 2, 1, 0]:
-        evs.add ch(@[pool[k]], 1)
-    elif sec == "cataclysm":
-      for k in [0, 1, 2, 3, 2, 1, 0, 2]:
-        evs.add ch(@[pool[k]], 0.5)
-    elif sec == "epilogue":
-      if b < 70:
-        result.add bar(velAt(b, 70), r(4))
-        continue
-      evs.add ch(@[pool[0], pool[1], pool[2]], 4)
-    else:  # march
-      for k in [0, 1, 2, 3, 2, 1, 0, 2]:
-        evs.add ch(@[pool[k]], 0.5)
+      for k in [3, 2, 1, 0]: evs.add ch(@[pool[k]], 1)
+    else:
+      for k in [0, 1, 2, 3, 2, 1, 0, 2]: evs.add ch(@[pool[k]], 0.5)
     result.add bar(velAt(b, 80), evs)
 
 proc genGuitar(): Part =
-  ## Лютня: хорал → марш → плач → напев в верхней октаве (кульминация).
   result = part("lute")
   for b in 1 .. BARS:
     let sec = sectionOf(b)
-    if sec == "prologue":
-      result.add CHANT[b - 1].sameVel(velAt(b, 96))
+    let tones = chordAt(b)
+    if sec == "dawn":
+      result.add bar(velAt(b, 92), r(4))
     elif sec == "march":
       result.add MARCH[(b - sectionStart("march")) mod MARCH.len].sameVel(velAt(b, 102))
+    elif sec == "charge":
+      var evs: seq[NoteEvent]
+      for _ in 0 ..< 8: evs.add ch(@[tones[0], tones[2]], 0.5)
+      result.add bar(velAt(b, 104), evs)
     elif sec == "lament":
-      result.add LAMENT[(b - sectionStart("lament")) mod LAMENT.len].sameVel(velAt(b, 100))
-    elif sec == "cataclysm":
-      let k = b - sectionStart("cataclysm")
-      if k < CHANT.len:
-        # Развитие: хорал звучит октавой выше — регистровая вершина.
-        result.add CHANT[k].transpose(12).sameVel(velAt(b, 110))
-      else:
-        result.add CADENCE[k - CHANT.len].sameVel(velAt(b, 108))
-    else:  # epilogue
-      let k = b - sectionStart("epilogue")
-      if k < 4:
-        result.add CHANT[k].sameVel(velAt(b, 90))
-      else:
-        result.add bar(velAt(b, 88), r(4))
+      result.add bar(velAt(b, 90), r(4))
+    else:
+      result.add FINALE[(b - sectionStart("finale")) mod FINALE.len].sameVel(velAt(b, 100))
 
+proc genFlute(): Part =
+  result = part("flute")
+  for b in 1 .. BARS:
+    let sec = sectionOf(b)
+    if sec == "dawn":
+      result.add FLUTE_CALL[(b - 1) mod FLUTE_CALL.len].sameVel(velAt(b, 96))
+    elif sec == "lament":
+      result.add LAMENT[(b - sectionStart("lament")) mod LAMENT.len].sameVel(velAt(b, 98))
+    elif sec == "finale":
+      let k = b - sectionStart("finale")
+      if k < FLUTE_CALL.len:
+        result.add FLUTE_CALL[k].sameVel(velAt(b, 100))
+      elif k == FLUTE_CALL.len:
+        result.add CADENCE[0].sameVel(velAt(b, 100))
+      else:
+        result.add bar(velAt(b, 96), r(4))
+    else:
+      result.add bar(velAt(b, 90), r(4))
+
+proc genBagpipe(): Part =
+  result = part("pipes")
+  for b in 1 .. BARS:
+    let sec = sectionOf(b)
+    if sec == "charge":
+      let k = b - sectionStart("charge")
+      if k < 8:
+        result.add CHARGE_8[k mod CHARGE_8.len].sameVel(velAt(b, 104))
+      elif k < 14:
+        result.add CHARGE_8[k mod CHARGE_8.len].sameVel(velAt(b, 108))
+      else:
+        result.add CHARGE_16[k mod CHARGE_16.len].sameVel(velAt(b, 110))
+    elif sec == "finale":
+      result.add FINALE[(b - sectionStart("finale")) mod FINALE.len].sameVel(velAt(b, 102))
+    else:
+      result.add bar(velAt(b, 90), r(4))
 
 proc genDrums(): Part =
-  ## Боевые барабаны: тишина в прологе, томы в марше, «сердце» в плаче,
-  ## татаны в катаклизме, удар-точка в эпилоге.
-  let WAR = @[@[36], @[41], @[36, 45], @[41], @[36], @[41], @[36, 45], @[41]]
-  let HEAVY = @[@[36, 49], @[36], @[36, 41], @[36, 45],
-                @[36], @[36, 41], @[36], @[36, 45]]
-  let HEART = @[@[36], @[41], @[36], @[41]]
-
-  proc drumBar(notes: seq[seq[int]]; v: int; crashFirst: bool): Bar =
-    var evs: seq[NoteEvent]
-    for k, nt in notes:
-      evs.add ch(if crashFirst and k == 0: @[36, 49] else: nt, 0.5)
-    bar(v, evs)
-
   result = part("war")
   for b in 1 .. BARS:
     let sec = sectionOf(b)
-    if sec == "prologue":
-      if b == sectionStart("march") - 1:
-        result.add bar(velAt(b, 92), ch(@[36, 41], 4))  # раскат в марш
-      else:
-        result.add bar(velAt(b, 80), r(4))
+    if sec == "dawn":
+      result.add bar(velAt(b, 80), r(4))
     elif sec == "march":
-      var notes = WAR
-      if b mod 4 == 0:  # филл в конце фразы
-        notes = WAR[0 .. 5] & @[@[41], @[45]]
-      result.add drumBar(notes, velAt(b, 100), b == sectionStart("march"))
+      var evs: seq[NoteEvent]
+      let pat = @[@[36], @[41], @[36, 45], @[41], @[36], @[41], @[36, 45], @[41]]
+      for k, nt in pat:
+        if b mod 4 == 0 and k >= 6:
+          evs.add n(38, 0.5)
+        elif b == sectionStart("march") and k == 0:
+          evs.add ch(@[36, 49], 0.5)
+        else:
+          evs.add ch(nt, 0.5)
+      result.add bar(velAt(b, 100), evs)
+    elif sec == "charge":
+      let k = b - sectionStart("charge")
+      var evs: seq[NoteEvent]
+      if k < 8:                       # четверти-томы
+        for nt in [@[36], @[41], @[36, 45], @[41]]: evs.add ch(nt, 1)
+      elif k < 14:                    # восьмые «галоп»
+        for nt in [@[36], @[41], @[36], @[41], @[36, 45], @[41], @[36], @[41]]:
+          evs.add ch(nt, 0.5)
+      else:                           # шестнадцатые — «ускорение»
+        for i in 0 ..< 16:
+          let nt = if i mod 4 == 0: @[36] elif i mod 4 == 2: @[38] else: @[41]
+          evs.add ch(nt, 0.25)
+      if b == sectionStart("charge"): evs[0] = ch(@[36, 49], evs[0].beats)
+      result.add bar(velAt(b, 106), evs)
     elif sec == "lament":
       if b mod 2 == 0:
         var evs: seq[NoteEvent]
-        for nt in HEART:
-          evs.add ch(nt, 1)
+        for nt in [@[36], @[41], @[36], @[41]]: evs.add ch(nt, 1)
         result.add bar(velAt(b, 78), evs)
       else:
         result.add bar(velAt(b, 78), r(4))
-    elif sec == "cataclysm":
-      var notes = HEAVY
-      if b mod 8 == 0:  # том-раскат раз в 8 тактов
-        notes = HEAVY[0 .. 3] & @[@[45], @[41], @[45], @[41]]
-      result.add drumBar(notes, velAt(b, 108), b == sectionStart("cataclysm"))
-    else:  # epilogue
-      if b == sectionStart("epilogue"):
-        result.add bar(velAt(b, 95), ch(@[36, 49], 4))
+    else:  # finale
+      if b == sectionStart("finale"):
+        result.add bar(velAt(b, 108), ch(@[36, 49], 0.5), ch(@[36], 0.5),
+                       n(38, 1), ch(@[42], 1), ch(@[42], 1))
+      elif b == BARS:
+        result.add bar(velAt(b, 112), ch(@[36, 49], 4))
       else:
-        result.add bar(velAt(b, 80), r(4))
-
-# ---------------------------------------------------------------------------
-# Сборка проекта
-# ---------------------------------------------------------------------------
+        var evs: seq[NoteEvent]
+        for nt in [@[36, 42], @[42], @[38, 42], @[42], @[36, 42], @[42], @[38, 42], @[46]]:
+          evs.add ch(nt, 0.5)
+        result.add bar(velAt(b, 104), evs)
 
 proc main() =
   let here = parentDir(currentSourcePath())
-  var arr = arrangement("Cathedral of Ash", tempo = 76.0f32)
+  var arr = arrangement("Cathedral of Ash", tempo = 100.0f32)
+  # Шесть партий в сумме дают запас меньше нуля: держим -8 dB на мастере,
+  # чтобы клиппинга не было даже в кульминации (проверяет инспектор #290).
+  arr.mixLevel = -8.0f32
 
-  var guitar = instrument("euterpia.guitar", "Guitar", "lute")
-  guitar.setParam("level", -4.0f32)
-  guitar.setParam("tone", 0.60f32)
-  guitar.setParam("pan", -0.20f32)
-  arr.add(guitar, genGuitar())
+  var organ = instrument("euterpia.organ", "Organ", "choir")
+  organ.setParam("level", -6.0f32)
+  organ.setParam("bars", 0.62f32)
+  arr.add(organ, genOrgan())
 
   var piano = instrument("euterpia.piano", "Piano", "harp")
   piano.setParam("level", -5.0f32)
   piano.setParam("tone", 0.50f32)
-  piano.setParam("pan", 0.22f32)
+  piano.setParam("pan", 0.20f32)
   arr.add(piano, genPiano())
 
-  var organ = instrument("euterpia.organ", "Organ", "choir")
-  organ.setParam("level", -5.0f32)
-  organ.setParam("bars", 0.62f32)
-  arr.add(organ, genOrgan())
+  var guitar = instrument("euterpia.guitar", "Guitar", "lute")
+  guitar.setParam("level", -4.0f32)
+  guitar.setParam("tone", 0.62f32)
+  guitar.setParam("pan", -0.20f32)
+  arr.add(guitar, genGuitar())
+
+  var flute = instrument("euterpia.flute", "Flute", "flute")
+  flute.setParam("level", -4.0f32)
+  flute.setParam("breath", 0.35f32)
+  flute.setParam("pan", 0.15f32)
+  arr.add(flute, genFlute())
+
+  var pipes = instrument("euterpia.bagpipe", "Bagpipe", "pipes")
+  pipes.setParam("level", -7.0f32)
+  pipes.setParam("drone", 0.32f32)
+  pipes.setParam("droneFreq", 73.42f32)   # D2 — бурдон в тональности
+  arr.add(pipes, genBagpipe())
 
   var drums = instrument("euterpia.drums", "Drums", "war")
   drums.setParam("level", -4.0f32)
@@ -276,6 +320,12 @@ proc main() =
   let proj = here / "ensemble.eut"
   arr.writeProject(proj)
   echo "wrote ", proj
+
+  let rr = arr.render(here / "ensemble.wav")
+  if rr.ok:
+    echo "rendered ", rr.path, " (", rr.seconds, " s)"
+  else:
+    echo "render error: ", rr.error
 
 when isMainModule:
   main()

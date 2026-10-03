@@ -20,7 +20,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | MIDI | ✅ `midi_api` + RtMidi-адаптер, SMF-кодек в Commons |
 | Входной тракт и запись | ✅ вход → ноды/рекордер, RT-кольцо → worker → WAV |
 | Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
-| DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + 4 инструмента (`organ`, `piano`, `guitar`, `drums`) + нотный секвенсор `notes`; C-ядра с SIMD-дисплеями (#274) |
+| DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + 6 инструментов (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`) + нотный секвенсор `notes`; C-ядра с SIMD-дисплеями (#274, #301) |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
 | Тесты | ✅ 300+ unit-проверок + интеграционный набор; Core/Commons/инструменты покрыты (#57, #274, #290) |
 | CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290) и настройки окружения `config` (#258), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; `transport`, `play`, записи, плагинов и справочник — впереди |

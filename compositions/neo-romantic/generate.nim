@@ -15,6 +15,7 @@ import std/[math, os]
 
 import compose/score
 import compose/song
+import compose/engine
 
 const BARS = 64
 
@@ -225,6 +226,12 @@ proc main() =
   let proj = here / "ensemble.eut"
   arr.writeProject(proj)
   echo "wrote ", proj
+
+  let rr = arr.render(here / "ensemble.wav")
+  if rr.ok:
+    echo "rendered ", rr.path, " (", rr.seconds, " s)"
+  else:
+    echo "render error: ", rr.error
 
 when isMainModule:
   main()
