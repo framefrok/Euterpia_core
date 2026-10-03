@@ -35,6 +35,7 @@ import logger
 import audio_backend_miniaudio
 
 import context
+import checks
 
 # =============================================================================
 # SIMD-дисплей C-ядер
@@ -52,6 +53,10 @@ proc eutCliSimdDispatch(): cint {.importc: "eut_cli_simd_dispatch", nodecl.}
 # =============================================================================
 # Модель отчёта
 # =============================================================================
+#
+# Типы проверок, их сериализация и общий вид секций живут в `cli/checks.nim`:
+# их делит с `doctor` команда `project validate`, поэтому схема `--json` и
+# человекочитаемый вид не могут разойтись между двумя диагностиками.
 
 const
   MaxDevicesReported = 8
@@ -66,47 +71,6 @@ const
     when defined(gcOrc): "orc"
     elif defined(gcArc): "arc"
     else: "refc"
-
-type
-  CheckStatus* = enum
-    csOk, csWarn, csFail
-
-  Check* = object
-    id*: string
-    title*: string
-    status*: CheckStatus
-    lines*: seq[string]
-    advice*: string
-    body*: JsonNode
-
-  Section* = object
-    id*: string
-    title*: string
-    checks*: seq[Check]
-
-proc statusName*(s: CheckStatus): string =
-  case s
-  of csOk: "ok"
-  of csWarn: "warn"
-  of csFail: "fail"
-
-proc worst*(a, b: CheckStatus): CheckStatus =
-  if ord(a) >= ord(b): a else: b
-
-proc sectionStatus*(s: Section): CheckStatus =
-  result = csOk
-  for c in s.checks:
-    result = worst(result, c.status)
-
-proc mkCheck(
-  id, title: string;
-  status: CheckStatus;
-  lines: seq[string] = @[];
-  advice: string = "";
-  body: JsonNode = nil
-): Check =
-  Check(id: id, title: title, status: status, lines: lines,
-        advice: advice, body: body)
 
 # =============================================================================
 # Пробы внешних библиотек
@@ -405,19 +369,13 @@ proc csrcSection*(): Section =
 # Отчёт
 # =============================================================================
 
-proc renderHuman(sections: seq[Section]; verbose: bool): seq[string] =
+proc renderDoctor(sections: seq[Section]; verbose: bool): seq[string] =
+  ## Заголовок отчёта принадлежит команде, вид секций — общий (`checks`).
   result.add CliName & " doctor — самодиагностика окружения"
   result.add CliName & " " & EuterpiaVersion & "; Nim " & NimVersion & "; " &
              hostOS & "/" & hostCPU & "; сборка: " & BuildKind
   result.add ""
-  for s in sections:
-    result.add "[" & statusName(sectionStatus(s)) & "] " & s.title
-    for c in s.checks:
-      result.add "    [" & statusName(c.status) & "] " & c.title
-      for line in c.lines:
-        result.add "        " & line
-      if c.advice.len > 0 and (c.status != csOk or verbose):
-        result.add "        рекомендация: " & c.advice
+  result.add renderHuman(sections, verbose)
 
 proc runDoctor*(ctx: var Ctx; args: seq[string]): Report =
   ## `euterpia doctor [--json]`. Аудиоустройство НЕ открывается: адаптер
@@ -437,45 +395,25 @@ proc runDoctor*(ctx: var Ctx; args: seq[string]): Report =
     csrcSection(),
   ]
 
-  var okCount, warnCount, failCount = 0
+  # Сериализация секций и подсчёт — общие с `project validate` (`cli/checks`):
+  # сводка в `--json` и код возврата считаются одним обходом проверок.
   var sectionsJson = newJArray()
   for s in sections:
-    var sectionJson = newJObject()
-    sectionJson["id"] = %s.id
-    sectionJson["title"] = %s.title
-    sectionJson["status"] = %statusName(sectionStatus(s))
-    var checksJson = newJArray()
-    for c in s.checks:
-      case c.status
-      of csOk: inc okCount
-      of csWarn: inc warnCount
-      of csFail: inc failCount
-      var checkJson = newJObject()
-      checkJson["id"] = %c.id
-      checkJson["title"] = %c.title
-      checkJson["status"] = %statusName(c.status)
-      var details = newJArray()
-      for line in c.lines:
-        details.add %line
-      checkJson["details"] = details
-      checkJson["advice"] = %c.advice
-      if c.body != nil:
-        checkJson["facts"] = c.body
-      checksJson.add checkJson
-    sectionJson["checks"] = checksJson
-    sectionsJson.add sectionJson
+    sectionsJson.add sectionJson(s)
+  let total = counts(sections)
 
   var body = newJObject()
   body["sections"] = sectionsJson
-  body["summary"] = %*{"ok": okCount, "warn": warnCount, "fail": failCount}
+  body["summary"] = summaryJson(sections)
 
-  var lines = renderHuman(sections, ctx.verbose)
+  var lines = renderDoctor(sections, ctx.verbose)
   lines.add ""
-  lines.add "Итог: " & $okCount & " ok, " & $warnCount & " warn, " & $failCount & " fail"
+  lines.add "Итог: " & $total.ok & " ok, " & $total.warn & " warn, " &
+            $total.fail & " fail"
 
-  if failCount > 0:
+  if total.fail > 0:
     errReport(exEnv, "env",
-      "критичные проверки не пройдены: " & $failCount,
+      "критичные проверки не пройдены: " & $total.fail,
       hint = "устраните рекомендации выше (машинный вид: `euterpia doctor --json`)",
       lines = lines, body = body)
   else:

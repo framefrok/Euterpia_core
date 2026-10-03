@@ -207,6 +207,19 @@ jobs:
           fi
           echo "ok: CLI линкует только статически собранные адаптеры"
 
+      - name: Команды проекта не создают движок и не открывают устройство (#89)
+        run: |
+          # Критерий #89 «команды не создают движок и не открывают устройство»
+          # проверяется статически: init/project — чистый I/O над форматом
+          # проекта (core/project.nim). Импорт движка, планировщика или
+          # реестра бэкендов означал бы, что команда проекта умеет ходить в
+          # устройство в обход backend manager (§20).
+          if grep -nE "import[[:space:]].*(audio_engine|dsp_scheduler|backend_manager|backend_registry|audio_backend_api|audio_recorder)" cli/cmd_project.nim; then
+            echo "::error::команды проекта тянут движок или устройства (#89, §20)"
+            exit 1
+          fi
+          echo "ok: init/project работают только с форматом проекта"
+
       - name: Core не знает о формате плагинов (plugin_api, #29)
         run: |
           if grep -rn "clap\|Clap" core/ nodes/sdk/; then

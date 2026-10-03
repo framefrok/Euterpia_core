@@ -23,7 +23,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
 | Тесты | ✅ 300 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
-| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), human/`--json`, exit-коды 0/1/2/3, джоба `cli` в CI; команды проекта, графа, `transport`, `render`, `play`, записи, плагинов и справочник — впереди |
+| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259) и команды проекта `init`/`project show|set|validate` (#89), human/`--json`, exit-коды 0/1/2/3, джоба `cli` в CI; команды графа, `transport`, `render`, `play`, записи, плагинов и справочник — впереди |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
 | Надёжность и диагностика | 🟡 план линии v0.5 — библиотека тестов ядра (golden, Node Contract Suite, fault injection, санитайзеры) и «отказ вместо краха»: модель ошибок, чёрный ящик, crash guard, containment нод и плагинов, изоляция скана (#115) |
 | Текущее ядро (долг) | ✅ v0.2 закрыта: планировщик (#9), realtime-guard (#11), macOS CI (#42), CI-долг (#249/#252/#254/#255); остаточный долг #5 — в плане |
@@ -203,7 +203,10 @@ CLI — полноценный интерфейс управления (MANIFEST
 - [x] #88 каркас: точка входа, диспетчер команд, human/`--json`, логгер,
       exit-коды, CI-smoke — ✅ сделано: `cli.nim` + `cli/`, `nimble cli`,
       `nimble cliSmoke`, джоба `cli` и guard'ы архитектуры в CI
-- [ ] #89 проект: `init`, `project show/set/validate`
+- [x] #89 проект: `init`, `project show/set/validate` — ✅ сделано: метаданные,
+      граф, секвенсор и состояния плагинов в human и `--json`, атомарная
+      запись (tmp + rename), `--dry-run`, diff при `set`, `validate` с секциями
+      file/format/metadata/graph/sequencer/plugins и кодом 1 на провал
 - [ ] #90 граф: `node list/add/rm`, `connect/disconnect`, `param set/get`,
       `graph check`
 - [ ] #257 транспорт: `transport tempo/meter/position/play/stop/seek/loop`
@@ -457,8 +460,26 @@ realtime-дисциплина и сборка. Milestone закрыт целик
   сторонних DSP-нод, не трогая граф и планировщик.
 - **CLI строится поверх готовых контрактов** — каркас (`cli.nim` + `cli/`)
   использует только публичные API ядра (контракты бэкендов, `logger`, проект),
-  ядро при этом не меняется (MANIFEST §89). `editor.nim` ещё пуст, и добавление
-  GUI ядро тоже не затронет.
+  ядро при этом не меняется (MANIFEST §89). Команды проекта — чистый I/O над
+  форматом (`core/project.nim`): движок не создаётся, устройство не
+  открывается. `editor.nim` ещё пуст, и добавление GUI ядро тоже не затронет.
+
+### Команды проекта (#89)
+
+```bash
+euterpia init demo.eut --tempo 140 --ts 3/4 --name Demo   # создать проект
+euterpia project show demo.eut                            # что лежит в файле
+euterpia project set demo.eut tempo 100                   # изменить одно поле
+euterpia project validate demo.eut                        # проверить целостность
+euterpia --json project show demo.eut                     # то же машинночитаемо
+```
+
+Файл по умолчанию — `project.eut`, поэтому `euterpia init` и
+`euterpia project set tempo 140` работают как в примере MANIFEST §19.
+`project set` пишет атомарно (временный файл + rename), не перезаписывает
+повреждённый проект без разбора и печатает diff «было → стало»; `init` не
+затирает существующий файл без `--force`. Полный справочник команд, JSON-схемы
+и сценарии — в #96.
 
 ## Сборка и тесты
 
@@ -480,7 +501,7 @@ nimble unit            # только unit-тесты DSP и контракто�
 nimble integration     # интеграционный тест ядра
 nimble buildRelease    # release-сборка с LTO
 nimble cli             # сборка CLI: build/euterpia (#88)
-nimble cliSmoke        # CLI smoke: точка входа, doctor и completion (#88, #105, #259)
+nimble cliSmoke        # CLI smoke: точка входа, doctor, completion и команды проекта (#88, #89, #105, #259)
 nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адаптера (#31)
 nimble ubsan           # unit-набор под UndefinedBehaviorSanitizer (#13)
 nimble asan            # unit-набор под AddressSanitizer (#13)
@@ -495,7 +516,9 @@ nimble clapMock        # сборка mock CLAP-плагина + сквозно�
 
 `nimble cliSmoke` собирает CLI и запускает чёрный smoke-тест: коды
 возврата, разделение stdout/stderr, детерминизм вывода, машинный формат
-`--json`, секции `doctor` и кандидаты автодополнения. `euterpia` линкует
+`--json`, секции `doctor`, кандидаты автодополнения и команды проекта
+(`init`/`project show|set|validate`, включая «повреждённый файл не
+перезаписан»). `euterpia` линкует
 ТОЛЬКО статически собираемые адаптеры (miniaudio): `{.dynlib.}`-адаптеры
 (PortAudio, RtMidi) резолвят символы внешней библиотеки на старте процесса,
 поэтому их отсутствие уронило бы CLI ещё до `main()`. Именно поэтому
