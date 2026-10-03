@@ -19,6 +19,8 @@
 
 import std/os
 import context
+import config
+import logger
 import registry
 import commands
 
@@ -39,12 +41,22 @@ proc stripGlobals(
         continue
       if token == "--json":
         ctx.mode = omJson
+        ctx.modeExplicit = true
+        continue
+      if token == "--human":
+        # Ключ argv сильнее настройки `output` (#258).
+        ctx.mode = omHuman
+        ctx.modeExplicit = true
         continue
       if token == "--verbose" or token == "-v":
         ctx.verbose = true
+        ctx.logLevel = llDebug
+        ctx.logLevelExplicit = true
         continue
       if token == "--quiet" or token == "-q":
         ctx.quiet = true
+        ctx.logLevel = llError
+        ctx.logLevelExplicit = true
         continue
       if token == "--dry-run":
         ctx.dryRun = true
@@ -84,14 +96,25 @@ proc dispatch(ctx: var Ctx): int =
       continue
     if token == "--json":
       ctx.mode = omJson
+      ctx.modeExplicit = true
+      inc i
+      continue
+    if token == "--human":
+      # Ключ argv сильнее настройки `output` (#258).
+      ctx.mode = omHuman
+      ctx.modeExplicit = true
       inc i
       continue
     if token == "--verbose" or token == "-v":
       ctx.verbose = true
+      ctx.logLevel = llDebug
+      ctx.logLevelExplicit = true
       inc i
       continue
     if token == "--quiet" or token == "-q":
       ctx.quiet = true
+      ctx.logLevel = llError
+      ctx.logLevelExplicit = true
       inc i
       continue
     if token == "--dry-run":
@@ -147,12 +170,24 @@ proc dispatch(ctx: var Ctx): int =
   emit(ctx, rep)
   ord(rep.code)
 
+proc loadSettings(ctx: var Ctx) =
+  ## Настройки читаются ОДИН раз при старте и задают УМОЛЧАНИЯ; ключи argv
+  ## разбираются позже и потому сильнее (приоритет #258). Предупреждения о
+  ## конфиге идут в stderr: stdout — результат команды (§21).
+  ctx.config = loadConfig()
+  for warning in ctx.config.warnings:
+    cliWarn(CliName & ": конфиг: " & warning)
+  ctx.mode =
+    if ctx.config.entry("output").value == "json": omJson else: omHuman
+  ctx.logLevel = logLevelFromName(ctx.config.entry("logLevel").value)
+
 proc main*(): int =
   ## Точка входа. Единственное место, где исключение превращается в код
   ## возврата: необработанная ошибка CLI — это баг (код 3), а не ошибка
   ## данных пользователя (код 1).
-  var ctx = Ctx(mode: omHuman)
+  var ctx = Ctx(mode: omHuman, logLevel: llWarn)
   try:
+    loadSettings(ctx)
     return dispatch(ctx)
   except CatchableError as e:
     let rep = errReport(exPanic, "panic", "внутренняя ошибка CLI: " & e.msg,

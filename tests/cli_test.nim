@@ -15,13 +15,19 @@
 # Путь к бинарю: `build/euterpia` (или `EUTERPIA_CLI` в окружении).
 # Запуск: nimble cliSmoke (собирает CLI, затем этот тест).
 
-import std/[unittest, os, osproc, strutils, json, streams, algorithm]
+import std/[unittest, os, osproc, strutils, json, streams, algorithm, strtabs]
 import euterpia_version
 
 const
   DefaultCliPath =
     when defined(windows): "build/euterpia.exe"
     else: "build/euterpia"
+
+  ConfigEnvPrefix = "EUTERPIA_"
+    ## Префикс переменных окружения настроек (issue #258). Продублирован
+    ## строкой: `cli/` не входит в путь сборки тестов, а сверять в тесте
+    ## нужно именно префикс, которым фильтруется окружение.
+  ConfigPathEnv = "EUTERPIA_CONFIG"
 
 type
   RunResult* = object
@@ -33,8 +39,30 @@ let cliPath =
     let fromEnv = getEnv("EUTERPIA_CLI")
     if fromEnv.len > 0: fromEnv else: DefaultCliPath
 
-proc runCli(args: openArray[string]): RunResult =
-  let process = startProcess(cliPath, args = @args, options = {})
+# Каталог настроек для тестов: реальный конфиг разработчика не должен влиять
+# на suite (и наоборот) — иначе «зелёный локально» ничего не значит (#258).
+let configSandbox = getTempDir() / "euterpia_cli_config_home"
+
+proc cliEnv(overrides: seq[(string, string)] = @[]): StringTableRef =
+  ## Окружение для запуска CLI: копия текущего МИНУС все `EUTERPIA_*`
+  ## (чтобы машина разработчика не подмешивала настройки), плюс песочница
+  ## для каталога настроек, плюс явные переопределения теста.
+  result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    if key.startsWith(ConfigEnvPrefix) or key == "XDG_CONFIG_HOME" or
+       key == "APPDATA":
+      continue
+    result[key] = value
+  result["XDG_CONFIG_HOME"] = configSandbox
+  result["APPDATA"] = configSandbox
+  result["HOME"] = configSandbox
+  for item in overrides:
+    result[item[0]] = item[1]
+
+proc runCli(args: openArray[string];
+            env: seq[(string, string)] = @[]): RunResult =
+  let process = startProcess(cliPath, args = @args, env = cliEnv(env),
+                             options = {})
   result.output = process.outputStream.readAll()
   result.errput = process.errorStream.readAll()
   discard process.waitForExit()
@@ -70,13 +98,14 @@ proc machineCommandNames(): seq[string] =
 
 let cliAbsPath = absolutePath(cliPath)
 
-proc runCliIn(dir: string; args: openArray[string]): RunResult =
+proc runCliIn(dir: string; args: openArray[string];
+              env: seq[(string, string)] = @[]): RunResult =
   ## Запуск CLI с другим рабочим каталогом: команды проекта умеют работать
   ## с файлом по умолчанию (`project.eut`), и это поведение проверяется
   ## только из каталога, где такого файла нет «под ногами» у теста.
   ## Путь к бинарю абсолютный: относительный сломался бы после смены каталога.
   let process = startProcess(cliAbsPath, workingDir = dir, args = @args,
-                             options = {})
+                             env = cliEnv(env), options = {})
   result.output = process.outputStream.readAll()
   result.errput = process.errorStream.readAll()
   discard process.waitForExit()
@@ -580,4 +609,220 @@ suite "CLI: проект — init/show/set/validate (#89)":
     for sub in machine["subcommands"]:
       subs.add sub.getStr
     check subs == @["show", "set", "validate"]
+
+# =============================================================================
+# #258: настройки окружения
+# =============================================================================
+
+suite "CLI: настройки окружения — config (#258)":
+  let dir = getTempDir() / "euterpia_cli_config_cases"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  if dirExists(configSandbox):
+    removeDir(configSandbox)
+  defer:
+    removeDir(dir)
+    if dirExists(configSandbox):
+      removeDir(configSandbox)
+
+  test "config path указывает на каталог настроек из окружения":
+    let machine = runCli(["config", "path", "--json"])
+    check machine.code == 0
+    check machine.output.count('\n') == 1
+    let node = parseJson(machine.output)
+    check node["path"].getStr == configSandbox / "euterpia" / "config.json"
+    check node["exists"].getBool == false
+    check "файла нет" in runCli(["config", "path"]).output
+
+  test "config list показывает все ключи и источник каждого значения":
+    let human = runCli(["config", "list"])
+    check human.code == 0
+    check human.errput.len == 0
+    for key in ["backend", "device", "sampleRate", "blockSize", "grid",
+                "pluginPaths", "cacheDir", "recordDir", "output", "logLevel"]:
+      check key & " = " in human.output
+    check "backend = miniaudio (default)" in human.output
+    check "sampleRate = 48000 (default)" in human.output
+    check "device = (не задано) (none)" in human.output
+
+    let machine = runCli(["config", "list", "--json"])
+    check machine.code == 0
+    check machine.output.count('\n') == 1
+    let node = parseJson(machine.output)
+    check node["schema"].getInt == 1
+    check node["exists"].getBool == false
+    var keys: seq[string] = @[]
+    for item in node["entries"]:
+      keys.add item["key"].getStr
+      check item["source"].getStr in ["argv", "env", "file", "default", "none"]
+    check keys.len == 10
+    check "sampleRate" in keys
+
+  test "config get без ключа повторяет list, с ключом — одно значение":
+    check "output = human (default)" in runCli(["config", "get"]).output
+
+    # `--json` в этом запуске сам является источником argv для ключа `output`:
+    # команда не врёт о том, почему вывод машинный, а не как в настройках (#258).
+    let one = parseJson(runCli(["config", "get", "output", "--json"]).output)
+    check one["key"].getStr == "output"
+    check one["value"].getStr == "json"
+    check one["source"].getStr == "argv"
+
+    let unknown = runCli(["config", "get", "bogus"])
+    check unknown.code == 1
+    check "ключи:" in unknown.errput
+    check runCli(["config"]).code == 1
+    check runCli(["config", "frob"]).code == 1
+    check runCli(["config", "path", "extra"]).code == 1
+
+  test "config set пишет типизированный файл и отвергает мусор":
+    let path = dir / "set.json"
+    let env = @[(ConfigPathEnv, path)]
+
+    check runCli(["config", "set", "sampleRate", "44100"], env).code == 0
+    check fileExists(path)
+    let onDisk = parseJson(readFile(path))
+    check onDisk["version"].getInt == 1
+    check onDisk["sampleRate"].getInt == 44100   # число, а не строка
+
+    check runCli(["config", "set", "pluginPaths",
+                  dir / "p1" & $PathSep & dir / "p2"], env).code == 0
+    let withPaths = parseJson(readFile(path))
+    check withPaths["pluginPaths"].len == 2
+    check withPaths["pluginPaths"][0].getStr == dir / "p1"
+
+    let got = parseJson(
+      runCli(["config", "get", "sampleRate", "--json"], env).output)
+    check got["value"].getStr == "44100"
+    check got["source"].getStr == "file"
+
+    # Неверные значения не пишутся: `set` валидирует тем же кодом, что и чтение.
+    let before = readFile(path)
+    for bad in [@["sampleRate", "0"], @["sampleRate", "abc"],
+                @["blockSize", "99999"], @["output", "yaml"],
+                @["backend", "nosuch"], @["bogus", "1"]]:
+      let r = runCli(@["config", "set"] & bad, env)
+      check r.code == 1
+      check r.errput.len > 0
+    check readFile(path) == before
+    check runCli(["config", "set", "sampleRate"], env).code == 1
+
+  test "config set --dry-run показывает план и не пишет файл":
+    let path = dir / "dry.json"
+    let env = @[(ConfigPathEnv, path)]
+    let r = runCli(["config", "set", "tempo", "1"], env)   # нет такого ключа
+    check r.code == 1
+    check not fileExists(path)
+
+    let dry = runCli(["config", "set", "output", "json", "--dry-run"], env)
+    check dry.code == 0
+    check "не записан" in dry.output
+    check not fileExists(path)
+
+  test "приоритет: argv > env > файл > умолчание":
+    let path = dir / "prio.json"
+    let env = @[(ConfigPathEnv, path)]
+    check runCli(["config", "set", "sampleRate", "44100"], env).code == 0
+
+    let fromFile = parseJson(
+      runCli(["config", "get", "sampleRate", "--json"], env).output)
+    check fromFile["value"].getStr == "44100"
+    check fromFile["source"].getStr == "file"
+
+    # env сильнее файла
+    let fromEnv = parseJson(runCli(["config", "get", "sampleRate", "--json"],
+      env & @[("EUTERPIA_SAMPLE_RATE", "96000")]).output)
+    check fromEnv["value"].getStr == "96000"
+    check fromEnv["source"].getStr == "env"
+
+    # argv сильнее файла: `--human` и `--json` перекрывают output
+    check runCli(["config", "set", "output", "json"], env).code == 0
+    check "output = human (argv)" in
+          runCli(["config", "get", "output", "--human"], env).output
+    let argvJson = parseJson(
+      runCli(["config", "get", "output", "--json"], env).output)
+    check argvJson["value"].getStr == "json"
+    check argvJson["source"].getStr == "argv"
+
+    # -v перекрывает logLevel
+    let verbose = parseJson(
+      runCli(["config", "get", "logLevel", "--json", "-v"], env).output)
+    check verbose["value"].getStr == "debug"
+    check verbose["source"].getStr == "argv"
+
+  test "битый и неверный конфиг — предупреждение, команда работает":
+    let path = dir / "broken.json"
+    let env = @[(ConfigPathEnv, path)]
+    writeFile(path, "не json вовсе")
+
+    let human = runCli(["version"], env)
+    check human.code == 0
+    check human.output.strip() == "euterpia " & EuterpiaVersion
+    check "конфиг" in human.errput         # предупреждение идёт в stderr
+
+    let machine = runCli(["version", "--json"], env)
+    check machine.code == 0
+    check machine.output.count('\n') == 1
+    check parseJson(machine.output)["ok"].getBool
+
+    # Семантически неверное значение: работаем на источнике ниже, и это видно.
+    writeFile(path, """{"sampleRate": -5}""")
+    let bad = parseJson(
+      runCli(["config", "get", "sampleRate", "--json"], env).output)
+    check bad["value"].getStr == "48000"
+    check bad["source"].getStr == "default"
+    check "используется источник ниже" in
+          runCli(["config", "get", "sampleRate"], env).errput
+
+  test "config unset возвращает приоритет источнику ниже":
+    let path = dir / "unset.json"
+    let env = @[(ConfigPathEnv, path)]
+    check runCli(["config", "set", "output", "json"], env).code == 0
+
+    let removed = runCli(["config", "unset", "output", "--json"], env)
+    check removed.code == 0
+    let node = parseJson(removed.output)
+    check node["removed"].getBool
+    check node["value"].getStr == "human"
+    check node["source"].getStr == "default"
+    check not parseJson(readFile(path)).hasKey("output")
+
+    # Повторный unset идемпотентен, неизвестный ключ — ошибка данных.
+    let again = runCli(["config", "unset", "output"], env)
+    check again.code == 0
+    check "не задан" in again.output
+    check runCli(["config", "unset", "bogus"], env).code == 1
+
+  test "настройка влияет на команды: output=json перекрывается --human":
+    let path = dir / "effect.json"
+    let env = @[(ConfigPathEnv, path)]
+    check runCli(["config", "set", "output", "json"], env).code == 0
+
+    let asJson = runCli(["version"], env)
+    check asJson.code == 0
+    check asJson.output.count('\n') == 1
+    check parseJson(asJson.output)["command"].getStr == "version"
+
+    let asHuman = runCli(["version", "--human"], env)
+    check asHuman.code == 0
+    check asHuman.output.strip() == "euterpia " & EuterpiaVersion
+
+  test "EUTERPIA_CONFIG переопределяет путь; незнакомые ключи сохраняются":
+    let custom = dir / "custom" / "eut.json"
+    let env = @[(ConfigPathEnv, custom)]
+    check parseJson(runCli(["config", "path", "--json"], env).output)["path"].getStr ==
+          custom
+    check runCli(["config", "set", "backend", "miniaudio"], env).code == 0
+    check fileExists(custom)
+
+    # Файл мог быть записан более новой сборкой: её ключи не теряются (§59).
+    let future = dir / "future.json"
+    let futureEnv = @[(ConfigPathEnv, future)]
+    writeFile(future, """{"version": 1, "futureKey": {"a": 1}}""")
+    check runCli(["config", "set", "logLevel", "debug"], futureEnv).code == 0
+    let onDisk = parseJson(readFile(future))
+    check onDisk.hasKey("futureKey")
+    check onDisk["futureKey"]["a"].getInt == 1
+    check onDisk["logLevel"].getStr == "debug"
 

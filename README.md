@@ -23,7 +23,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | DSP-ноды | ✅ 9 встроенных (io/input, gain, pan, biquad, svf, delay, compressor, oscillator, noise) + C-ядра с SIMD-дисплеями |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
 | Тесты | ✅ 300 unit-проверок + интеграционный набор; Core/Commons покрыты (#57) |
-| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259) и команды проекта `init`/`project show|set|validate` (#89), human/`--json`, exit-коды 0/1/2/3, джоба `cli` в CI; команды графа, `transport`, `render`, `play`, записи, плагинов и справочник — впереди |
+| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89) и настройки окружения `config` (#258), human/`--json`, exit-коды 0/1/2/3, джоба `cli` в CI; команды графа, `transport`, `render`, `play`, записи, плагинов и справочник — впереди |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
 | Надёжность и диагностика | 🟡 план линии v0.5 — библиотека тестов ядра (golden, Node Contract Suite, fault injection, санитайзеры) и «отказ вместо краха»: модель ошибок, чёрный ящик, crash guard, containment нод и плагинов, изоляция скана (#115) |
 | Текущее ядро (долг) | ✅ v0.2 закрыта: планировщик (#9), realtime-guard (#11), macOS CI (#42), CI-долг (#249/#252/#254/#255); остаточный долг #5 — в плане |
@@ -225,7 +225,10 @@ CLI — полноценный интерфейс управления (MANIFEST
       build/audio/midi/plugins/fs/csrc, human и `--json`, exit 0/2
 - [x] #259 автодополнение оболочки — ✅ сделано: `completion bash|zsh|fish`
       и служебная `__complete` (кандидаты — из реестра команд)
-- [ ] #258 `config` (умолчания окружения); #260 `plugin validate`
+- [x] #258 `config` (умолчания окружения) — ✅ сделано: `config
+      list/get/set/unset/path`, приоритет argv > env (`EUTERPIA_*`) > файл >
+      умолчание, источник значения в выводе, битый конфиг — предупреждение;
+      остаётся #260 `plugin validate`
 - [ ] #87 sequencer player (Nodes) — зависимость: клипы проекта пока не
       попадают в граф
 
@@ -481,6 +484,44 @@ euterpia --json project show demo.eut                     # то же машин
 затирает существующий файл без `--force`. Полный справочник команд, JSON-схемы
 и сценарии — в #96.
 
+### Настройки окружения (#258)
+
+```bash
+euterpia config path                            # где CLI ищет настройки
+euterpia config list                            # все значения и их источник
+euterpia config get sampleRate                  # одно значение + источник
+euterpia config set output json                 # машиночитаемый вывод по умолчанию
+euterpia config set pluginPaths /opt/clap:$HOME/.clap
+euterpia config unset output                    # вернуть приоритет умолчанию
+```
+
+Приоритет значения: **argv > env > файл > умолчание CLI**. Источник печатается
+рядом со значением (`argv`, `env`, `file`, `default`, `none`), поэтому вопрос
+«почему 48 кГц» не требует чтения документации. Файл по умолчанию —
+`$XDG_CONFIG_HOME/euterpia/config.json` (macOS: `~/Library/Application
+Support/euterpia/config.json`, Windows: `%APPDATA%\euterpia\config.json`);
+путь переопределяется `EUTERPIA_CONFIG` — это же используют тесты, чтобы не
+трогать домашний каталог.
+
+| Ключ | Переменная окружения | Смысл |
+|---|---|---|
+| `backend` | `EUTERPIA_BACKEND` | аудио-бэкенд живого режима (#92); проверяется по доступным на машине |
+| `device` | `EUTERPIA_DEVICE` | устройство по имени; пусто — устройство по умолчанию (#92) |
+| `sampleRate` | `EUTERPIA_SAMPLE_RATE` | частота дискретизации проекта, Гц |
+| `blockSize` | `EUTERPIA_BLOCK_SIZE` | размер блока, кадров (≤ `MaxBlockSize` ядра) |
+| `grid` | `EUTERPIA_GRID` | шаг сетки в тиках для команд редактирования (#111, #114) |
+| `pluginPaths` | `EUTERPIA_PLUGIN_PATHS` | каталоги поиска плагинов через разделитель пути (#95) |
+| `cacheDir` | `EUTERPIA_CACHE_DIR` | каталог кэша (пики, снимки) |
+| `recordDir` | `EUTERPIA_RECORD_DIR` | каталог записей (#94) |
+| `output` | `EUTERPIA_OUTPUT` | `human` или `json`; флаги `--json`/`--human` сильнее |
+| `logLevel` | `EUTERPIA_LOG_LEVEL` | `error`/`warn`/`info`/`debug`; `-q`/`-v` сильнее |
+
+`config set` проверяет значение тем же кодом, что и чтение файла, и пишет файл
+атомарно (tmp + rename); повторная запись того же значения файл не трогает.
+Битый или семантически неверный конфиг — не отказ: причина уходит
+предупреждением в stderr, а команда работает на источнике ниже по приоритету
+(важно для агентских прогонов, §21).
+
 ## Сборка и тесты
 
 Требования: **Nim >= 2.0.0** (проверено на 2.2.12).
@@ -501,7 +542,7 @@ nimble unit            # только unit-тесты DSP и контракто�
 nimble integration     # интеграционный тест ядра
 nimble buildRelease    # release-сборка с LTO
 nimble cli             # сборка CLI: build/euterpia (#88)
-nimble cliSmoke        # CLI smoke: точка входа, doctor, completion и команды проекта (#88, #89, #105, #259)
+nimble cliSmoke        # CLI smoke: точка входа, doctor, completion, проект и настройки (#88, #89, #105, #258, #259)
 nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адаптера (#31)
 nimble ubsan           # unit-набор под UndefinedBehaviorSanitizer (#13)
 nimble asan            # unit-набор под AddressSanitizer (#13)
@@ -516,9 +557,10 @@ nimble clapMock        # сборка mock CLAP-плагина + сквозно�
 
 `nimble cliSmoke` собирает CLI и запускает чёрный smoke-тест: коды
 возврата, разделение stdout/stderr, детерминизм вывода, машинный формат
-`--json`, секции `doctor`, кандидаты автодополнения и команды проекта
+`--json`, секции `doctor`, кандидаты автодополнения, команды проекта
 (`init`/`project show|set|validate`, включая «повреждённый файл не
-перезаписан»). `euterpia` линкует
+перезаписан») и настройки окружения (`config`, включая приоритет
+argv > env > файл). `euterpia` линкует
 ТОЛЬКО статически собираемые адаптеры (miniaudio): `{.dynlib.}`-адаптеры
 (PortAudio, RtMidi) резолвят символы внешней библиотеки на старте процесса,
 поэтому их отсутствие уронило бы CLI ещё до `main()`. Именно поэтому

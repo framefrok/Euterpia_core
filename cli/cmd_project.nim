@@ -498,12 +498,6 @@ proc runInit*(ctx: var Ctx; args: seq[string]): Report =
 # Общие помощники команд project
 # =============================================================================
 
-proc rest(args: seq[string]): seq[string] =
-  ## Аргументы после имени команды/подкоманды. Отдельная функция вместо
-  ## среза `args[1 .. ^1]`: на пустом хвосте срез читается как ошибка, а не
-  ## как «аргументов нет».
-  if args.len <= 1: @[] else: args[1 .. ^1]
-
 proc singleFileArg(args: seq[string]; what: string):
     tuple[ok: bool; path: string; rep: Report] =
   ## `show` и `validate` принимают файл или ничего (тогда — умолчание).
@@ -1088,9 +1082,9 @@ proc runProject*(ctx: var Ctx; args: seq[string]): Report =
     return usageError("project требует подкоманду",
                       "подкоманды: " & ProjectSubcommands.join(", "))
   case args[0]
-  of "show": runProjectShow(ctx, rest(args))
-  of "set": runProjectSet(ctx, rest(args))
-  of "validate": runProjectValidate(ctx, rest(args))
+  of "show": runProjectShow(ctx, argsTail(args))
+  of "set": runProjectSet(ctx, argsTail(args))
+  of "validate": runProjectValidate(ctx, argsTail(args))
   else:
     usageError("неизвестная подкоманда project: " & args[0],
                "подкоманды: " & ProjectSubcommands.join(", "))
