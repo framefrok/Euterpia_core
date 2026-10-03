@@ -44,9 +44,13 @@ type
   RtViolation* = enum
     ## Категория запрещённой операции. Нужна, чтобы тест и лог отличали
     ## аллокацию от лока от I/O — у них разные причины и разные исправления.
+    ## `rvDepth` стоит особняком: это не запрещённая операция, а ошибка
+    ## симметрии `rtEnter`/`rtLeave` (см. `MaxRtDepth`), и исправляется она
+    ## иначе — поиском непарного входа, а не выносом буфера.
     rvAlloc
     rvLock
     rvIo
+    rvDepth
 
   RtGuardInfo* = object
     ## Снимок состояния guard'а. Читается только из control-path.
@@ -58,7 +62,8 @@ type
 const
   ## Максимальная глубина вложенности. Глубже — ошибка в логике вложения,
   ## а не признак глубокого RT-пути: renderBlock -> recorder -> track.
-  MaxRtDepth = 8
+  ## Экспортируется, чтобы тесты и внешние guard'ы проверяли тот же порог.
+  MaxRtDepth* = 8
 
 var
   # Thread-local. `--threads:on` делает глобалы TLS по умолчанию, поэтому
@@ -142,6 +147,33 @@ proc noteViolation(kind: RtViolation, site: int32) {.inline, raises: [].} =
     of rvIo:
       doAssert(false, "EUT_RT_GUARD_VIOLATION(rvIo): file I/O в audio-потоке. Файл читает " &
         "writer-thread (audio_recorder), выдаёт данные через кольцо.")
+    of rvDepth:
+      doAssert(false, "EUT_RT_GUARD_VIOLATION(rvDepth): глубина RT-контекста превысила " &
+        "MaxRtDepth=" & $MaxRtDepth & ". Это ошибка симметрии rtEnter/rtLeave " &
+        "(лишний вход без парного выхода), а не глубокий легитимный путь: " &
+        "renderBlock -> processPipeline -> нода укладываются в 3 уровня. " &
+        "Проверьте, что каждый rtEnter имеет парный rtLeave во всех ветках выхода.")
+
+# ----------------------------------------------------------------------------
+# Вход/выход RT-контекста
+# ----------------------------------------------------------------------------
+
+proc enterContext(site: int32) {.inline, raises: [].} =
+  ## Единая точка входа в RT-контекст для `rtScope` и `rtEnter`.
+  ##
+  ## Увеличивает глубину и проверяет `MaxRtDepth`. Переполнение — отдельный
+  ## род нарушения (`rvDepth`): его причина — непарный `rtEnter`, а не
+  ## запрещённая операция, поэтому и исправление другое.
+  when defined(rtGuardEnabled):
+    if tlDepth >= MaxRtDepth:
+      noteViolation(rvDepth, site)
+    inc tlDepth
+
+proc leaveContext() {.inline, raises: [].} =
+  ## Парен к `enterContext`: симметричный выход, глубина не уходит в минус.
+  when defined(rtGuardEnabled):
+    if tlDepth > 0:
+      dec tlDepth
 
 # ----------------------------------------------------------------------------
 # Точки вставки
@@ -181,12 +213,11 @@ template rtScope*(body: untyped) =
   ## `processPipeline` -> нода — три уровня, и выход из внутреннего не должен
   ## снимать пометку внешнего.
   when defined(rtGuardEnabled):
-    inc tlDepth
+    enterContext(int32(instantiationInfo(-1, true).line))
     try:
       body
     finally:
-      if tlDepth > 0:
-        dec tlDepth
+      leaveContext()
   else:
     body
 
@@ -194,10 +225,9 @@ template rtEnter*() =
   ## Ручной вход в RT-контекст (для входных точек, которые не могут обернуть
   ## тело в `rtScope`, например `{.cdecl.}`-callback с ранним `return`).
   when defined(rtGuardEnabled):
-    inc tlDepth
+    enterContext(int32(instantiationInfo(-1, true).line))
 
 template rtLeave*() =
   ## Парный к `rtEnter`. Симметричен, depth не уходит в минус.
   when defined(rtGuardEnabled):
-    if tlDepth > 0:
-      dec tlDepth
+    leaveContext()

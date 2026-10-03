@@ -167,6 +167,60 @@ suite "rt_guard: запрещённые операции в audio-потоке (
         check realtimeDepth() == 1'i32
       check not inRealtimeContext()
 
+    test "глубина сверх MaxRtDepth ловится как rvDepth, а не молчит":
+      # maxRtDepth — заявленный порог: глубже он означает ошибку симметрии
+      # rtEnter/rtLeave, а не легитимный глубокий путь. Раньше константа была
+      # объявлена и не использовалась — лишний вход без выхода не ловился.
+      # Если порог изменят, тест обязан быть обновлён вместе с ним.
+      check MaxRtDepth == 8
+
+      resetViolations()
+
+      var caught = false
+      try:
+        rtScope():                 # 1
+          rtScope():               # 2
+            rtScope():             # 3
+              rtScope():           # 4
+                rtScope():         # 5
+                  rtScope():       # 6
+                    rtScope():     # 7
+                      rtScope():   # 8 -> tlDepth == MaxRtDepth
+                        rtScope(): # 9 -> переполнение -> rvDepth
+                          discard
+      except Defect:
+        caught = true
+
+      check caught
+      check violationCount() == 1'u64
+      check lastViolation().kind == rvDepth
+
+      # Разворот стека вернул глубину: guard не «залипает», следующий
+      # control-path-код снова видит себя вне audio-контекста.
+      check not inRealtimeContext()
+      check realtimeDepth() == 0'i32
+
+    test "ручной rtEnter тоже упирается в MaxRtDepth":
+      resetViolations()
+
+      var caught = false
+      try:
+        # MaxRtDepth успешных входов, а на следующем — переполнение.
+        for _ in 0 .. MaxRtDepth:
+          rtEnter()
+      except Defect:
+        caught = true
+
+      check caught
+      check violationCount() == 1'u64
+      check lastViolation().kind == rvDepth
+
+      # Избыточные rtLeave безопасны и снимают остаток глубины.
+      for _ in 0 .. MaxRtDepth + 1:
+        rtLeave()
+      check not inRealtimeContext()
+      check realtimeDepth() == 0'i32
+
   else:
     test "release: те же нарушения молчат, счётчики не растут":
       # Критерий приёмки #11: «release-сборка: rtAssert* компилируются
