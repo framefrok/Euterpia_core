@@ -46,6 +46,24 @@ euterpia analyze out.wav --fail-on warn  # CI-гейт: код 1 при дефе
 euterpia analyze out.wav --snippets /tmp/snips --heatmap spec.pgm
 ```
 
+## MIDI: отдать проект наружу
+
+Проект (и любую пьесу из `libs/compose`) можно выгрузить в Standard MIDI File —
+в DAW, нотатор или секвенсор:
+
+```bash
+euterpia midi ensemble.eut                        # один файл: ensemble.mid
+euterpia midi ensemble.eut --out build/song.mid   # один файл, свой путь
+euterpia midi ensemble.eut --split build/midi     # по файлу на инструмент
+```
+
+Один файл — формат 1: дорожка-«дирижёр» (имя, темп, размер) плюс по дорожке на
+каждую партию. `--split` пишет по файлу на инструмент (формат 0, имя начинается
+с номера дорожки). Тики проекта и SMF совпадают по разрешению, поэтому позиции
+не пересчитываются, а клипы раскрываются ровно так, как их играет движок
+(`core/sequencer`). Обёртки для кода — `libs/compose/midi`:
+`arr.writeMidi(path)` и `arr.writeMidiTracks(dir)`.
+
 Логика — в Core (`core/audio_inspect`, `core/spectrum`), поэтому тот же API
 позже использует Editor как **пассивный помощник** (v0.7, #178): он ничего не
 меняет ни в проекте, ни в звуке.

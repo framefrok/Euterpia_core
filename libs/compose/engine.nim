@@ -47,7 +47,12 @@ proc renderProject*(proj: ProjectFormat; wavPath: string; tempo: float64;
   opts.tempo = tempo
   opts.automation = scene.automation
 
-  let rep = renderToWav(wavPath, scene.pipeline, opts)
+  # Владение пайплайном переходит рендеру: движок внутри `renderToWav`
+  # забирает граф себе и освобождает его вместе с движком. Без этой
+  # «забывчивости» `destroyScene` ниже освободил бы тот же пайплайн второй
+  # раз — двойное освобождение, которое портит кучу.
+  let pipeline = detachPipeline(scene)
+  let rep = renderToWav(wavPath, pipeline, opts)
   result.ok = rep.ok
   result.error = rep.error
   result.path = rep.path

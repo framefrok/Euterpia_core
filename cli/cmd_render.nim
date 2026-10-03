@@ -438,7 +438,12 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
   opts.tempo = tempo
   opts.automation = scene.automation
 
-  let rendered = renderToWav(scan.outPath, scene.pipeline, opts)
+  # Пайплайн переходит рендеру: движок внутри `renderToWav` забирает граф и
+  # освобождает его вместе с движком. Иначе `destroyScene` (defer выше)
+  # освободил бы тот же пайплайн второй раз — двойное освобождение.
+  let pipeline = detachPipeline(scene)
+
+  let rendered = renderToWav(scan.outPath, pipeline, opts)
   if not rendered.ok:
     # Ядро отвечает одним текстом, а CLI обязан назвать вид ошибки: сбой
     # записи файла — окружение (код 2), всё остальное — баг (код 3).

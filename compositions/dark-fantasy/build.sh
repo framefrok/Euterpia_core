@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 E="${1:-${EUTERPIA:-$HERE/../../build/euterpia}}"
 ROOT="$HERE/../.."
 
-echo "--- generate + render (libs/compose) ---"
+echo "--- generate + render + MIDI (libs/compose) ---"
 nim c -r --hints:off --nimcache:"$ROOT/build/nc_compose_dark" \
     --out:"$ROOT/build/compose_dark" "$HERE/generate.nim"
 

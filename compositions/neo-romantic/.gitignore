@@ -2,5 +2,7 @@
 # и содержат метку времени, поэтому в git не хранятся.
 ensemble.wav
 ensemble.eut
+ensemble.mid
+midi/
 ensemble_cli.wav
 ensemble_cli.eut

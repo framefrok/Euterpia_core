@@ -44,6 +44,7 @@ nim r generate.nim         # то же вручную: пишет .notes, .eut �
 |---|---|
 | `generate.nim` | форма, мотивы и партии на Nim → `.notes` + `.eut` + `.wav` |
 | `*.notes` | партитуры (choir/harp/lute/flute/pipes/cello/bell/war) |
+| `midi/` | по MIDI-файлу на инструмент (артефакт сборки) |
 | `build.sh` | генерация + рендер + инспекция |
 | `build_via_cli.sh` | альтернатива: сборка только через CLI (§19) |
 | `ensemble.*` | артефакты сборки (в git не хранятся) |

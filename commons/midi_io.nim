@@ -20,6 +20,8 @@
 # SysEx-события при чтении корректно пропускаются (с потреблением длины),
 # при записи не порождаются.
 
+import std/algorithm
+
 {.push raises: [].}
 
 type
@@ -30,8 +32,17 @@ type
     data1*: uint8
     data2*: uint8
 
+  SmfMeta* {.bycopy.} = object
+    ## Мета-событие SMF (0xFF): имя дорожки (0x03), темп (0x51), размер (0x58).
+    ## Без них файл открылся бы «никак»: чужой DAW взял бы темп по умолчанию
+    ## и показал безымянные дорожки.
+    tick*: uint32
+    metaType*: uint8
+    data*: seq[byte]
+
   SmfTrack* = object
     events*: seq[SmfEvent]
+    meta*: seq[SmfMeta]
 
   SmfFile* = object
     format*: uint16    ## 0 или 1
@@ -118,19 +129,61 @@ proc channelEventLength(status: uint8): int {.inline.} =
   of 0x80'u8, 0x90'u8, 0xA0'u8, 0xB0'u8, 0xE0'u8: 2
   else: 0
 
+# ==============================================================================
+# Кодирование: события и мета в одном потоке по тикам
+# ==============================================================================
+
+type
+  EncodeItem = tuple[tick: uint32; isMeta: bool; idx: int; rank: int]
+
+proc pickupRank(status: uint8): int {.inline.} =
+  ## Приоритет при ОДИНАКОВОМ тике: сначала Note Off, потом прочее,
+  ## потом Note On. Иначе нота той же высоты, начавшаяся ровно в тик
+  ## окончания прежней, могла бы быть «погашена» раньше, чем зазвучит.
+  case status and 0xF0'u8
+  of 0x80'u8: 0
+  of 0x90'u8: 2
+  else: 1
+
+proc encodeItemLess(t: SmfTrack; a, b: EncodeItem): bool =
+  if a.tick != b.tick:
+    return a.tick < b.tick
+  # При одном тике мета раньше событий: темп и имя — до первой ноты.
+  if a.isMeta != b.isMeta:
+    return a.isMeta
+  if a.rank != b.rank:
+    return a.rank < b.rank
+  a.idx < b.idx
+
 proc encodeTrack(t: SmfTrack): seq[byte] =
   var body: seq[byte] = @[]
   var lastTick = 0'u32
 
-  for ev in t.events:
-    let delta = if ev.tick >= lastTick: ev.tick - lastTick else: 0'u32
-    lastTick = ev.tick
+  var items = newSeqOfCap[EncodeItem](t.events.len + t.meta.len)
+  for i in 0 ..< t.meta.len:
+    items.add (t.meta[i].tick, true, i, 0)
+  for i in 0 ..< t.events.len:
+    items.add (t.events[i].tick, false, i, pickupRank(t.events[i].status))
+  items.sort(proc (a, b: EncodeItem): int = (if t.encodeItemLess(a, b): -1 else: 1))
+
+  for it in items:
+    let delta = if it.tick >= lastTick: it.tick - lastTick else: 0'u32
+    lastTick = it.tick
 
     body.add encodeVarLen(delta)
-    body.add ev.status
-    let n = channelEventLength(ev.status)
-    if n >= 1: body.add ev.data1
-    if n >= 2: body.add ev.data2
+    if it.isMeta:
+      let m = t.meta[it.idx]
+      body.add 0xFF'u8
+      body.add m.metaType
+      body.add encodeVarLen(uint32(m.data.len))
+      for b in m.data:
+        body.add b
+    else:
+      let ev = t.events[it.idx]
+      body.add ev.status
+      let n = channelEventLength(ev.status)
+      if n >= 1: body.add ev.data1
+      if n >= 2: body.add ev.data2
 
   # End of Track: обязательное завершение любого MTrk-чанка.
   body.add encodeVarLen(0)
@@ -142,6 +195,47 @@ proc encodeTrack(t: SmfTrack): seq[byte] =
   result.addAscii("MTrk")
   result.putU32BE(uint32(body.len))
   result.add body
+
+# ==============================================================================
+# Конструкторы: собрать дорожку из «музыкальных» понятий
+# ==============================================================================
+
+proc addTrackName*(t: var SmfTrack; tick: uint32; name: string) =
+  ## Мета 0x03 — имя дорожки (в DAW это подпись трека).
+  var d: seq[byte] = @[]
+  for ch in name:
+    d.add byte(ord(ch))
+  t.meta.add SmfMeta(tick: tick, metaType: 0x03'u8, data: d)
+
+proc addTempo*(t: var SmfTrack; tick: uint32; microsPerQuarter: uint32) =
+  ## Мета 0x51 — темп в микросекундах на четверть (500000 = 120 BPM).
+  let v = min(microsPerQuarter, 0xFFFFFF'u32)
+  t.meta.add SmfMeta(tick: tick, metaType: 0x51'u8,
+                     data: @[byte((v shr 16) and 0xFF),
+                             byte((v shr 8) and 0xFF),
+                             byte(v and 0xFF)])
+
+proc addTimeSignature*(t: var SmfTrack; tick: uint32;
+                       numerator, denominator: int) =
+  ## Мета 0x58 — размер: nn dd cc bb, где dd = log2(знаменателя).
+  var dd = 0
+  var d = max(denominator, 1)
+  while d > 1 and dd < 8:
+    d = d shr 1
+    inc dd
+  t.meta.add SmfMeta(tick: tick, metaType: 0x58'u8,
+                     data: @[byte(numerator and 0xFF), byte(dd), 24'u8, 8'u8])
+
+proc addNote*(t: var SmfTrack; tick: uint32; channel: int;
+              pitch, velocity: uint8; duration: uint32) =
+  ## Пара Note On/Note Off. Длительность минимум 1 тик: нулевая превратила бы
+  ## ноту в «залипшую» (Off в тот же тик, что и On).
+  let ch = uint8(channel and 0x0F)
+  let offTick = tick + max(duration, 1'u32)
+  t.events.add SmfEvent(tick: tick, status: 0x90'u8 or ch,
+                        data1: pitch, data2: velocity)
+  t.events.add SmfEvent(tick: offTick, status: 0x80'u8 or ch,
+                        data1: pitch, data2: 0'u8)
 
 proc encodeSmf*(f: SmfFile): seq[byte] =
   ## Сериализует файл в байты SMF формата 0/1.
@@ -223,11 +317,24 @@ proc parseSmf*(data: openArray[byte]): tuple[ok: bool, file: SmfFile] =
           running = status
 
       if status >= 0xF0'u8:
-        # Meta (0xFF) / SysEx (0xF0, 0xF7): потребляем длину и пропускаем.
         if status == 0xFF'u8:
+          # Meta: запоминаем — темп и имена дорожек нужны вызывающему.
           if pos >= trackEnd:
             break
-          inc pos  # meta type
+          let metaType = data[pos]
+          inc pos
+          let len = int(decodeVarLen(data, pos))
+          let bodyEnd = min(pos + len, trackEnd)
+          let n = max(0, bodyEnd - pos)
+          # End of Track (0x2F) не храним: его всегда пишет encodeTrack.
+          if metaType != 0x2F'u8:
+            var body = newSeq[byte](n)
+            for k in 0 ..< n:
+              body[k] = data[pos + k]
+            track.meta.add SmfMeta(tick: lastTick, metaType: metaType, data: body)
+          pos = bodyEnd
+          continue
+        # SysEx (0xF0, 0xF7): длину читаем и пропускаем — записывать не умеем.
         let len = int(decodeVarLen(data, pos))
         pos += len
         continue

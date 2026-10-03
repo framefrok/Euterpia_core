@@ -19,6 +19,7 @@ import cmd_notation
 import cmd_project
 import cmd_render
 import cmd_analyze
+import cmd_midi
 import config
 import euterpia_version
 
@@ -198,6 +199,22 @@ proc setupRegistry*() =
           "` — как в примере MANIFEST §19",
       ],
       run: runProject),
+    CommandDef(
+      name: "midi",
+      summary: "экспорт проекта в MIDI: один файл или по файлу на инструмент",
+      usage: "midi <проект.eut> [--out файл.mid] [--split каталог]",
+      flags: MidiKeys,
+      notes: @[
+        "формат 1: дорожка-дирижёр (имя, темп, размер) + по дорожке на каждый непустой трек",
+        "--split: по файлу на инструмент (формат 0), имя начинается с номера дорожки",
+        "если не указан ни --out, ни --split: рядом пишется `<проект>.mid`",
+        "тики проекта и SMF совпадают по разрешению (PPQ), позиции не пересчитываются",
+        "клипы раскрываются как в движке: Note Off обрезается границей клипа, " &
+          "зацикленный клип повторяется до конца песни",
+        "--dry-run печатает план и не пишет файлов",
+        "раскодировать обратно можно тем же кодеком: `commons/midi_io.parseSmf`",
+      ],
+      run: runMidi),
     CommandDef(
       name: "node",
       summary: "ноды графа: список, каталог типов, добавление, удаление, показ",
