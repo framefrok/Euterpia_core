@@ -67,6 +67,10 @@ nimble compose                          # собрать пьесу библио
 ./compositions/dark-fantasy/build.sh    # то же для одной пьесы
 ```
 
+Пишите музыку на Nim: полное руководство — **[docs/libs/compose](docs/libs/compose/README.md)**
+(алгоритм, примеры, компиляция) и каталог инструментов —
+[docs/libs/compose/instruments.md](docs/libs/compose/instruments.md).
+
 У каждой пьесы рядом лежит `build_via_cli.sh` — тот же состав, собранный только
 командами CLI (§19). Оба пути дают идентичный рендер.
 
