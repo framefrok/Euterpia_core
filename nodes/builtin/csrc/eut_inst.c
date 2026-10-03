@@ -1129,7 +1129,7 @@ void eut_flute_note_on(EutFlute *g, int note, float velocity)
   v->ph = 0.0f;
   v->dph = 0.0f;
   v->breathLp = v->breathHp = 0.0f;
-  v->chiff = 0.9f;
+  v->chiff = 0.6f;
   g->active = 1;
 }
 
@@ -1186,11 +1186,16 @@ void eut_flute_process(EutFlute *g, float *outL, float *outR, int stride, int n,
       if (f * 5.0f < nyq) s += inst_sin_mult(v->ph, 5.0f) * 0.05f * g->tone;
 
       const float nz = inst_noise(&v->v.rng);
-      v->breathHp += (nz - v->breathHp) * 0.20f;   /* ВЧ над шумом */
-      s += (nz - v->breathHp) * g->breath * 0.5f;
+      /* «Дыхание» — ПОЛОСОВОЙ шум (ВЧ + ФНЧ): воздух вокруг тона, а не
+         широкополосное шипение. Верхний срез ~6 кГц убирает «сссс». */
+      v->breathHp += (nz - v->breathHp) * 0.10f;
+      const float hi = nz - v->breathHp;
+      v->breathLp += (hi - v->breathLp) * 0.55f;
+      s += v->breathLp * g->breath * 0.20f;
 
-      s += v->chiff * nz * 0.5f;                    /* «чиф» атаки */
-      v->chiff *= 0.9990f;
+      /* «Чиф» атаки — короткий и тихий, тоже полосовой, не щелчок. */
+      s += v->chiff * v->breathLp * 0.35f;
+      v->chiff *= 0.9985f;
 
       s *= v->v.amp;
       sumL += s * gl;
