@@ -18,6 +18,7 @@ import cmd_graph
 import cmd_notation
 import cmd_project
 import cmd_render
+import cmd_analyze
 import config
 import euterpia_version
 
@@ -291,6 +292,22 @@ proc setupRegistry*() =
         "нотация: " & NotationHint,
       ],
       run: runNotation),
+    CommandDef(
+      name: "analyze",
+      summary: "инспектор аудио: дефекты WAV с локализацией",
+      usage: "analyze <файл.wav> [ключи]",
+      flags: AnalyzeKeys,
+      notes: @[
+        "читает WAV и печатает отчёт с локализацией: клиппинг, DC, щелчки, " &
+          "провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость",
+        "вердикт «нравится» остаётся за слушателем: инструмент не судит музыку, " &
+          "а указывает конкретные места и причины",
+        "--fail-on info|warn|error — порог для CI: код 1 при дефектах не ниже уровня (умолчание error)",
+        "--snippets <каталог> пишет короткие WAV вокруг дефектов, --heatmap <файл.pgm> — спектрограмму",
+        "--fft <N> задаёт размер кадра БПФ (256..65536; умолчание 2048)",
+        "тот же Core-API (`core/audio_inspect`) позже использует Editor (#178)",
+      ],
+      run: runAnalyze),
     CommandDef(
       name: "completion",
       summary: "скрипт автодополнения оболочки",
