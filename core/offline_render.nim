@@ -51,7 +51,26 @@ const
     ## Гранулярность автоматизации: как часто пересчитываются значения
     ## параметров во время рендера.
 
+  ProgressIntervalSeconds = 1.0
+    ## Как часто колбэк прогресса получает кадры. Чанк — четверть секунды,
+    ## то есть четыре вызова на секунду аудио: для часовой пьесы это 14 тысяч
+    ## вызовов, а при рендере быстрее реального времени — 120 вызовов в
+    ## секунду экранного времени, и терминал только мигает. Секунда аудио —
+    ## компромисс: обновление достаточно частое, чтобы человек видел
+    ## движение, и достаточно редкое, чтобы перерисовка стоила копейки.
+
 type
+  RenderProgressProc* = proc(framesDone, totalFrames: int64) {.closure, gcsafe, raises: [].}
+    ## Колбэк прогресса офлайн-рендера.
+    ##
+    ## Вызывается НЕ чаще раза в `ProgressIntervalSeconds` секунд аудио и
+    ## обязательно на последнем кадре. `nil` — не вызывается вовсе: рендер из
+    ## тестов и CI ничего не платит за отсутствие прогресса (#88).
+    ##
+    ## Контракт намеренно узкий — два целых числа. Время, проценты и вид
+    ## строки — дело вызывающего (CLI или `libs/compose`): Core не знает, как
+    ## выглядит терминал.
+
   OfflineAutomationPoint* = object
     ## Точка автоматизации в тиках. Это не `AutomationPointFormat` из
     ## формата проекта: Core-рендер не знает про файл проекта и принимает
@@ -77,6 +96,8 @@ type
       ## формулой, что у транспорта.
     automation*: seq[OfflineAutomationLane]
       ## Пустой список — рендер без автоматизации (частый случай).
+    onProgress*: RenderProgressProc
+      ## Колбэк прогресса или `nil` (по умолчанию) — не вызывать вовсе.
 
   OfflineRenderReport* = object
     ok*: bool
@@ -242,6 +263,12 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
   var peak = 0.0f
   var sumSquares = 0.0'f64
 
+  # Шаг прогресса в кадрах — не меньше блока и не меньше секунды аудио.
+  var progressStep = int64(float64(opts.sampleRate) * ProgressIntervalSeconds)
+  if progressStep < blockFrames:
+    progressStep = blockFrames
+  var nextProgressFrame = 0'i64
+
   try:
     while done < opts.totalFrames:
       let remaining = opts.totalFrames - done
@@ -276,6 +303,13 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
                   cast[ptr UncheckedArray[float32]](addr chunk[0]),
                   framesThis)
       done += int64(framesThis)
+
+      # Прогресс — после записи чанка, чтобы показывать действительно
+      # посчитанное (файл-то уже содержит эти кадры).
+      if opts.onProgress != nil:
+        if done >= nextProgressFrame or done >= opts.totalFrames:
+          opts.onProgress(done, opts.totalFrames)
+          nextProgressFrame = done + progressStep
   except CatchableError as e:
     result.error = "ошибка записи файла: " & e.msg
     try:

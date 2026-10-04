@@ -10,6 +10,21 @@
 
 ## [Unreleased]
 
+## [0.3.2] — Незакрытое
+
+### Добавлено
+- `euterpia render`: индикатор прогресса в stderr — проценты,
+  отрендерено/всего, прошло, осталось и скорость (×REALTIME) с
+  «вращающейся палочкой»; `--progress`/`--no-progress`, `-q` отключает,
+  по умолчанию включается только для терминала
+  ([#310](https://github.com/framefrok/Euterpia_core/issues/310)).
+- `libs/compose/progress` — тот же индикатор для `arr.render(...)` из
+  `nim r generate.nim`; одна реализация вместо двух
+  ([#310](https://github.com/framefrok/Euterpia_core/issues/310)).
+- `OfflineRenderOptions.onProgress` — колбэк прогресса ядра: раз в секунду
+  аудио и всегда на последнем кадре; `nil` — не вызывается вовсе
+  ([#310](https://github.com/framefrok/Euterpia_core/issues/310)).
+
 ## [0.3.1] — Организация и документация (v0.3.1)
 
 Шаг `.1` линии v0.3: релизная механика, справочник CLI, поставка.

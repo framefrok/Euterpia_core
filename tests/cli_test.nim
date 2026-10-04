@@ -230,6 +230,59 @@ suite "CLI: контракт точки входа (#88)":
     for name in machineCommandNames():
       check ("`" & name & "`") in docs
 
+suite "CLI: render — индикатор прогресса (#310)":
+  # Тест сам запускает процесс и читает stderr по pipe — терминала там
+  # нет по определению. Значит авто-режим обязан промолчать, иначе вывод
+  # перестал бы быть детерминированным (#88).
+  let renderDir = getTempDir() / "euterpia_cli_render"
+  proc renderProjectDir(): string =
+    # Свой каталог на тест: рендеру нужен проект, а пустой граф без нот
+    # требует явного `--seconds` — ровно как в §19. `--force` потому, что
+    # каталог общий на suite.
+    createDir(renderDir)
+    check runCliIn(renderDir, ["init", "project.eut", "--force"]).code == 0
+    # Нода обязательна: рендер пустого графа честно отказывает («собирать
+    # нечего»), и тест проверял бы ошибку вместо прогресса.
+    check runCliIn(renderDir, ["node", "add", "osc", "--name", "o"]).code == 0
+    result = renderDir
+
+  test "без ключей прогресса в stderr нет (stderr — пайп, не терминал)":
+    let work = renderProjectDir()
+    let r = runCliIn(work, ["render", "--seconds", "1", "--out",
+                            work / "out.wav"])
+    check r.code == 0
+    check "осталось" notin r.errput
+
+  test "--progress печатает прогресс в stderr, stdout остаётся отчётом":
+    let work = renderProjectDir()
+    let r = runCliIn(work, ["render", "--seconds", "2", "--out",
+                            work / "out.wav", "--progress"])
+    check r.code == 0
+    # stdout — только результат команды (§21): ни одного символа прогресса.
+    check "осталось" notin r.output
+    check "записано:" in r.output
+    check "осталось" in r.errput
+    check "%" in r.errput
+
+  test "--no-progress отключает прогресс, даже если шёл после --progress":
+    let work = renderProjectDir()
+    let r = runCliIn(work, ["render", "--seconds", "1", "--out",
+                            work / "out.wav", "--progress", "--no-progress"])
+    check r.code == 0
+    check "осталось" notin r.errput
+
+  test "--progress — флаг: значение после него не его аргумент":
+    let r = runCli(["render", "--progress=1"])
+    check r.code == 1
+    check "не принимает значение" in r.errput
+
+  test "--dry-run не печатает индикатор: диск не трогаем":
+    let work = renderProjectDir()
+    let r = runCliIn(work, ["render", "--seconds", "1", "--out",
+                            work / "out.wav", "--progress", "--dry-run"])
+    check r.code == 0
+    check "осталось" notin r.errput
+
 suite "CLI: doctor — самодиагностика (#105)":
   test "отчёт согласован: код возврата ⟺ есть провалы проверок":
     let human = runCli(["doctor"])
