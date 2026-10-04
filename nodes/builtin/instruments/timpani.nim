@@ -102,7 +102,7 @@ proc destroyTimpaniState(state: pointer) {.cdecl, raises: [], gcsafe.} =
 proc resetTimpaniState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   if state.isNil: return
   let st = cast[ptr TimpaniState](state)
-  timpaniAllOff(addr st.g)
+  timpaniReset(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
 
 proc setTimpaniParam(state: pointer; paramId: uint32; value: float32;

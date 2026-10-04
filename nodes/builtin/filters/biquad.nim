@@ -189,7 +189,6 @@ proc processBiquadNode(
     st.smoothQ = initSmoother(20.0f, sr, q)
     st.smoothGain = initSmoother(20.0f, sr, gain)
 
-  let n = frames.cint
   let channels = min(channelCount(outBuf), 2'i32)
 
   for ch in 0 ..< channels:

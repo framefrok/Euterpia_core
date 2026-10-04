@@ -103,7 +103,7 @@ proc destroyChoirState(state: pointer) {.cdecl, raises: [], gcsafe.} =
 proc resetChoirState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   if state.isNil: return
   let st = cast[ptr ChoirState](state)
-  choirAllOff(addr st.g)
+  choirReset(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
 
 proc setChoirParam(state: pointer; paramId: uint32; value: float32;

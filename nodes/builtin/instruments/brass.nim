@@ -102,7 +102,7 @@ proc destroyBrassState(state: pointer) {.cdecl, raises: [], gcsafe.} =
 proc resetBrassState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   if state.isNil: return
   let st = cast[ptr BrassState](state)
-  brassAllOff(addr st.g)
+  brassReset(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
 
 proc setBrassParam(state: pointer; paramId: uint32; value: float32;

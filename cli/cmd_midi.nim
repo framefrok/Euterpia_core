@@ -21,7 +21,7 @@
 # Коды возврата (#88): 0 — успех, 1 — ошибка данных/использования,
 # 2 — среда (файл проекта не читается, каталог недоступен), 3 — внутренняя.
 
-import std/[json, os, strutils]
+import std/[json, os]
 
 import context
 import project

@@ -388,6 +388,58 @@ suite "инструменты: C-движки (eut_inst.c)":
     check p < 1.0f        # без «двух флейт» и без рассинхрона
     freeFlute(addr g)
 
+  test "reset обнуляет DSP-состояние голоса — следующий блок тишина (#316)":
+    # Контракт паники: после `xReset` ни одного сэмпла остаточного состояния
+    # (фазы, фильтры дыхания, огибающие — всё обнулено C-функцией).
+    # `xAllOff` этого не гарантирует: он лишь снимает ноты, и именно поэтому
+    # девять «новых» инструментов звали не тот сброс.
+    var g = newFlute(8, Sr)
+    check g.isReady
+    fluteNoteOn(addr g, 69, 0.9f)
+    var l, r: array[512, float32]
+    for b in 0 ..< 4:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      fluteProcess(addr g, addr l[0], addr r[0], 1, l.len)
+
+    fluteReset(addr g)
+    for i in 0 ..< l.len:
+      l[i] = 0.0f
+      r[i] = 0.0f
+    fluteProcess(addr g, addr l[0], addr r[0], 1, l.len)
+    var peak = 0.0f
+    for i in 0 ..< l.len:
+      peak = max(peak, abs(l[i]))
+    check peak == 0.0f
+    freeFlute(addr g)
+
+  test "reset щипковых чистит линию задержки Карплуса-Стронга (#316)":
+    # У щипковых состояние — это буфер струны (`g->memory`). Если его не
+    # обнулить, «заряженная» струна звучит после паники.
+    var g = newPluck(4, Sr)
+    check g.isReady
+    pluckSet(addr g, 0.7f, 0.9f, 0.4f, 0.3f, 200.0f, 0.0f, 0.8f)
+    pluckNoteOn(addr g, 69, 1.0f)
+    var l, r: array[512, float32]
+    for b in 0 ..< 4:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      pluckProcess(addr g, addr l[0], addr r[0], 1, l.len)
+
+    pluckReset(addr g)
+    var peak = 0.0f
+    for b in 0 ..< 4:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      pluckProcess(addr g, addr l[0], addr r[0], 1, l.len)
+      for i in 0 ..< l.len:
+        peak = max(peak, abs(l[i]))
+    check peak == 0.0f
+    freePluck(addr g)
+
 
 # ----------------------------------------------------------------------------
 # Ноды: события -> голоса -> звук

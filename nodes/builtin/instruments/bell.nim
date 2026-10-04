@@ -103,7 +103,7 @@ proc destroyBellState(state: pointer) {.cdecl, raises: [], gcsafe.} =
 proc resetBellState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   if state.isNil: return
   let st = cast[ptr BellState](state)
-  bellAllOff(addr st.g)
+  bellReset(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
 
 proc setBellParam(state: pointer; paramId: uint32; value: float32;
