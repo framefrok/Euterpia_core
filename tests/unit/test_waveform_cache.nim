@@ -1,6 +1,7 @@
 # tests/unit/test_waveform_cache.nim
 #
-# commons/waveform_cache.nim — кэш пиков волновой формы (issue #57).
+# core/waveform_cache.nim — кэш пиков волновой формы (issue #57).
+# Модуль перенесён в Core из commons/ в issue #5 (Commons не знает о Core).
 #
 # Что проверяется:
 #   - синхронный путь: saveWaveformToCache -> getWaveform ->

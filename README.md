@@ -151,6 +151,8 @@ MANIFEST.md  — архитектурный манифест
 | `audio_buffer`, `signal_types`, `node_interface` | контракты буферов, событий, нод |
 | `param_registry`, `audio_params` | реестр параметров |
 | `wav_codec` | WAV read/write |
+| `audio_file_io` | фасад чтения/записи аудиофайлов (issue #5: перенесён из `commons/`) |
+| `waveform_cache` | кэш пиков волновой формы для таймлайна (issue #5) |
 | `audio_backend_api` | контракт аудио-бэкенда (PortAudio — в `adapters/`) |
 | `midi_api`, `midi_events` | контракт MIDI-бэкенда и MIDI → `RealtimeEvent` (issue #28) |
 | `plugin_api` | контракт хостинга плагинов: CLAP/EUT/… — в `adapters/` (issue #29) |
@@ -191,10 +193,10 @@ callback (причины — MANIFEST §104).
 
 ### `commons/` — нейтральные инструменты
 
-`audio_file_io`, `midi_io` (нейтральный кодек Standard MIDI File),
-`undo_redo`, `waveform_cache`. Commons не должен знать о Core — остаточные
-отклонения (`audio_file_io` → `wav_codec`/`audio_buffer`) отслеживаются
-в issue #5. `midi_io` после развязки (issue #28) Core не знает:
+`midi_io` (нейтральный кодек Standard MIDI File) и `undo_redo`. Commons не
+знает ни о Core, ни о Nodes (MANIFEST §26/§27): `audio_file_io` и
+`waveform_cache` перенесены в `core/` (issue #5), потому что работают с
+аудио-доменом. `midi_io` после развязки (issue #28) Core не знает:
 устройства MIDI живут в `adapters/rtmidi` за контрактом `core/midi_api`.
 
 ## План
