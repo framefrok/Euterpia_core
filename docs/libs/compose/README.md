@@ -152,11 +152,21 @@ organ.setParam("bars", 0.6f32)
 arr.add(organ, genOrgan())
 ```
 
-Идентификаторы нод «из коробки»: `euterpia.organ`, `euterpia.piano`,
-`euterpia.guitar`, `euterpia.drums`, `euterpia.flute`, `euterpia.bagpipe`,
-`euterpia.strings`, `euterpia.bell`, `euterpia.harp`, `euterpia.harpsichord`,
-`euterpia.recorder`, `euterpia.brass`, `euterpia.timpani`, `euterpia.choir`,
-`euterpia.mix`; полный список и параметры — в **[instruments.md](instruments.md)**.
+Идентификаторы нод «из коробки» — **все 25** (10 DSP-нод, 14 инструментов
+и нотный секвенсор):
+
+- инструменты: `euterpia.organ`, `euterpia.piano`, `euterpia.guitar`,
+  `euterpia.drums`, `euterpia.flute`, `euterpia.bagpipe`, `euterpia.strings`,
+  `euterpia.bell`, `euterpia.harp`, `euterpia.harpsichord`,
+  `euterpia.recorder`, `euterpia.brass`, `euterpia.timpani`, `euterpia.choir`;
+- обработка и суммирование: `euterpia.input`, `euterpia.gain`,
+  `euterpia.pan`, `euterpia.mix`, `euterpia.biquad`, `euterpia.svf`,
+  `euterpia.delay`, `euterpia.compressor`, `euterpia.osc`, `euterpia.noise`;
+- ноты: `euterpia.notes`.
+
+Полный список с параметрами, диапазонами и умолчаниями — в
+**[instruments.md](instruments.md)**; список проверяется тестом, поэтому
+новый инструмент не может остаться незадокументированным (#309).
 
 ## Развитие материала
 
