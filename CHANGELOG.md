@@ -24,6 +24,20 @@
 - `OfflineRenderOptions.onProgress` — колбэк прогресса ядра: раз в секунду
   аудио и всегда на последнем кадре; `nil` — не вызывается вовсе
   ([#310](https://github.com/framefrok/Euterpia_core/issues/310)).
+- `core/control`: control-слой документа — единая командная модель
+  (`core/control/commands.nim`, `document.nim`, `error_frame.nim`, issue #139,
+  MANIFEST §65). Команды `node.create`, `node.delete`, `graph.connect`,
+  `graph.disconnect`, `param.set` приходят конвертом (идентификатор, версия
+  API, данные) и возвращают `ErrorFrame` — код причины, сообщение и подсказку,
+  а не `bool`. Проверки по описателю типа, правила графа и каскадные удаления
+  уехали из CLI в ядро: Core не знает типов нод (§54), описания приходят от
+  хозяина документа через `NodeTypeProvider`, а часы внедряются, чтобы CLI и
+  Editor давали одинаковый документ. Объявленные, но ещё не реализованные
+  команды отвечают `ecUnsupportedCommand`; транзакции и история — следующий
+  подэтап (#127, #109).
+- CLI: `node add`, `node rm`, `connect`, `disconnect`, `param set` выполняются
+  через control-слой; появился `errorCode` в JSON-конверте (код причины
+  числом) — остальные команды пока по-старому, миграция продолжится следом.
 - `core`: стабильные handle-ID для сущностей документа
   (`core/handles.nim`, issue #143, MANIFEST §35/§36). Handle — значение
   `документ + слот + поколение + вид`: у просроченного адреса возвращается код

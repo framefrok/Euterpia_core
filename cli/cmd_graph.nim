@@ -30,6 +30,10 @@ import checks
 import catalog
 import addressing
 import cmd_project
+import control_bridge
+import control/error_frame
+import control/commands
+import control/document
 import sdk/graph_check
 
 const
@@ -571,42 +575,19 @@ proc runNodeAdd(ctx: var Ctx; scan: ArgScan): Report =
   if not loaded.ok: return loaded.rep
   var proj = loaded.proj
 
-  var newId = 0
-  if scan.haveId:
-    newId = scan.id
-    if newId <= 0:
-      return usageError("id ноды должен быть положительным, получено: " & $newId,
-                        "id ноды — целое, начиная с 1")
-    for node in proj.graph.nodes:
-      if node.id == newId:
-        return usageError("нода с id " & $newId & " уже есть",
-                          "без --id CLI возьмёт следующий свободный id")
-  else:
-    newId = nextNodeId(proj)
+  # Проверки «занятый id» и «неизвестный тип» живут в control-слое: клиент
+  # переводит аргументы в команду и показывает ответ, а не решает сам (#139).
+  let requestedId = (if scan.haveId: int32(scan.id) else: 0'i32)
+  var doc = openDocument(scan.path, proj)
+  let frame = doc.applyCommand(createNode(info.id, scan.name, requestedId))
+  if not frame.isOk(): return frameReport(frame)
 
-  # Порты, задержка и умолчания параметров берутся из описателя: файл
-  # получает ровно то, что умеет тип, а не то, что CLI помнит про ноды (§54).
-  var node = NodeFormat(
-    id: newId,
-    nodeType: info.id,
-    name: (if scan.name.len > 0: scan.name else: info.name),
-    audioInCount: info.audioIn, audioOutCount: info.audioOut,
-    ctrlInCount: info.ctrlIn, ctrlOutCount: info.ctrlOut,
-    eventInCount: info.eventIn, eventOutCount: info.eventOut,
-    latencyReported: uint32(max(0, info.latencyFrames)),
-    latencyIntrinsic: 0,
-    isSubgraph: false,
-    parameters: initTable[string, float32]()
-  )
-  for p in info.params:
-    node.parameters[p.name] = p.defaultValue
-  proj.graph.nodes.add node
-  proj.metadata.modified = nowStamp()
-
-  let tbl = documentTable(scan.path, proj)
+  proj = doc.proj
+  let newId = proj.graph.nodes[^1].id
+  let node = proj.graph.nodes[^1]
+  let tbl = doc.handles
   var body = projectBody(proj, scan.path)
-  body["node"] = nodeJson(proj.graph.nodes[^1], cat,
-                          countConnections(proj, newId), tbl)
+  body["node"] = nodeJson(node, cat, countConnections(proj, newId), tbl)
   body["change"] = %*{"action": "node.add", "id": newId,
                       "type": info.id, "name": node.name}
   commitEdit(ctx, scan.path, proj, body, @[
@@ -636,38 +617,27 @@ proc runNodeRm(ctx: var Ctx; scan: ArgScan): Report =
   if not found.ok: return found.rep
   let node = proj.graph.nodes[found.node.index]
 
-  # Удаляется ЦЕЛАЯ нода: связи, дорожки автоматизации и состояния плагинов,
-  # которые на неё ссылались. Оставить их значило бы создать ссылки в никуда
-  # — `project validate` назвал бы это провалом, и правильно.
-  proj.graph.nodes.delete(found.node.index)
+  # Каскадное удаление (связи, автоматизация, состояния плагинов) — забота
+  # control-слоя (#139): CLI считает, ЧТО исчезнет, чтобы честно сказать об этом
+  # в отчёте, но не решает, что именно удалять.
   var removedConns = 0
-  var keptConns: seq[ConnectionFormat] = @[]
   for conn in proj.graph.connections:
     if conn.srcNodeId == node.id or conn.dstNodeId == node.id:
       inc removedConns
-    else:
-      keptConns.add conn
-  proj.graph.connections = keptConns
-
   var removedLanes = 0
-  var keptLanes: seq[AutomationLaneFormat] = @[]
   for lane in proj.sequencer.automationLanes:
-    if int(lane.nodeId) == node.id:
+    if lane.nodeId == node.id:
       inc removedLanes
-    else:
-      keptLanes.add lane
-  proj.sequencer.automationLanes = keptLanes
-
   var removedStates = 0
-  var keptStates: seq[PluginStateFormat] = @[]
   for state in proj.pluginStates:
     if state.nodeId == node.id:
       inc removedStates
-    else:
-      keptStates.add state
-  proj.pluginStates = keptStates
 
-  proj.metadata.modified = nowStamp()
+  var doc = openDocument(scan.path, proj)
+  let frame = doc.applyCommand(deleteNode(int32(node.id)))
+  if not frame.isOk(): return frameReport(frame)
+  proj = doc.proj
+
   var body = projectBody(proj, scan.path)
   body["removed"] = %*{
     "action": "node.rm", "id": node.id, "type": node.nodeType,
@@ -754,33 +724,23 @@ proc runConnect(ctx: var Ctx; scan: ArgScan): Report =
   let dst = resolvePort(proj, cat, tbl, scan.positionals[1], isSource = false)
   if not dst.ok: return dst.rep
 
-  if src.port.kind != dst.port.kind:
-    return usageError("виды портов не совпадают: " & scan.positionals[0] &
-                      " — " & src.port.kind.portKindName & ", " &
-                      scan.positionals[1] & " — " &
-                      dst.port.kind.portKindName,
-                      "соединять можно только порты одного вида")
-
   let srcId = proj.graph.nodes[src.port.nodeRef.index].id
   let dstId = proj.graph.nodes[dst.port.nodeRef.index].id
-  let sigType = ord(src.port.kind)
 
-  for conn in proj.graph.connections:
-    if conn.srcNodeId == srcId and conn.srcPortIdx == src.port.index and
-       conn.dstNodeId == dstId and conn.dstPortIdx == dst.port.index and
-       conn.sigType == sigType:
-      return usageError("такая связь уже есть: " & connectionText(conn, proj),
-                        "список связей: euterpia node list")
-
+  # Виды портов, повтор связи и существование порта проверяет control-слой:
+  # те же правила должен применять и Editor (#139). CLI разбирает аргументы,
+  # а не решает, что можно соединить.
+  #
   # Самосоединение и цикл здесь не запрещаются: обратная связь через ноду
   # задержки — законный приём, а собирается ли граф — решает `graph check`
   # и компилятор (#90), а не догадка CLI.
-  var conn = ConnectionFormat(
-    srcNodeId: srcId, srcPortIdx: src.port.index,
-    dstNodeId: dstId, dstPortIdx: dst.port.index, sigType: sigType
-  )
-  proj.graph.connections.add conn
-  proj.metadata.modified = nowStamp()
+  var doc = openDocument(scan.path, proj)
+  let frame = doc.applyCommand(connect(
+    port(int32(srcId), controlPortKind(src.port.kind), int32(src.port.index)),
+    port(int32(dstId), controlPortKind(dst.port.kind), int32(dst.port.index))))
+  if not frame.isOk(): return frameReport(frame)
+  proj = doc.proj
+  let conn = proj.graph.connections[^1]
 
   var body = projectBody(proj, scan.path)
   body["connection"] = %*{
@@ -813,51 +773,55 @@ proc runDisconnect(ctx: var Ctx; scan: ArgScan): Report =
   # Порт можно не указывать (`disconnect osc gain`) — тогда снимаются все
   # связи между этими двумя нодами. Указание порта сужает выбор до одной.
   var srcId = -1
-  var srcKind = -1
-  var srcIdx = -1
   var dstId = -1
-  var dstKind = -1
-  var dstIdx = -1
+  var srcIndex = 0
+  var dstIndex = 0
+  var kind = controlPortKind(pkAudio)
+  var portSpecified = false
 
   if ':' in scan.positionals[0]:
-    let src = resolvePort(proj, cat, tbl, scan.positionals[0], isSource = true)
-    if not src.ok: return src.rep
-    srcId = proj.graph.nodes[src.port.nodeRef.index].id
-    srcKind = ord(src.port.kind)
-    srcIdx = src.port.index
+    let parsed = parsePortSpec(scan.positionals[0])
+    if not parsed.ok: return parsed.rep
+    let node = resolveNode(proj, tbl, parsed.node)
+    if not node.ok: return node.rep
+    srcId = proj.graph.nodes[node.node.index].id
+    kind = controlPortKind(parsed.kind)
+    srcIndex = parsed.index
+    portSpecified = true
   else:
     let node = resolveNode(proj, tbl, scan.positionals[0])
     if not node.ok: return node.rep
     srcId = proj.graph.nodes[node.node.index].id
 
   if ':' in scan.positionals[1]:
-    let dst = resolvePort(proj, cat, tbl, scan.positionals[1], isSource = false)
-    if not dst.ok: return dst.rep
-    dstId = proj.graph.nodes[dst.port.nodeRef.index].id
-    dstKind = ord(dst.port.kind)
-    dstIdx = dst.port.index
+    let parsed = parsePortSpec(scan.positionals[1])
+    if not parsed.ok: return parsed.rep
+    let node = resolveNode(proj, tbl, parsed.node)
+    if not node.ok: return node.rep
+    dstId = proj.graph.nodes[node.node.index].id
+    dstIndex = parsed.index
+    portSpecified = true
   else:
     let node = resolveNode(proj, tbl, scan.positionals[1])
     if not node.ok: return node.rep
     dstId = proj.graph.nodes[node.node.index].id
 
+  # Что именно снимется — считаем ДО команды: после неё связей уже нет, а
+  # отчёт обязан перечислить снятое (клиент считает, ядро решает).
   var removed: seq[ConnectionFormat] = @[]
-  var kept: seq[ConnectionFormat] = @[]
   for conn in proj.graph.connections:
-    let samePair = conn.srcNodeId == srcId and conn.dstNodeId == dstId
-    let sameSrcPort = srcIdx < 0 or
-                      (conn.srcPortIdx == srcIdx and conn.sigType == srcKind)
-    let sameDstPort = dstIdx < 0 or
-                      (conn.dstPortIdx == dstIdx and conn.sigType == dstKind)
-    if samePair and sameSrcPort and sameDstPort:
+    if conn.srcNodeId == srcId and conn.dstNodeId == dstId and
+       (not portSpecified or (conn.sigType == ord(kind) and
+                              conn.srcPortIdx == srcIndex and
+                              conn.dstPortIdx == dstIndex)):
       removed.add conn
-    else:
-      kept.add conn
 
-  if removed.len == 0:
-    return usageError("такой связи нет", "связи показывает: euterpia node list")
-  proj.graph.connections = kept
-  proj.metadata.modified = nowStamp()
+  var doc = openDocument(scan.path, proj)
+  let frame = doc.applyCommand(disconnect(
+    port(int32(srcId), kind, int32(srcIndex)),
+    port(int32(dstId), kind, int32(dstIndex)), portSpecified))
+  if not frame.isOk(): return frameReport(frame)
+  proj = doc.proj
 
   var removedJson = newJArray()
   for conn in removed:
@@ -1049,23 +1013,18 @@ proc runParamSet(ctx: var Ctx; scan: ArgScan): Report =
   let parsed = parseParamValue(scan.positionals[2])
   if not parsed.ok:
     return usageError(parsed.message, "число с точкой или экспонентой, например 1200 или 1e3")
-  var value = parsed.value
+  let value = parsed.value
 
-  # Диапазон и целостность проверяются по описателю типа: «команда прошла»
-  # не должно означать «в проекте лежит значение, которого нода не понимает».
-  if value < p.minValue or value > p.maxValue:
-    return usageError(p.name & " = " & $value & " вне диапазона " &
-                      $p.minValue & "…" & $p.maxValue,
-                      "диапазон объявлен типом ноды: " & info.id)
-  if p.paramIsInteger():
-    let rounded = round(value)
-    if abs(value - rounded) > 1e-6:
-      return usageError(p.name & " — целочисленный параметр, получено " & $value,
-                        "ближайшее целое: " & $int(rounded))
-
+  # Диапазон и целостность проверяет control-слой по описателю типа (#139):
+  # «команда прошла» не должно означать «в проекте лежит значение, которого
+  # нода не понимает», и проверять это должен один код — тот же, что у Editor.
+  # Клиент знает только, что параметр найден, — этого достаточно для отчёта.
   let before = paramValue(proj.graph.nodes[found.nodeIndex].parameters, p.name)
-  proj.graph.nodes[found.nodeIndex].parameters[p.name] = value
-  proj.metadata.modified = nowStamp()
+  var doc = openDocument(scan.path, proj)
+  let frame = doc.applyCommand(setParameter(
+    int32(proj.graph.nodes[found.nodeIndex].id), value, p.name))
+  if not frame.isOk(): return frameReport(frame)
+  proj = doc.proj
 
   var body = projectBody(proj, scan.path)
   body["node"] = %proj.graph.nodes[found.nodeIndex].id

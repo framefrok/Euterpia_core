@@ -79,6 +79,9 @@ type
     error*: string
     errorKind*: string
       ## `usage` | `env` | `panic` — стабильные значения для агента.
+    errorCode*: int
+      ## Машинный код причины из control-слоя (`ErrorCode`, issue #139).
+      ## Ноль при успехе: клиенту не нужно знать про «нет ошибки» отдельно.
     hint*: string
 
 # =============================================================================
@@ -145,10 +148,11 @@ proc errReport*(
   errorKind, error: string;
   hint: string = "";
   lines: seq[string] = @[];
-  body: JsonNode = nil
+  body: JsonNode = nil;
+  errorCode: int = 0
 ): Report =
   Report(ok: false, code: code, errorKind: errorKind, error: error,
-         hint: hint, lines: lines, body: body)
+         hint: hint, lines: lines, body: body, errorCode: errorCode)
 
 proc usageError*(msg: string; hint: string = "список команд: euterpia --help"): Report =
   errReport(exUsage, "usage", msg, hint)
@@ -162,6 +166,11 @@ proc envelope*(ctx: Ctx; rep: Report): JsonNode =
   result["ok"] = %rep.ok
   result["command"] = %ctx.command
   result["exitCode"] = %int(ord(rep.code))
+  if not rep.ok:
+    # Код причины из control-слоя (#139): `errorKind` говорит «какого класса»
+    # ошибка (usage/env/panic), `errorCode` — какая именно. Агент различает
+    # «ноды нет» и «порт занят» не по тексту.
+    result["errorCode"] = %rep.errorCode
 
   if rep.body != nil:
     if rep.body.kind == JObject:
