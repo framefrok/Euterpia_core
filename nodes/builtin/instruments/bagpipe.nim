@@ -103,7 +103,7 @@ proc destroyBagpipeState(state: pointer) {.cdecl, raises: [], gcsafe.} =
 proc resetBagpipeState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   if state.isNil: return
   let st = cast[ptr BagpipeState](state)
-  bagpipeAllOff(addr st.g)
+  bagpipeReset(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
 
 proc setBagpipeParam(state: pointer; paramId: uint32; value: float32;

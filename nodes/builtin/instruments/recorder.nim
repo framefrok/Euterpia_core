@@ -102,7 +102,7 @@ proc destroyRecorderState(state: pointer) {.cdecl, raises: [], gcsafe.} =
 proc resetRecorderState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   if state.isNil: return
   let st = cast[ptr RecorderState](state)
-  recorderAllOff(addr st.g)
+  recorderReset(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
 
 proc setRecorderParam(state: pointer; paramId: uint32; value: float32;

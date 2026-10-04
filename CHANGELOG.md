@@ -31,6 +31,14 @@
   `AssertionDefect` и не теряются молча — они называют проблему и
   перечисляют допустимые значения; пустая партия и пустая раскладка
   дают предупреждение ([#311](https://github.com/framefrok/Euterpia_core/issues/311)).
+- Инструменты `flute`, `bagpipe`, `strings`, `bell`, `harp`/`harpsichord`,
+  `recorder`, `brass`, `timpani`, `choir`: паника и сброс транспорта
+  обнуляют DSP-состояние голосов (фазы, фильтры, линии задержки), как у
+  `organ`/`piano`/`guitar`/`drums`, а не только снимают ноты
+  ([#316](https://github.com/framefrok/Euterpia_core/issues/316)).
+- Убраны мёртвые объявления, шумевшие в каждой сборке:
+  неиспользуемый `EutInstVoice` и локальные переменные в `biquad` и
+  `compressor` ([#316](https://github.com/framefrok/Euterpia_core/issues/316)).
 
 ## [0.3.1] — Организация и документация (v0.3.1)
 

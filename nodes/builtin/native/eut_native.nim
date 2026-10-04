@@ -191,7 +191,6 @@ type
   # структур инструментов может меняться без правки Nim-стороны, а
   # расхождение ловится `abiCheck()`.
   # ---------------------------------------------------------------------
-  EutInstVoice {.importc: "EutInstVoice", bycopy.} = object
   EutOrganVoice {.importc: "EutOrganVoice", bycopy.} = object
   EutOrgan {.importc: "EutOrgan", bycopy.} = object
   EutPianoVoice {.importc: "EutPianoVoice", bycopy.} = object
@@ -1198,6 +1197,15 @@ proc fluteNoteOff*(g: ptr Flute; note: int) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_flute_note_off(cast[ptr EutFlute](g.p), note.cint)
 
+proc fluteReset*(g: ptr Flute) {.inline.} =
+  ## Полный сброс состояния голосов: фазы, фильтры, линии задержки,
+  ## счётчик голосов. `fluteAllOff` только снимает ноты — для паники и
+  ## сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_flute_reset(cast[ptr EutFlute](g.p))
+
 proc fluteAllOff*(g: ptr Flute) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_flute_all_off(cast[ptr EutFlute](g.p))
@@ -1248,6 +1256,15 @@ proc bagpipeNoteOn*(g: ptr Bagpipe; note: int; velocity: float32) {.inline.} =
 proc bagpipeNoteOff*(g: ptr Bagpipe; note: int) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_bagpipe_note_off(cast[ptr EutBagpipe](g.p), note.cint)
+
+proc bagpipeReset*(g: ptr Bagpipe) {.inline.} =
+  ## Полный сброс состояния голосов: фазы, фильтры, линии задержки,
+  ## счётчик голосов. `bagpipeAllOff` только снимает ноты — для паники и
+  ## сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_bagpipe_reset(cast[ptr EutBagpipe](g.p))
 
 proc bagpipeAllOff*(g: ptr Bagpipe) {.inline.} =
   if g.isNil or g.p.isNil: return
@@ -1301,6 +1318,15 @@ proc stringsNoteOff*(g: ptr Strings; note: int) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_strings_note_off(cast[ptr EutStrings](g.p), note.cint)
 
+proc stringsReset*(g: ptr Strings) {.inline.} =
+  ## Полный сброс состояния голосов: фазы, фильтры, линии задержки,
+  ## счётчик голосов. `stringsAllOff` только снимает ноты — для паники и
+  ## сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_strings_reset(cast[ptr EutStrings](g.p))
+
 proc stringsAllOff*(g: ptr Strings) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_strings_all_off(cast[ptr EutStrings](g.p))
@@ -1352,6 +1378,15 @@ proc bellNoteOn*(g: ptr Bell; note: int; velocity: float32) {.inline.} =
 proc bellNoteOff*(g: ptr Bell; note: int) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_bell_note_off(cast[ptr EutBell](g.p), note.cint)
+
+proc bellReset*(g: ptr Bell) {.inline.} =
+  ## Полный сброс состояния голосов: фазы, фильтры, линии задержки,
+  ## счётчик голосов. `bellAllOff` только снимает ноты — для паники и
+  ## сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_bell_reset(cast[ptr EutBell](g.p))
 
 proc bellAllOff*(g: ptr Bell) {.inline.} =
   if g.isNil or g.p.isNil: return
@@ -1430,6 +1465,15 @@ proc pluckNoteOff*(g: ptr Pluck; note: int) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_pluck_note_off(cast[ptr EutPluck](g.p), note.cint)
 
+proc pluckReset*(g: ptr Pluck) {.inline.} =
+  ## Полный сброс состояния голосов: фазы, фильтры, линии задержки,
+  ## счётчик голосов. `pluckAllOff` только снимает ноты — для паники и
+  ## сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_pluck_reset(cast[ptr EutPluck](g.p))
+
 proc pluckAllOff*(g: ptr Pluck) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_pluck_all_off(cast[ptr EutPluck](g.p))
@@ -1481,6 +1525,15 @@ proc recorderNoteOn*(g: ptr Recorder; note: int; velocity: float32) {.inline.} =
 proc recorderNoteOff*(g: ptr Recorder; note: int) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_recorder_note_off(cast[ptr EutRecorder](g.p), note.cint)
+
+proc recorderReset*(g: ptr Recorder) {.inline.} =
+  ## Полный сброс состояния голосов: фазы, фильтры, линии задержки,
+  ## счётчик голосов. `recorderAllOff` только снимает ноты — для паники и
+  ## сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_recorder_reset(cast[ptr EutRecorder](g.p))
 
 proc recorderAllOff*(g: ptr Recorder) {.inline.} =
   if g.isNil or g.p.isNil: return
@@ -1535,6 +1588,15 @@ proc brassNoteOff*(g: ptr Brass; note: int) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_brass_note_off(cast[ptr EutBrass](g.p), note.cint)
 
+proc brassReset*(g: ptr Brass) {.inline.} =
+  ## Полный сброс состояния голосов: фазы, фильтры, линии задержки,
+  ## счётчик голосов. `brassAllOff` только снимает ноты — для паники и
+  ## сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_brass_reset(cast[ptr EutBrass](g.p))
+
 proc brassAllOff*(g: ptr Brass) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_brass_all_off(cast[ptr EutBrass](g.p))
@@ -1588,6 +1650,15 @@ proc timpaniNoteOff*(g: ptr Timpani; note: int) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_timpani_note_off(cast[ptr EutTimpani](g.p), note.cint)
 
+proc timpaniReset*(g: ptr Timpani) {.inline.} =
+  ## Полный сброс состояния голосов: фазы, фильтры, линии задержки,
+  ## счётчик голосов. `timpaniAllOff` только снимает ноты — для паники и
+  ## сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_timpani_reset(cast[ptr EutTimpani](g.p))
+
 proc timpaniAllOff*(g: ptr Timpani) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_timpani_all_off(cast[ptr EutTimpani](g.p))
@@ -1638,6 +1709,15 @@ proc choirNoteOn*(g: ptr Choir; note: int; velocity: float32) {.inline.} =
 proc choirNoteOff*(g: ptr Choir; note: int) {.inline.} =
   if g.isNil or g.p.isNil: return
   c_choir_note_off(cast[ptr EutChoir](g.p), note.cint)
+
+proc choirReset*(g: ptr Choir) {.inline.} =
+  ## Полный сброс состояния голосов: фазы, фильтры, линии задержки,
+  ## счётчик голосов. `choirAllOff` только снимает ноты — для паники и
+  ## сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_choir_reset(cast[ptr EutChoir](g.p))
 
 proc choirAllOff*(g: ptr Choir) {.inline.} =
   if g.isNil or g.p.isNil: return

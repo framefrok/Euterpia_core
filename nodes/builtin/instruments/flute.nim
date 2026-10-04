@@ -103,7 +103,7 @@ proc destroyFluteState(state: pointer) {.cdecl, raises: [], gcsafe.} =
 proc resetFluteState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   if state.isNil: return
   let st = cast[ptr FluteState](state)
-  fluteAllOff(addr st.g)
+  fluteReset(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
 
 proc setFluteParam(state: pointer; paramId: uint32; value: float32;

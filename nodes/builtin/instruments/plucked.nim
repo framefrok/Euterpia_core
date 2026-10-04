@@ -157,7 +157,7 @@ proc destroyPluckState(state: pointer) {.cdecl, raises: [], gcsafe.} =
 proc resetPluckState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   if state.isNil: return
   let st = cast[ptr PluckState](state)
-  pluckAllOff(addr st.g)
+  pluckReset(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
 
 proc setPluckParam(state: pointer; paramId: uint32; value: float32;

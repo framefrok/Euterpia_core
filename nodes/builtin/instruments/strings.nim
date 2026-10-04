@@ -104,7 +104,7 @@ proc destroyStringsState(state: pointer) {.cdecl, raises: [], gcsafe.} =
 proc resetStringsState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   if state.isNil: return
   let st = cast[ptr StringsState](state)
-  stringsAllOff(addr st.g)
+  stringsReset(addr st.g)
   st.midi = initInstMidi(st.sampleRate)
 
 proc setStringsParam(state: pointer; paramId: uint32; value: float32;

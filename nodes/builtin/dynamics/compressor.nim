@@ -230,7 +230,6 @@ proc processCompNode(
   st.pRatio = st.smoothRatio.advance(frames)
   st.pMakeup = st.smoothMakeup.advance(frames)
 
-  let sr = if ctx.sampleRate > 0.0f: ctx.sampleRate else: 48000.0f
   compSetParams(addr st.comp, st.pThreshold, st.pRatio, st.pKnee,
                 st.pAttack, st.pRelease, st.pMakeup)
 
