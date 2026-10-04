@@ -502,9 +502,12 @@ typedef struct {
   int   len;            /* длина линии, кадров (меньше — выше тон) */
   float rp;             /* дробный указатель чтения/записи, 0..len */
   float damp;           /* затухание за сэмпл, 0..1 */
-  float lp;             /* состояние демпфера струны */
+  float lp;             /* первый полюс демпфера струны */
+  float lp2;            /* второй полюс: мягче спад ВЧ-гармоник */
   float dcIn, dcOut;    /* блокировка постоянной составляющей */
   float bend;           /* текущий изгиб, полутоны */
+  float pitchEnv;       /* просадка строя после щипка, доля тона */
+  float pitchEnvCoef;   /* скорость возврата к строю за сэмпл */
 } EutGuitarVoice;
 
 typedef struct {
@@ -522,6 +525,9 @@ typedef struct {
   float pan;
   float level;
   float toneLpL, toneLpR;
+  float bodyLp;         /* тёплый низ: параллельный медленный ФНЧ */
+  float bodyCoef;       /* срез тела ~200–320 Гц, зависит от tone */
+  float bodyBoost;      /* глубина подмешивания низа, 0..0.5 */
   int   seqCounter;
   int   active;
 } EutGuitar;
