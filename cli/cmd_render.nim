@@ -27,7 +27,7 @@
 # (значение параметра вне диапазона, дорожка на ноду, которой нет),
 # печатается предупреждением: рендер из-за этого не срывается.
 
-import std/[json, math, os, strutils]
+import std/[json, math, os, strutils, terminal]
 
 import project
 import signal_types
@@ -37,11 +37,14 @@ import config
 import cmd_project
 import catalog
 import builtin/scene_loader
+import compose/progress
 
 const
   RenderKeys* = @["--file", "--out", "--seconds", "--tail", "--master",
-                  "--sample-rate", "--block", "--bits"]
-    ## Ключи `render` — для справки и автодополнения (#259).
+                  "--sample-rate", "--block", "--bits",
+                  "--progress", "--no-progress"]
+    ## Ключи `render` — для справки и автодополнения (#259). `--progress` и
+    ## `--no-progress` флаги, а не пары «ключ-значение» (#310).
 
   ProjectSuffix = ".eut"
     ## Признак «позиционный аргумент — путь к проекту» (то же правило, что
@@ -84,6 +87,11 @@ type
     sampleRate: int
     blockSize: int
     bits: int
+    progress: bool
+      ## Показывать индикатор рендера (#310).
+    progressSet: bool
+      ## Прогресс задан явно ключом. Без ключа решение принимает среда:
+      ## терминал ли stderr, не мешает ли режим вывода.
 
 # =============================================================================
 # Разбор значений
@@ -147,7 +155,16 @@ proc scanArgs(args: seq[string]): RenderScan =
       value = token[eq + 1 .. ^1]
       haveInline = true
 
-    if key in RenderKeys:
+    if key == "--progress" or key == "--no-progress":
+      # Флаги, а не пары «ключ-значение»: значение после них — позиционный
+      # аргумент команды, а не «настройка прогресса» (#310).
+      if haveInline:
+        result.rep = usageError(key & " — флаг и не принимает значение",
+          "например: euterpia render " & key)
+        return
+      result.progress = key == "--progress"
+      result.progressSet = true
+    elif key in RenderKeys:
       if not haveInline:
         if i + 1 >= args.len:
           result.rep = usageError(key & " требует значение",
@@ -438,6 +455,22 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
   opts.tempo = tempo
   opts.automation = scene.automation
 
+  # --- индикатор прогресса (#310) -------------------------------------------
+  # Показываем в stderr и только когда это уместно: stdout принадлежит
+  # результату команды (MANIFEST §21), а в CI/пайпе лишний вывод ломает
+  # байт-в-байт детерминизм (#88). Поэтому «по умолчанию» — терминал,
+  # а ключи `--progress`/`--no-progress` решают явно.
+  let autoProgress =
+    (not ctx.quiet) and (ctx.mode != omJson) and terminal.isatty(stderr)
+  let wantProgress =
+    if scan.progressSet: scan.progress else: autoProgress
+
+  var printer: ProgressPrinter = nil
+  if wantProgress:
+    printer = newProgress(float64(frames) / float64(sampleRate),
+                          int32(sampleRate))
+    opts.onProgress = printer.callback
+
   # Пайплайн переходит рендеру: движок внутри `renderToWav` забирает граф и
   # освобождает его вместе с движком. Иначе `destroyScene` (defer выше)
   # освободил бы тот же пайплайн второй раз — двойное освобождение.
@@ -445,6 +478,10 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
 
   let rendered = renderToWav(scan.outPath, pipeline, opts)
   if not rendered.ok:
+    # Недописанная строка индикатора осталась бы висеть поверх отчёта —
+    # стираем её перед выходом с ошибкой.
+    if printer != nil:
+      printer.clear()
     # Ядро отвечает одним текстом, а CLI обязан назвать вид ошибки: сбой
     # записи файла — окружение (код 2), всё остальное — баг (код 3).
     let isIO = rendered.error.startsWith("не удалось") or

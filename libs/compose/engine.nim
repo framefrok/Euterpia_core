@@ -17,6 +17,8 @@ import builtin/builtin_registry
 import builtin/scene_loader
 import offline_render
 import compose/song
+import compose/progress
+import compose/song
 
 type
   RenderResult* = object
@@ -27,9 +29,13 @@ type
 
 proc renderProject*(proj: ProjectFormat; wavPath: string; tempo: float64;
                     tailSeconds: float64 = 2.0; blockSize: int32 = 512;
-                    bits: int32 = 16): RenderResult =
+                    bits: int32 = 16;
+                    onProgress: RenderProgressProc = nil): RenderResult =
   ## Считает проект в WAV. Пайплайн собирается заново и освобождается здесь —
   ## вызывающему остаётся только файл и отчёт.
+  ##
+  ## `onProgress == nil` — прогресс включается сам, если stderr терминал
+  ## (issue #310). Явный колбэк имеет приоритет и работает всегда.
   var reg = initNodeRegistry()
   discard registerBuiltinNodes(reg)
 
@@ -46,12 +52,17 @@ proc renderProject*(proj: ProjectFormat; wavPath: string; tempo: float64;
   opts.bitsPerSample = bits
   opts.tempo = tempo
   opts.automation = scene.automation
+  let totalSeconds = float64(opts.totalFrames) / float64(sr)
+  let printer =
+    if onProgress != nil: onProgress
+    else: autoProgress(totalSeconds, int32(sr))
 
   # Владение пайплайном переходит рендеру: движок внутри `renderToWav`
   # забирает граф себе и освобождает его вместе с движком. Без этой
   # «забывчивости» `destroyScene` ниже освободил бы тот же пайплайн второй
   # раз — двойное освобождение, которое портит кучу.
   let pipeline = detachPipeline(scene)
+  opts.onProgress = printer
   let rep = renderToWav(wavPath, pipeline, opts)
   result.ok = rep.ok
   result.error = rep.error
@@ -59,7 +70,8 @@ proc renderProject*(proj: ProjectFormat; wavPath: string; tempo: float64;
   result.seconds = rep.seconds
 
 proc render*(arr: Arrangement; wavPath: string; tailSeconds: float64 = 2.0;
-             blockSize: int32 = 512; bits: int32 = 16): RenderResult =
+             blockSize: int32 = 512; bits: int32 = 16;
+             onProgress: RenderProgressProc = nil): RenderResult =
   ## Рендер раскладки из `compose/song`.
   renderProject(buildProject(arr), wavPath, float64(arr.tempo), tailSeconds,
-                blockSize, bits)
+                blockSize, bits, onProgress)
