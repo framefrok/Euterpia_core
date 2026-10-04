@@ -20,7 +20,6 @@ import builtin/scene_loader
 import offline_render
 import compose/song
 import compose/progress
-import compose/song
 
 type
   RenderResult* = object
