@@ -81,6 +81,15 @@ task check, "Только тип-проверка адаптеров":
   checkAdapters()
   echo "Адаптеры типизируются корректно."
 
+# Направление зависимостей слоёв (MANIFEST §27, issue #50).
+#
+# Проверка статическая и не требует Nim: скрипт разбирает только строки
+# import/include/from и падает на core ─X→ adapters/nodes, nodes ─X→ adapters
+# и commons ─X→ core/nodes. Тот же скрипт запускает джоб CI `architecture`,
+# поэтому зелёная локальная проверка означает зелёный джоб.
+task archGuard, "Направление зависимостей слоёв: core/nodes/commons не тянут вниз (§27, #50)":
+  exec "python3 tools/check_architecture.py"
+
 
 task unit, "Только unit-тесты DSP и контрактов":
   mkDir buildDir
