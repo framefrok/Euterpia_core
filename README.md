@@ -23,7 +23,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + 6 инструментов (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`) + нотный секвенсор `notes`; C-ядра с SIMD-дисплеями (#274, #301) |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
 | Тесты | ✅ 300+ unit-проверок + интеграционный набор; Core/Commons/инструменты покрыты (#57, #274, #290) |
-| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290) и настройки окружения `config` (#258), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; `transport`, `play`, записи, плагинов и справочник — впереди |
+| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290) и настройки окружения `config` (#258), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; `transport`, `play`, запись и плагины — впереди; справочник команд и JSON-схем — **[docs/cli.md](docs/cli.md)** |
 | Инспектор аудио | 🟡 пассивный анализ WAV: клиппинг, DC, щелчки, провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость; отчёт с локализацией (#290); позже — помощник в v0.7 (#178) |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
 | Надёжность и диагностика | 🟡 план линии v0.5 — библиотека тестов ядра (golden, Node Contract Suite, fault injection, санитайзеры) и «отказ вместо краха»: модель ошибок, чёрный ящик, crash guard, containment нод и плагинов, изоляция скана (#115) |
@@ -289,7 +289,10 @@ CLI — полноценный интерфейс управления (MANIFEST
       сдача (LUFS/true peak, dither, метаданные)
 - [ ] #111 MIDI-файлы (импорт/экспорт SMF); #114 автоматизация; #112 метроном;
       #109 undo/redo; #110 автосохранение и восстановление проекта
-- [ ] #97 батч/REPL (`--script`), #96 справочник CLI и JSON-схемы
+- [x] #96 справочник CLI и JSON-схемы — ✅ сделано: **[docs/cli.md](docs/cli.md)**
+      (команды, режимы вывода, конверт `--json`, коды возврата, сценарии);
+      `help --json` строится из реестра, тест сверяет справочник с реестром
+- [ ] #97 батч/REPL (`--script`)
 - [x] #105 `doctor` (самодиагностика окружения) — ✅ сделано: секции
       build/audio/midi/plugins/fs/csrc, human и `--json`, exit 0/2
 - [x] #259 автодополнение оболочки — ✅ сделано: `completion bash|zsh|fish`
@@ -316,11 +319,14 @@ CLI — полноценный интерфейс управления (MANIFEST
 - [ ] #8 ресемплинг при несовпадении SR; #10 реальные кодеки (FLAC/OGG/MP3/AIFF)
 - [ ] #38 libremidi как MIDI-бэкенд (MIDI 1.0 + 2.0/UMP); #39 LV2 (Lilv) за
       `plugin_api` (VST3, #40, отклонён — MANIFEST §104)
-- [ ] #52 miniaudio: сборка и smoke на Windows/macOS
+- [x] #52 miniaudio: сборка и smoke на Windows/macOS — ✅ сделано: CI-джоб
+      `miniaudio` — матрица Linux/macOS/Windows (сборка, линковка, smoke)
 - [ ] #5 убрать остаточную зависимость Commons → Core; #50 расширить
       architecture-guards на направление зависимостей
-- [ ] #113 релиз 0.3: версия пакета, CHANGELOG, артефакты CLI, установка;
-      #229 поставка (сборки Linux/Windows/macOS, ассоциации файлов)
+- [x] #113 релиз 0.3: версия пакета, CHANGELOG, артефакты CLI, установка —
+      ✅ сделано: `CHANGELOG.md`, версия `0.3.1` == `--version`, раздел
+      «Установка», CI-джоб `artifacts` (Linux/macOS/Windows + smoke);
+      [ ] #229 поставка (инсталлятор, ассоциации файлов, чистая машина)
 
 ### Линия v0.4 — Фундамент и скелет GUI
 
@@ -621,6 +627,32 @@ Support/euterpia/config.json`, Windows: `%APPDATA%\euterpia\config.json`);
 предупреждением в stderr, а команда работает на источнике ниже по приоритету
 (важно для агентских прогонов, §21).
 
+## Установка
+
+Готовых установщиков пока нет — установка из исходников (для пользователя
+и для разработки одинаково). Требования:
+
+- **Nim >= 2.0.0** (проверено на 2.2.12) и C-компилятор (gcc/clang/msvc);
+- внешние библиотеки **опциональны**: `libportaudio` (аудио),
+  `librtmidi` (MIDI), CLAP-плагины — подхватываются в рантайме через
+  `dynlib`; miniaudio вендорен и внешних зависимостей не требует.
+
+```bash
+# из каталога репозитория — ставит пакет и бинарь euterpia в PATH
+nimble install -y
+
+# проверить установку
+euterpia --version          # совпадает с версией пакета и CHANGELOG
+euterpia doctor             # что доступно в этом окружении (аудио/MIDI/плагины)
+euterpia --help             # поверхность команд
+```
+
+- Поверхность команд и JSON-схемы — **[docs/cli.md](docs/cli.md)**.
+- История версий — **[CHANGELOG.md](CHANGELOG.md)**.
+- Сборка без установки: `nimble cli` → `build/euterpia`.
+- Проверка на чистой машине (инсталляторы, ассоциации файлов) и сборки под
+  три ОС — в работе: [#229](https://github.com/framefrok/Euterpia_core/issues/229).
+
 ## Сборка и тесты
 
 Требования: **Nim >= 2.0.0** (проверено на 2.2.12).
@@ -652,7 +684,10 @@ nimble clapMock        # сборка mock CLAP-плагина + сквозно�
 и линкует C-шим miniaudio. Если устройства нет, печатается `SKIP`, но
 обязательно проверяется, что отсутствие устройства даёт код ошибки, а не
 падение; при наличии устройства проверяются enumeration, open/start/stop
-и рост `xrunCount` при искусственной перегрузке.
+и рост `xrunCount` при искусственной перегрузке. CI гоняет этот smoke на
+всех трёх ОС — **Linux, Windows, macOS** (матрица джоба `miniaudio`, #52):
+именно там проверяются ветки линковки `-lole32 -lwinmm` и
+`framework CoreAudio`.
 
 `nimble cliSmoke` собирает CLI и запускает чёрный smoke-тест: коды
 возврата, разделение stdout/stderr, детерминизм вывода, машинный формат

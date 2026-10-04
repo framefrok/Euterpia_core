@@ -219,6 +219,17 @@ suite "CLI: контракт точки входа (#88)":
       check first.code == second.code
       check first.output == second.output
 
+  test "справочник docs/cli.md описывает каждую команду реестра (#96)":
+    # Документация не должна отставать от кода. Сверяем не «на глаз», а
+    # множеством имён из машинной справки: команда, добавленная в реестр, но
+    # не внесённая в справочник, валит этот тест — справочник остаётся
+    # контрактом, а не памяткой.
+    const docsPath = "docs/cli.md"
+    check fileExists(docsPath)
+    let docs = readFile(docsPath)
+    for name in machineCommandNames():
+      check ("`" & name & "`") in docs
+
 suite "CLI: doctor — самодиагностика (#105)":
   test "отчёт согласован: код возврата ⟺ есть провалы проверок":
     let human = runCli(["doctor"])

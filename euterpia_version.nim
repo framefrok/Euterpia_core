@@ -13,4 +13,4 @@
 # ВАЖНО: модуль обязан оставаться чистым (без `import` и без I/O) —
 # его импортирует nimscript-файл пакета, где доступен не весь язык.
 
-const EuterpiaVersion* = "0.3.0"
+const EuterpiaVersion* = "0.3.1"
