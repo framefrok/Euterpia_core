@@ -564,15 +564,26 @@ void eut_piano_process(EutPiano *g, float *outL, float *outR, int stride,
  * Электрогитара (Karplus-Strong)
  *
  * Струна — это линия задержки с демпфером: длина линии = период ноты,
- * демпфер — однополюсный ФНЧ, затухание — множитель за сэмпл. Возбуждение
+ * демпфер — ФНЧ в петле, затухание — множитель за сэмпл. Возбуждение
  * («щипок») заполняет линию шумом, а гребенчатый фильтр по позиции щипка
  * задаёт тембр: щипок у подставки (pick→1) вырезает нечётные гармоники,
  * у грифа (pick→0) даёт глухой «вульф».
  *
  * Указатель чтения — дробный, поэтому струну можно согнуть (pitch bend и
  * вибрато) без пересчёта линии: частота меняется отношением скоростей.
- * После струны — кабинет (ФНЧ) и насыщение усилителя: без них
- * Karplus-Strong звучит как расчёска, с ними — как электрогитара.
+ * После струны — тело корпуса, кабинет (ФНЧ) и насыщение усилителя: без
+ * них Karplus-Strong звучит как расчёска, с ними — как электрогитара.
+ *
+ * Три вещи, без которых синтез слышно «наклеенным»:
+ *   * демпфер в петле двухполюсный: один жёсткий ФНЧ даёт «цифровой» квак
+ *     на хвосте, две ступени (вторая с меньшим коэффициентом) затухают
+ *     ровнее, а строй не плывёт — вторая ступень сильно перекрыта первой;
+ *   * тело корпуса — параллельный медленный ФНЧ (~200–320 Гц), подмешанный
+ *     к прямому сигналу ДО кабинета: мягкий low-shelf, «деревянная» полка
+ *     в нижней середине вместо пустоты;
+ *   * огибающая строя — сильный щипок коротко натягивает струну, высота
+ *     уезжает вверх на пару центов и садится за ~35 мс: характерный
+ *     «въезд» живой щипковой атаки.
  * ========================================================================= */
 
 void eut_guitar_init(EutGuitar *g, EutGuitarVoice *voices, int voiceCount,
@@ -602,6 +613,7 @@ void eut_guitar_reset(EutGuitar *g)
   }
   g->toneLpL = 0.0f;
   g->toneLpR = 0.0f;
+  g->bodyLp = 0.0f;
   g->seqCounter = 0;
   g->active = 0;
 }
@@ -618,6 +630,15 @@ void eut_guitar_set(EutGuitar *g, float pick, float damping, float tone,
   g->release = inst_clamp(release, 0.01f, 2.0f);
   g->pan = inst_clamp(pan, -1.0f, 1.0f);
   g->level = inst_clamp(level, 0.0f, 2.0f);
+
+  /* Тело корпуса: параллельный медленный ФНЧ (~200–320 Гц), подмешанный к
+     прямому сигналу до кабинета. Даёт мягкий low-shelf (~2 дБ ниже 200 Гц,
+     замерено +2.1 дБ по фундаменталу) — «деревянный» вес без раздувания
+     верха. tone двигает и срез, и глубину: тёмный тембр получает больше
+     тела. Считается здесь, а не в цикле: параметр не меняется внутри блока. */
+  const float fc = 200.0f + 120.0f * (1.0f - g->tone);
+  g->bodyCoef = inst_clamp(EUT_INST_TWO_PI * fc / g->sampleRate, 0.005f, 0.5f);
+  g->bodyBoost = 0.18f + 0.25f * (1.0f - g->tone);
 }
 
 void eut_guitar_note_on(EutGuitar *g, int note, float velocity)
@@ -652,6 +673,12 @@ void eut_guitar_note_on(EutGuitar *g, int note, float velocity)
   if (v->v.rng == 0u) v->v.rng = 0xABCDEFu;
   /* Детонация струны: ±4 цента, иначе повторяющиеся ноты звучат копией. */
   v->v.freq = f0 * (float)exp2((double)((inst_noise(&v->v.rng) * 4.0f)) / 1200.0);
+  /* Огибающая строя: сильная атака натягивает струну — короткий «въезд»
+     вверх (максимум ~3 цента на ff) и посадка за ~35 мс. Возврат
+     экспоненциальный, поэтому слышен как признак живой щипковой атаки,
+     а не как вибрато. */
+  v->pitchEnv = vel * vel * 0.0018f;
+  v->pitchEnvCoef = inst_coef(0.035f, g->sampleRate);
   v->v.amp = 0.0f;
   v->v.gainL = 1.0f;   /* гитара моно: панораму ставит движок целиком */
   v->v.gainR = 1.0f;
@@ -698,9 +725,14 @@ void eut_guitar_process(EutGuitar *g, float *outL, float *outR, int stride,
   if (g->active == 0) return;
 
   /* Демпфер струны: palm mute сужает полосу (глухой «чак»), tone её
-     расширяет. Считается на блок: параметр не меняется внутри блока. */
+     расширяет. Вторая ступень с умеренным коэффициентом сглаживает спад
+     верхних гармоник: одна жёсткая петля даёт «цифровой» квак на хвосте,
+     две звучат как настоящий демпфер. Строй не плывёт — вторая ступень
+     сильно перекрыта первой (lp2Coef = 0.55·lpCoef). Ставить её равной
+     первой нельзя: лишний фазовый сдвиг уводит тон вниз на 10–20 центов. */
   const float lpCoef = inst_clamp((0.16f + 0.74f * g->tone) * (1.0f - 0.72f * g->mute),
                                   0.03f, 0.98f);
+  const float lp2Coef = lpCoef * 0.55f;
   /* Кабинет: ФНЧ после струны, ~700 Гц … ~7 кГц. */
   const float cabCoef = inst_clamp(0.045f + 0.72f * g->tone * g->tone, 0.02f, 0.9f);
   const float preGain = 1.0f + 6.0f * g->drive;
@@ -708,7 +740,13 @@ void eut_guitar_process(EutGuitar *g, float *outL, float *outR, int stride,
   const float cents = bendSemitones * 100.0f + modCents;
   /* Сгиб струны = отношение скоростей чтения. Одного exp2 на блок хватает:
      внутри блока bend и вибрато не меняются. */
-  const float rate = (cents == 0.0f) ? 1.0f : (float)exp2((double)cents / 1200.0);
+  const float baseRate = (cents == 0.0f) ? 1.0f : (float)exp2((double)cents / 1200.0);
+
+  /* Тело корпуса — состояние на весь инструмент: гитара моно до панорамы,
+     стерео делает движок (MANIFEST §47). */
+  const float bodyCoef = g->bodyCoef;
+  const float bodyBoost = g->bodyBoost;
+  float bodyLp = g->bodyLp;
 
   float panL = 0.0f;
   float panR = 0.0f;
@@ -728,11 +766,19 @@ void eut_guitar_process(EutGuitar *g, float *outL, float *outR, int stride,
       float *ring = g->memory + (size_t)v->offset;
       const float y = ring[ip] + (ring[iq] - ring[ip]) * frac;
 
-      /* Петля: прочитанный сэмпл фильтруется и записывается обратно на его
-         же место — так линия задержки сама себя поддерживает. */
+      /* Петля: двухполюсный ФНЧ. Прочитанный сэмпл фильтруется и
+         записывается обратно на его же место — так линия задержки сама
+         себя поддерживает. Первая ступень задаёт яркость, вторая
+         добавляет мягкий спад ВЧ. */
       v->lp += (y - v->lp) * lpCoef;
-      ring[ip] = v->lp * v->damp;
+      v->lp2 += (v->lp - v->lp2) * lp2Coef;
+      ring[ip] = v->lp2 * v->damp;
 
+      /* Огибающая строя: короткий сдвиг вверх в момент щипка, затем
+         экспоненциальный возврат к строю. Складывается со сгибом, а не
+         заменяет его: bend идёт от хоста, огибающая — от силы щипка. */
+      const float rate = baseRate * (1.0f + v->pitchEnv);
+      v->pitchEnv *= v->pitchEnvCoef;
       v->rp += rate;
       if (v->rp >= (float)v->len) v->rp -= (float)v->len;
 
@@ -751,14 +797,22 @@ void eut_guitar_process(EutGuitar *g, float *outL, float *outR, int stride,
     }
     g->active = alive;
 
+    /* Тело корпуса: медленный ФНЧ подмешивается к прямому сигналу до
+       кабинета. Ниже ~200 Гц суммарный gain > 1 (плотная нижняя середина),
+       выше 400 Гц — ровно 1: верх не раздувается. */
+    bodyLp += (sum - bodyLp) * bodyCoef;
+    const float warm = sum + bodyBoost * bodyLp;
+
     /* Усилитель целиком: кабинет, насыщение, панорама. */
-    g->toneLpL += (sum - g->toneLpL) * cabCoef;
+    g->toneLpL += (warm - g->toneLpL) * cabCoef;
     g->toneLpR = g->toneLpL;   /* гитара моно, стерео делает панорама */
     const float drv = inst_soft_clip(g->toneLpL * preGain) * postGain;
     const float out = drv * g->level * 0.5f;
     if (outL != NULL) outL[i * stride] += out * panL;
     if (outR != NULL) outR[i * stride] += out * panR;
   }
+
+  g->bodyLp = eut_flush(bodyLp);
 }
 
 /* ===========================================================================

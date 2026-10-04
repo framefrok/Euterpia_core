@@ -160,6 +160,78 @@ proc blockIsFinite(rig: InstrumentRig): bool =
   true
 
 # ----------------------------------------------------------------------------
+# Мерки для гитары: струна — не осциллятор, её свойства видны только по
+# записанному сигналу (автокорреляция и энергия в полосах).
+# ----------------------------------------------------------------------------
+
+const
+  GuitarProbeNote = 28
+    ## E1 ≈ 41.2 Гц. Низкая нота выбрана нарочно: период длинный, поэтому
+    ## сдвиг строя на атаке виден в сэмплах, а не в их долях.
+  GuitarProbeBlock = 512
+
+proc guitarRender(note: int; vel: float32; seconds: float32): seq[float32] =
+  ## Одна нота через C-движок гитары. Параметры близки к нодовым по
+  ## умолчанию, но `drive` выключен: насыщение нелинейно и смазывает
+  ## спектральные мерки.
+  var g = newGuitar(8, Sr)
+  doAssert g.isReady
+  guitarSet(addr g, 0.28f, 0.65f, 0.55f, 0.0f, 0.0f, 0.4f, 0.0f, 0.8f)
+  guitarNoteOn(addr g, note, vel)
+  var l, r: array[GuitarProbeBlock, float32]
+  let total = int(Sr * seconds)
+  result = newSeq[float32](total)
+  var pos = 0
+  while pos < total:
+    for i in 0 ..< l.len:
+      l[i] = 0.0f
+      r[i] = 0.0f
+    guitarProcess(addr g, addr l[0], addr r[0], 1, l.len)
+    for i in 0 ..< min(l.len, total - pos): result[pos + i] = l[i]
+    pos += l.len
+  freeGuitar(addr g)
+
+proc autocorrLag(buf: seq[float32]; first, count, lo, hi: int): float32 =
+  ## Период струны: лаг с лучшей автокорреляцией плюс параболическое
+  ## уточнение. Целый лаг округляет в сэмпл, а въезд строя на атаке — это
+  ## доли сэмпла, их видно только по вершине параболы.
+  var best = -1.0f
+  var bestLag = lo
+  for lag in lo .. hi:
+    var acc = 0.0f
+    for i in first ..< first + count:
+      acc += buf[i] * buf[i + lag]
+    if acc > best:
+      best = acc
+      bestLag = lag
+  if bestLag > lo and bestLag < hi:
+    var c0, c1, c2: float32
+    for i in first ..< first + count:
+      c0 += buf[i] * buf[i + bestLag - 1]
+      c1 += buf[i] * buf[i + bestLag]
+      c2 += buf[i] * buf[i + bestLag + 1]
+    let den = c0 - 2.0f * c1 + c2
+    if den != 0.0f:
+      return float32(bestLag) + 0.5f * (c0 - c2) / den
+  float32(bestLag)
+
+proc bandRms(buf: seq[float32]; first, count: int; fc: float32; high: bool;
+             stages: int): float32 =
+  ## Энергия в полосе на окне `[first, first+count)`: каскад однополюсников.
+  ## Мерка грубая, но одинаковая для любой версии ядра: значение имеют
+  ## отношения, а не абсолютные числа.
+  let a = 1.0f - exp(-6.2831853f * fc / Sr)
+  var z = newSeq[float32](stages)
+  var acc = 0.0
+  for i in first ..< first + count:
+    var y = buf[i]
+    for s in 0 ..< stages:
+      z[s] += (y - z[s]) * a
+      y = if high: y - z[s] else: z[s]
+    acc += float64(y) * float64(y)
+  sqrt(float32(acc / float64(count)))
+
+# ----------------------------------------------------------------------------
 # Движки напрямую (C-контракт)
 # ----------------------------------------------------------------------------
 
@@ -363,6 +435,53 @@ suite "инструменты: C-движки (eut_inst.c)":
     let f = Sr / float32(bestLag)
     check abs(f - 440.0f) < 12.0f
     freePluck(addr g)
+
+  test "тело корпуса гитары даёт нижней середине вес (#318)":
+    # Перекос спектра на окне 0.25–0.75 с: энергия ниже 100 Гц к энергии
+    # выше 500 Гц. Окно фиксированное, а не весь буфер: хвост струны садится
+    # по ВЧ быстрее (это демпфер, а не тело) и на длинной выдержке тянет
+    # мерку за собой. Снято с ядра: с телом 1.39, без него 1.12 (замер
+    # временным отключением `bodyBoost`) — мягкая полка low-shelf ~2 дБ.
+    let buf = guitarRender(GuitarProbeNote, 1.0f, 2.5f)
+    let head = int(Sr * 0.25f)
+    let win = int(Sr * 0.5f)
+    let low = bandRms(buf, head, win, 100.0f, false, 4)
+    let high = bandRms(buf, head, win, 500.0f, true, 4)
+    check low > 0.0f
+    check high > 0.0f
+    check low / high > 1.25f
+
+  test "демпфер струны двухполюсный: ВЧ-хвост садится быстрее низа (#318)":
+    # Вторая ступень ФНЧ в петле ускоряет спад верхних гармоник. Мерка —
+    # насколько полоса 1 кГц+ садится быстрее полосы 300 Гц−: общий спад
+    # струны сокращается сам. Снято с ядра: −19.8 дБ против −10.1 дБ у
+    # однополюсной петли (проверено временным обходом второй ступени).
+    let buf = guitarRender(GuitarProbeNote, 1.0f, 2.5f)
+    let head = int(Sr * 0.25f)
+    let tail = int(Sr * 1.5f)
+    let win = int(Sr * 0.5f)
+    let low = bandRms(buf, tail, win, 300.0f, false, 4) /
+              bandRms(buf, head, win, 300.0f, false, 4)
+    let high = bandRms(buf, tail, win, 1000.0f, true, 4) /
+               bandRms(buf, head, win, 1000.0f, true, 4)
+    check low > 0.0f
+    check high > 0.0f
+    check 20.0f * log10(high / low) < -15.0f
+
+  test "сильный щипок натягивает струну: атака въезжает вверх (#318)":
+    # Огибающая строя: чем сильнее щипок, тем выше строй первые десятки
+    # миллисекунд. Сравниваются сильный и слабый щипок на одном окне — так
+    # из мерки уходит собственная «осадка» струны, она от силы щипка не
+    # зависит. Замер: 1.21 сэмпла у E1 на ff против 0.0004 без огибающей.
+    let loud = guitarRender(GuitarProbeNote, 1.0f, 0.25f)
+    let soft = guitarRender(GuitarProbeNote, 0.1f, 0.25f)
+    check loud.max > 0.01f
+    let loudLag = autocorrLag(loud, 0, 4096, 1000, 1350)
+    let softLag = autocorrLag(soft, 0, 4096, 1000, 1350)
+    check loudLag > 0.0f
+    check softLag > 0.0f
+    # Короче период — выше строй: сильный щипок обязан опережать слабый.
+    check loudLag < softLag - 0.5f
 
   test "флейта монофонична: новая нота гасит прежний голос":
     var g = newFlute(8, Sr)
