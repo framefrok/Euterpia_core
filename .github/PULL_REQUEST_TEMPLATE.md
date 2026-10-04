@@ -27,6 +27,7 @@ Closes #
 ## Проверка
 
 - [ ] `nimble test` зелёный локально
+- [ ] Границы слоёв не сдвинуты: `nimble archGuard` (issue #50)
 - [ ] Добавлен/обновлён тест под изменение (unit или integration)
 - [ ] Для конкурентного кода — прогон под TSan (issue #13)
 - [ ] Release-сборка: `nimble buildRelease`

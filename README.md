@@ -680,6 +680,17 @@ nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адап
 nimble ubsan           # unit-набор под UndefinedBehaviorSanitizer (#13)
 nimble asan            # unit-набор под AddressSanitizer (#13)
 nimble clapMock        # сборка mock CLAP-плагина + сквозной тест хостинга (#53)
+nimble archGuard       # направление зависимостей слоёв (§27, #50)
+```
+
+`nimble archGuard` — статическая проверка правила MANIFEST §27: скрипт
+`tools/check_architecture.py` разбирает только строки `import`/`include`/`from`
+и падает на `core ─X→ adapters/nodes`, `nodes ─X→ adapters`,
+`commons ─X→ core/nodes`. Тот же скрипт запускает джоб CI `architecture`.
+Локально без nimble:
+
+```bash
+python3 tools/check_architecture.py
 ```
 
 `nimble miniaudioSmoke` — единственная проверка, которая реально собирает
