@@ -116,18 +116,24 @@ jobs:
           echo "ok: rt_guard активен в debug"
 
   # ---------------------------------------------------------------------------
-  # miniaudio-бэкенд (issue #31): здесь РЕАЛЬНО собирается и линкуется TU
+  # miniaudio-бэкенд (issue #31, #52): здесь РЕАЛЬНО собирается и линкуется TU
   # miniaudio (adapters/miniaudio/miniaudio_impl.c, вендоренный 0.11.25).
   #
   # Это единственное место, где проверяется компиляция C-шима. На раннере
   # без звуковой подсистемы тест печатает SKIP и всё равно зелёный, но
   # обязательно проверяет, что отсутствие устройства даёт код ошибки, а не
-  # падение. Запускается только на Linux: для Windows/macOS нужен другой
-  # набор фреймворков линковки (отдельная задача, если понадобится).
+  # падение. Матрица трёх ОС: на Windows/macOS miniaudio собирается под
+  # WASAPI/CoreAudio и линкуется с другими системными библиотеками
+  # (`-lole32 -lwinmm` / framework CoreAudio/AudioToolbox) — безобидная
+  # правка `{.passL.}` может сломать сборку молча (#52).
   # ---------------------------------------------------------------------------
   miniaudio:
-    name: miniaudio backend smoke
-    runs-on: ubuntu-latest
+    name: miniaudio backend smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
     steps:
       - uses: actions/checkout@v4
 
@@ -146,8 +152,8 @@ jobs:
   #
   # Раннер без аудио, MIDI и плагинов — это и есть проверка критерия #105
   # «на машине без звука команда честно сообщает о недоступном и не падает».
-  # Только Linux: CLI линкует адаптер miniaudio, а его сборка на Windows и
-  # macOS требует отдельных фреймворков линковки (#52).
+  # Полный контракт гоняется на Linux; сборку и smoke CLI под Windows/macOS
+  # проверяет отдельный джоб `artifacts` (#113, #229).
   # ---------------------------------------------------------------------------
   cli:
     name: cli smoke (build + contract)
@@ -455,4 +461,71 @@ jobs:
 
       - name: nimble clapMock
         run: nimble clapMock
+
+  # ---------------------------------------------------------------------------
+  # Поставка CLI (#113, #229): релизный бинарь на трёх ОС + smoke.
+  # Проверяется то, что нельзя проверить на Linux: сборка и линковка CLI
+  # (miniaudio под WASAPI/CoreAudio), а также что `--version` совпадает с
+  # `euterpia_version.nim` и `doctor` честно работает на машине без звука.
+  # Бинарь загружается артефактом — основа для инсталляторов (#229).
+  # ---------------------------------------------------------------------------
+  artifacts:
+    name: cli artifact (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
+        with:
+          nim-version: '2.2.12'
+
+      - name: Сборка CLI (release)
+        run: nim c -d:release --hints:off --out:build/euterpia cli.nim
+
+      # Единый источник версии: значение берётся ИЗ ИСХОДНИКА, а не
+      # дублируется строкой, поэтому релиз не разойдётся с `--version` (#113).
+      - name: Smoke — версия совпадает с euterpia_version.nim (#113)
+        shell: bash
+        run: |
+          bin=build/euterpia
+          if [ "${{ runner.os }}" = "Windows" ]; then bin=build/euterpia.exe; fi
+          expected=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' euterpia_version.nim | head -1)
+          actual=$($bin --version)
+          echo "expected: $expected"
+          echo "actual:   $actual"
+          if [ "$actual" != "euterpia $expected" ]; then
+            echo "::error::версия бинаря разошлась с euterpia_version.nim (#113)"
+            exit 1
+          fi
+
+      - name: Smoke — doctor на машине без звука не падает (#105)
+        shell: bash
+        run: |
+          bin=build/euterpia
+          if [ "${{ runner.os }}" = "Windows" ]; then bin=build/euterpia.exe; fi
+          set +e
+          $bin doctor --json > doctor.json
+          code=$?
+          set -e
+          # 0 — всё в порядке; 2 — есть провалы проверок (на раннере без
+          # звука это ожидаемо); 3 — баг CLI и недопустим.
+          if [ "$code" != "0" ] && [ "$code" != "2" ]; then
+            echo "::error::doctor вернул недопустимый код $code (#105)"
+            exit 1
+          fi
+          python3 -c "import json; json.load(open('doctor.json'))"
+
+      - name: Артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: euterpia-${{ matrix.os }}
+          path: |
+            build/euterpia
+            build/euterpia.exe
+          if-no-files-found: ignore
 

@@ -70,7 +70,12 @@ proc findCommand*(cmds: seq[CommandDef]; name: string): int =
   -1
 
 proc padTo(text: string; columns: int): string =
-  ## Дополняет строку пробелами до нужного числа КОЛОНОК.
+  ## Дополняет строку пробелами до нужного числа КОЛОНОК, но ВСЕГДА
+  ## оставляет видимый зазор: если текст не умещается в колонку, к нему
+  ## добавляются два пробела, а не ноль.
+  ##
+  ## Раньше длинный `usage` (например, у `midi`) не добивался ни на байт,
+  ## и описание сливалось с синтаксисом: «… [--split каталог]экспорт…».
   ##
   ## `strutils.alignLeft` считает байты, а в справке есть кириллица:
   ## «help [команда]» — это 14 символов и 20 байт, поэтому колонки
@@ -79,6 +84,8 @@ proc padTo(text: string; columns: int): string =
   let width = runeLen(text)
   if width < columns:
     result.add repeat(' ', columns - width)
+  else:
+    result.add "  "
 
 proc globalFlagKeys*(): seq[string] =
   ## Разбирает `GlobalFlags` на отдельные ключи: `"--verbose, -v"` →
@@ -112,8 +119,16 @@ proc helpLines*(cmds: seq[CommandDef]): seq[string] =
     result.add "  " & padTo(item[0], 16) & item[1]
   result.add ""
   result.add "Команды:"
+  # Ширина колонки — под самую широкую команду (не меньше 28), поэтому
+  # длинный синтаксис (`midi`, `disconnect`) не наезжает на описание.
+  # Вывод остаётся детерминированным: ширина зависит только от реестра.
+  var usageWidth = 28
   for c in visibleCommands(cmds):
-    result.add "  " & padTo(c.usage, 28) & c.summary
+    let need = runeLen(c.usage) + 2
+    if need > usageWidth:
+      usageWidth = need
+  for c in visibleCommands(cmds):
+    result.add "  " & padTo(c.usage, usageWidth) & c.summary
   result.add ""
   result.add "Коды возврата:"
   for item in ExitCodeHelp:
