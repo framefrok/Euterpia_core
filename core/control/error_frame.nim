@@ -45,6 +45,8 @@ type
       ## Хост не дал описатель типа: это проблема окружения, а не данные.
     ecUnsupportedCommand
       ## Команда объявлена в контракте, но ещё не реализована.
+    ecNotInvertible
+      ## Операцию нельзя отменить (история её не примет).
     ecApiVersionMismatch
       ## Клиент говорит на другой версии control-API (§58: версии не смешиваются).
     ecInternal
@@ -92,5 +94,6 @@ proc `$`*(code: ErrorCode): string =
   of ecPortNotAvailable: "port_not_available"
   of ecNoDescriptor: "no_descriptor"
   of ecUnsupportedCommand: "unsupported_command"
+  of ecNotInvertible: "not_invertible"
   of ecApiVersionMismatch: "api_version_mismatch"
   of ecInternal: "internal"

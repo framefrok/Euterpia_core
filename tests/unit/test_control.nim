@@ -15,7 +15,7 @@
 #   - объявленные, но не реализованные команды отвечают `ecUnsupportedCommand`,
 #     а чужая версия API — `ecApiVersionMismatch`.
 
-import std/[json, strutils, tables, unittest]
+import std/[strutils, tables, unittest]
 
 import project
 import handles
@@ -23,86 +23,7 @@ import control/error_frame
 import control/commands
 import control/document
 
-const
-  TestDocId = 0x1234ABCD'u32
-  FixedStamp = "2026-01-01T00:00:00"
-
-proc fixedClock(): string = FixedStamp
-
-proc fakeProvider(nodeType: string; spec: var NodeTypeSpec): bool =
-  ## Хозяин описателей для теста: два типа с настоящими по форме параметрами.
-  ## Core о типах нод не знает (§54) — всё, что он видит, это этот провайдер.
-  case nodeType
-  of "test.gain":
-    spec = NodeTypeSpec(id: "test.gain", name: "Gain",
-                        audioIn: 1, audioOut: 1)
-    spec.params = @[
-      ParamSpec(name: "gain", minValue: 0.0f32, maxValue: 2.0f32,
-                defaultValue: 1.0f32, step: 0.01f32)
-    ]
-    true
-  of "test.osc":
-    spec = NodeTypeSpec(id: "test.osc", name: "Oscillator", audioOut: 1)
-    spec.params = @[
-      ParamSpec(name: "waveform", minValue: 0.0f32, maxValue: 3.0f32,
-                defaultValue: 0.0f32, step: 1.0f32, integerLike: true),
-      ParamSpec(name: "freq", minValue: 0.01f32, maxValue: 20000.0f32,
-                defaultValue: 440.0f32, step: 1.0f32),
-      ParamSpec(name: "level", minValue: -80.0f32, maxValue: 6.0f32,
-                defaultValue: -6.0f32, step: 0.1f32),
-    ]
-    true
-  of "test.notes":
-    # Нода без аудиопортов: она и проверяет, что разрыв «всего между нодами»
-    # не требует порта, которого у неё нет.
-    spec = NodeTypeSpec(id: "test.notes", name: "Notes", eventOut: 1)
-    true
-  of "test.seq":
-    # События в обе стороны — единственный тип, к которому можно подключиться
-    # по событиям, не имея аудиопортов.
-    spec = NodeTypeSpec(id: "test.seq", name: "Sequencer", eventIn: 1,
-                        eventOut: 1)
-    true
-  else:
-    false
-
-proc altProvider(nodeType: string; spec: var NodeTypeSpec): bool =
-  ## Тот же контракт описаний из другого места: типы те же, человеческие имена
-  ## свои. Провайдер — единственное, чем различаются хозяева документа.
-  if not fakeProvider(nodeType, spec):
-    return false
-  spec.name = spec.name & " (alt)"
-  true
-
-proc emptyProject(): ProjectFormat =
-  ProjectFormat(format: ProjectFormatName, version: ProjectFormatVersion)
-
-proc newDoc(proj: ProjectFormat = emptyProject(); types: NodeTypeProvider = fakeProvider): Document =
-  ## Документ с фиксированными часами: снимок после сценария не зависит от
-  ## времени запуска, и его можно сравнивать с тем, что сделал CLI.
-  var doc: Document
-  initDocument(doc, proj, TestDocId, types, fixedClock)
-  doc
-
-proc snapshot(doc: Document): string =
-  ## Снимок документа для сравнения «до/после»: тем же кодом пишется файл.
-  $toJson(doc.proj)
-
-proc runScenario(doc: var Document) =
-  ## Один и тот же сценарий для документов с разными хозяевами.
-  discard doc.applyCommand(createNode("test.gain"))
-  discard doc.applyCommand(createNode("test.osc"))
-  discard doc.applyCommand(connect(port(1, cpkAudio, 0), port(2, cpkAudio, 0)))
-  discard doc.applyCommand(setParameter(2, 220.0f32, "freq"))
-  discard doc.applyCommand(deleteNode(1))
-
-proc strippedSnapshot(doc: Document): string =
-  ## Снимок без имён нод: хозяева различаются именно именами, а сравнивать надо
-  ## структуру и значения.
-  var copy = doc
-  for node in copy.proj.graph.nodes.mitems:
-    node.name = "?"
-  snapshot(copy)
+import control_fakes
 
 # =============================================================================
 # Создание ноды

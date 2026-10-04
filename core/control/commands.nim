@@ -23,6 +23,10 @@
 # Строки здесь допустимы: это control-path, а не audio-путь. В audio-кольцо
 # эти команды не кладутся никогда.
 
+import std/[json]
+
+import project
+
 const
   ControlApiVersion* = 1'u16
     ## Версия control-API. Повышается, только если меняется смысл полей
@@ -47,6 +51,12 @@ type
     ccDeleteNote
     ccSetTransport
     ccLoadResource
+    ccRestoreNodeState
+      ## Вернуть автодорожки и состояния плагинов, которые унесло с собой
+      ## удаление ноды. В обычном редакторе не вызывается: это операция
+      ## ОТКАТА (`deleteNode` в обратную сторону), и она объявлена в том же
+      ## контракте, что и остальные, — иначе откат был бы «магией», которую
+      ## нельзя ни показать, ни записать в историю.
 
   ControlPortKind* = enum
     ## Вид сигнала в команде. Порядковые значения совпадают с `SignalType`
@@ -92,6 +102,10 @@ type
       paramIndex*: int32
         ## -1 — параметр ищется по имени.
       value*: float32
+    of ccRestoreNodeState:
+      lanes*: seq[AutomationLaneFormat]
+      states*: seq[PluginStateFormat]
+        ## Что было привязано к ноде до удаления.
     else:
       discard
 
@@ -111,6 +125,7 @@ proc commandName*(kind: ControlCommandKind): string =
   of ccDeleteNote: "note.delete"
   of ccSetTransport: "transport.set"
   of ccLoadResource: "resource.load"
+  of ccRestoreNodeState: "node.restoreState"
 
 proc isImplemented*(kind: ControlCommandKind): bool {.inline.} =
   ## Реализована ли команда в этом подэтапе. Клиент может спросить заранее,
@@ -163,3 +178,138 @@ proc setParameter*(nodeId: int32; value: float32; paramName: string = "";
   result.value = value
   result.paramName = paramName
   result.paramIndex = paramIndex
+
+proc restoreNodeState*(nodeId: int32; lanes: seq[AutomationLaneFormat];
+                       states: seq[PluginStateFormat];
+                       id: uint32 = 0'u32): ControlCommand =
+  result = newCommand(ccRestoreNodeState, id)
+  result.nodeId = nodeId
+  result.lanes = lanes
+  result.states = states
+
+# =============================================================================
+# Контракт на проводе: команда в JSON
+# =============================================================================
+#
+# Зачем: команда попадает в историю (`commons/undo_redo`, #109) и в сценарии
+# (#148 «GUI-действие = команда»), а значит должна пережить перезапуск. Формат
+# версионируется полем `api` вместе с `ControlApiVersion` (§58: версии не
+# смешиваются), а разбор строгий: неизвестный вид команды — отказ, а не «пропустим
+# и посмотрим».
+
+proc field(node: JsonNode; key: string; default: JsonNode): JsonNode {.inline.} =
+  ## Поле объекта или значение по умолчанию: разбор команды не должен падать на
+  ## отсутствующем ключе — он решает, понятна ли команда вообще.
+  if node.kind == JObject and node.hasKey(key): node[key] else: default
+
+proc toJson*(cmd: ControlCommand): JsonNode =
+  ## Команда в машинном виде. Всегда есть `kind` и `api`; поля операции — рядом,
+  ## без вложенности (как в конверте CLI, §21).
+  result = newJObject()
+  result["kind"] = %commandName(cmd.kind)
+  result["api"] = %cmd.apiVersion
+  if cmd.id != 0'u32:
+    result["id"] = %cmd.id
+  case cmd.kind
+  of ccCreateNode:
+    result["nodeType"] = %cmd.nodeType
+    if cmd.name.len > 0: result["name"] = %cmd.name
+    if cmd.newNodeId != 0: result["newNodeId"] = %cmd.newNodeId
+  of ccDeleteNode:
+    result["nodeId"] = %cmd.nodeId
+  of ccConnect, ccDisconnect:
+    result["src"] = %*{"nodeId": cmd.src.nodeId, "kind": ord(cmd.src.kind),
+                       "index": cmd.src.index}
+    result["dst"] = %*{"nodeId": cmd.dst.nodeId, "kind": ord(cmd.dst.kind),
+                       "index": cmd.dst.index}
+    if not cmd.portSpecified: result["portSpecified"] = %false
+  of ccSetParameter:
+    result["nodeId"] = %cmd.nodeId
+    if cmd.paramName.len > 0: result["paramName"] = %cmd.paramName
+    if cmd.paramIndex >= 0: result["paramIndex"] = %cmd.paramIndex
+    result["value"] = %cmd.value
+  of ccRestoreNodeState:
+    result["nodeId"] = %cmd.nodeId
+    var lanes = newJArray()
+    for lane in cmd.lanes:
+      lanes.add %*{"nodeId": lane.nodeId, "paramId": lane.paramId}
+    result["lanes"] = lanes
+    var states = newJArray()
+    for st in cmd.states:
+      states.add %*{"nodeId": st.nodeId, "pluginId": st.pluginId}
+    result["states"] = states
+  else:
+    discard
+
+proc kindFromName*(name: string; kind: var ControlCommandKind): bool =
+  for candidate in ControlCommandKind:
+    if commandName(candidate) == name:
+      kind = candidate
+      return true
+  false
+
+proc portFromJson(node: JsonNode; sel: var PortSelector): bool =
+  if node.kind != JObject or not node.hasKey("nodeId"):
+    return false
+  sel = PortSelector(nodeId: int32(node["nodeId"].getInt),
+                     kind: ControlPortKind(node["kind"].getInt),
+                     index: int32(node["index"].getInt))
+  true
+
+proc fromJson*(node: JsonNode; cmd: var ControlCommand): bool =
+  ## Разбор команды. `false` — форма не наша: неизвестный вид, чужая версия
+  ## или недостающее поле. Молча чинить нельзя — история и скрипт должны
+  ## сказать, что не поняли команду.
+  if node.kind != JObject:
+    return false
+  var kind: ControlCommandKind
+  if not kindFromName(field(node, "kind", newJString("")).getStr, kind):
+    return false
+  let api = uint16(field(node, "api", newJInt(int(ControlApiVersion))).getInt)
+  if api > ControlApiVersion:
+    return false
+  var id = 0'u32
+  if node.hasKey("id"):
+    id = uint32(node["id"].getInt)
+
+
+  case kind
+  of ccCreateNode:
+    cmd = createNode(field(node, "nodeType", newJString("")).getStr,
+                     field(node, "name", newJString("")).getStr,
+                     int32(field(node, "newNodeId", newJInt(0)).getInt), id)
+  of ccDeleteNode:
+    cmd = deleteNode(int32(node["nodeId"].getInt), id)
+  of ccSetParameter:
+    cmd = setParameter(int32(node["nodeId"].getInt),
+                       float32(field(node, "value", newJFloat(0.0)).getFloat),
+                       field(node, "paramName", newJString("")).getStr,
+                       int32(field(node, "paramIndex", newJInt(-1)).getInt),
+                       id)
+  of ccConnect, ccDisconnect:
+    if not node.hasKey("src") or not node.hasKey("dst"):
+      return false
+    var src, dst: PortSelector
+    if not portFromJson(node["src"], src) or not portFromJson(node["dst"], dst):
+      return false
+    let byPort = field(node, "portSpecified", newJBool(true)).getBool
+    cmd = if kind == ccConnect: connect(src, dst, id)
+          else: disconnect(src, dst, byPort, id)
+  of ccRestoreNodeState:
+    var lanes: seq[AutomationLaneFormat] = @[]
+    if node.hasKey("lanes"):
+      for lane in node["lanes"].items:
+        lanes.add AutomationLaneFormat(
+          nodeId: int32(field(lane, "nodeId", newJInt(0)).getInt),
+          paramId: uint32(field(lane, "paramId", newJInt(0)).getInt))
+    var states: seq[PluginStateFormat] = @[]
+    if node.hasKey("states"):
+      for st in node["states"].items:
+        states.add PluginStateFormat(
+          nodeId: int(field(st, "nodeId", newJInt(0)).getInt),
+          pluginId: field(st, "pluginId", newJString("")).getStr)
+    cmd = restoreNodeState(int32(node["nodeId"].getInt), lanes, states, id)
+  else:
+    return false
+  cmd.apiVersion = api
+  true

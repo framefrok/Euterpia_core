@@ -375,6 +375,35 @@ proc applySetParameter(doc: var Document; cmd: ControlCommand): ErrorFrame =
   doc.refreshHandles()
   okFrame()
 
+proc applyRestoreNodeState(doc: var Document;
+                           cmd: ControlCommand): ErrorFrame =
+  ## Вернуть то, что удаление ноды унесло с собой: дорожки автоматизации и
+  ## состояния плагинов. Операция отката, но живёт в общем контракте команд —
+  ## иначе отмена была бы «магией», которую нельзя ни показать, ни записать в
+  ## историю.
+  let found = doc.requireNode(cmd.nodeId, "восстановление состояния ноды")
+  if not found.ok:
+    return found.frame
+  for lane in cmd.lanes:
+    var known = false
+    for existing in doc.proj.sequencer.automationLanes:
+      if existing.nodeId == lane.nodeId and existing.paramId == lane.paramId:
+        known = true
+        break
+    if not known:
+      doc.proj.sequencer.automationLanes.add lane
+  for state in cmd.states:
+    var known = false
+    for existing in doc.proj.pluginStates:
+      if existing.nodeId == state.nodeId and existing.pluginId == state.pluginId:
+        known = true
+        break
+    if not known:
+      doc.proj.pluginStates.add state
+  doc.stampModified()
+  doc.refreshHandles()
+  okFrame()
+
 proc applyCommand*(doc: var Document; cmd: ControlCommand): ErrorFrame =
   ## ЕДИНАЯ точка исполнения операций над документом (§65): её зовут CLI,
   ## Editor, тесты и скрипты — и все получают один и тот же результат.
@@ -393,8 +422,221 @@ proc applyCommand*(doc: var Document; cmd: ControlCommand): ErrorFrame =
   of ccConnect: doc.applyConnect(cmd)
   of ccDisconnect: doc.applyDisconnect(cmd)
   of ccSetParameter: doc.applySetParameter(cmd)
+  of ccRestoreNodeState: doc.applyRestoreNodeState(cmd)
   else:
     errFrame(ecUnsupportedCommand,
              "команда " & commandName(cmd.kind) & " объявлена, но ещё не реализована",
              "реализованные команды: node.create, node.delete, graph.connect, " &
              "graph.disconnect, param.set")
+
+# =============================================================================
+# Обратные команды и транзакции
+# =============================================================================
+#
+# Откат строится из ОБРАТНЫХ КОМАНД, а не из снимка модели: снимок прощает
+# «приблизительно», обратная команда — нет, и её видно в истории. Пустая
+# последовательность обратных команд означает «откат невозможен», и транзакция
+# такую операцию не примет (код `ecNotInvertible`), а не сделает вид, что
+# отменить можно.
+
+type
+  NodeSnapshot* = object
+    ## Что удаление ноды уносит с собой: сама нода плюс то, что на неё ссылалось.
+    node*: NodeFormat
+    lanes*: seq[AutomationLaneFormat]
+    states*: seq[PluginStateFormat]
+    conns*: seq[ControlCommand]
+
+type
+  TransactionPlan* = object
+    ## Результат предпроверки: что делаем (redo), чем отменяем (undo) и почему
+    ## отказали, если отказали.
+    frame*: ErrorFrame
+    undo*: seq[ControlCommand]
+    redo*: seq[ControlCommand]
+    description*: string
+
+proc snapshotNode*(doc: Document; nodeId: int32):
+    tuple[ok: bool, snapshot: NodeSnapshot] =
+  ## Снимок ДО удаления. Пусто означает «такой ноды нет» — тогда и удалять нечего.
+  let index = doc.nodeIndexOf(nodeId)
+  if index < 0:
+    return (false, NodeSnapshot())
+  var lanes: seq[AutomationLaneFormat] = @[]
+  for lane in doc.proj.sequencer.automationLanes:
+    if lane.nodeId == nodeId:
+      lanes.add lane
+  var states: seq[PluginStateFormat] = @[]
+  for st in doc.proj.pluginStates:
+    if st.nodeId == int(nodeId):
+      states.add st
+  var conns: seq[ControlCommand] = @[]
+  for conn in doc.proj.graph.connections:
+    if conn.srcNodeId == nodeId or conn.dstNodeId == nodeId:
+      conns.add connect(
+        port(int32(conn.srcNodeId), ControlPortKind(conn.sigType),
+             int32(conn.srcPortIdx)),
+        port(int32(conn.dstNodeId), ControlPortKind(conn.sigType),
+             int32(conn.dstPortIdx)))
+  (true, NodeSnapshot(node: doc.proj.graph.nodes[index], lanes: lanes,
+                      states: states, conns: conns))
+
+proc restoreSnapshot*(snap: NodeSnapshot): seq[ControlCommand] =
+  ## Обратные команды для удаления: нода с её id и значениями, её связи и всё,
+  ## что было привязано. Порядок важен: сначала нода, потом связи (иначе
+  ## откат упрётся в «нет такой ноды»).
+  result = @[
+    createNode(snap.node.nodeType, snap.node.name, int32(snap.node.id))
+  ]
+  for conn in snap.conns:
+    result.add conn
+  if snap.lanes.len > 0 or snap.states.len > 0:
+    result.add restoreNodeState(int32(snap.node.id), snap.lanes, snap.states)
+
+proc applyCommandRecording*(doc: var Document; cmd: ControlCommand):
+    tuple[frame: ErrorFrame, inverse: seq[ControlCommand]] =
+  ## Команда вместе с обратными к ней. Обратные вычисляются из состояния ДО
+  ## правки: поэтому откат — точное зеркало, а не «примерно то же».
+  case cmd.kind
+  of ccCreateNode:
+    let before = doc.proj.graph.nodes.len
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    let newId = (if doc.proj.graph.nodes.len > before:
+                   int32(doc.proj.graph.nodes[before].id) else: 0'i32)
+    (frame, @[deleteNode(newId)])
+  of ccDeleteNode:
+    let snap = doc.snapshotNode(cmd.nodeId)
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk() or not snap.ok:
+      return (frame, @[])
+    (frame, snap.snapshot.restoreSnapshot())
+  of ccConnect:
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, @[disconnect(cmd.src, cmd.dst)])
+  of ccDisconnect:
+    let snap = doc.snapshotNode(cmd.src.nodeId)
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, snap.snapshot.restoreSnapshot())
+  of ccSetParameter:
+    # Прежнее значение параметра — единственное, что нужно для отката.
+    let index = doc.nodeIndexOf(cmd.nodeId)
+    if index < 0:
+      let frame = doc.applyCommand(cmd)     # вернёт «нет такой ноды»
+      return (frame, @[])
+    var spec: NodeTypeSpec
+    if doc.typeSpec(doc.proj.graph.nodes[index].nodeType, spec).isOk() and
+       spec.params.len > 0:
+      let paramIdx = spec.paramIndexOf(cmd.paramName, cmd.paramIndex)
+      if paramIdx >= 0:
+        let old = doc.proj.graph.nodes[index].parameters[spec.params[paramIdx].name]
+        let frame = doc.applyCommand(cmd)
+        if not frame.isOk():
+          return (frame, @[])
+        return (frame, @[setParameter(cmd.nodeId, old, cmd.paramName, cmd.paramIndex)])
+    (doc.applyCommand(cmd), @[])
+  else:
+    # Команда не реализована или её откат не определён: применяем как обычно,
+    # но откат не обещаем.
+    let frame = doc.applyCommand(cmd)
+    (frame, @[])
+
+proc applyCommands*(doc: var Document; commands: seq[ControlCommand];
+                    description: string = ""): ErrorFrame =
+  ## Атомарное применение ГОТОВОГО набора команд — без вычисления обратных.
+  ## Так применяются отмена и повтор: набор уже записан в истории, и «как его
+  ## отменить» знать не нужно. Требование «у каждой команды есть обратная»
+  ## относится только к записи новой операции (`planTransaction`).
+  result = errFrame(ecInvalidArgument, "пустой набор команд",
+                    "нечего применять")
+  if commands.len == 0:
+    return
+  var probe = doc
+  for cmd in commands:
+    let frame = probe.applyCommand(cmd)
+    if not frame.isOk():
+      result = errFrame(frame.code,
+                        "набор «" & description & "» отменен: " & frame.message,
+                        if frame.hint.len > 0:
+                          frame.hint & " (ни одна команда не применена)"
+                        else: "ни одна команда не применена")
+      return
+  for cmd in commands:
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      result = errFrame(ecInternal,
+                        "команда прошла пробу, но не выполнилась: " & frame.message,
+                        "внутренняя ошибка ядра")
+      return
+  result = okFrame()
+
+proc planTransaction*(doc: Document; commands: seq[ControlCommand];
+                      description: string = ""): TransactionPlan =
+  ## План составной операции БЕЗ побочных эффектов: команды прогоняются на
+  ## копии документа, и возвращаются обратные команды для отката.
+  ##
+  ## План — это и есть «pre-check → откат» (#127) целиком: документ ещё цел,
+  ## поэтому откатывать нечего. Разделение плана и применения нужно ещё и
+  ## истории: она должна записать шаг с обратными командами, а применить — через
+  ## общий исполнитель, иначе две дороги исполнения снова разойдутся.
+  result.description = description
+  if commands.len == 0:
+    result.frame = errFrame(ecInvalidArgument, "транзакция без команд",
+                            "составная операция должна что-то делать")
+    return
+
+  var probe = doc
+  var inverses: seq[seq[ControlCommand]] = @[]
+  for cmd in commands:
+    let outcome = probe.applyCommandRecording(cmd)
+    if not outcome.frame.isOk():
+      result.frame = errFrame(outcome.frame.code,
+                              "транзакция «" & description & "» отменена: " &
+                              outcome.frame.message,
+                              if outcome.frame.hint.len > 0:
+                                outcome.frame.hint & " (ни одна команда не применена)"
+                              else: "ни одна команда не применена")
+      return
+    if outcome.inverse.len == 0:
+      result.frame = errFrame(ecNotInvertible,
+                              "откат для «" & commandName(cmd.kind) &
+                              "» не определён",
+                              "история не примет операцию, которую нельзя отменить")
+      return
+    inverses.add outcome.inverse
+
+  # Отмена идёт в ОБРАТНОМ порядке команд — сначала отменяется последняя. Внутри
+  # одной команды её обратные команды идут в своём порядке: удалённая нода
+  # сначала появляется, потом к ней подключаются связи, потом возвращаются
+  # дорожки автоматизации и состояния плагинов.
+  var i = inverses.len - 1
+  while i >= 0:
+    for inverse in inverses[i]:
+      result.undo.add inverse
+    dec i
+  result.redo = commands
+  result.frame = okFrame()
+
+proc applyTransaction*(doc: var Document; commands: seq[ControlCommand];
+                       description: string = ""): TransactionPlan =
+  ## Составная операция: план на копии, затем те же команды по-настоящему.
+  ## Отказ не оставляет НИКАКИХ изменений — откатывать нечего, потому что до
+  ## второй фазы документ не трогали.
+  result = doc.planTransaction(commands, description)
+  if not result.frame.isOk():
+    return
+  for cmd in commands:
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      # Проба прошла, значит это невозможно — но код должен быть честным.
+      result.frame = errFrame(ecInternal,
+                              "транзакция прошла пробу, но не выполнилась: " &
+                              frame.message,
+                              "внутренняя ошибка ядра")
+      return
+  result.frame = okFrame()
