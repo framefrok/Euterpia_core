@@ -15,6 +15,8 @@ import std/[math, os]
 
 import compose/score
 import compose/song
+import compose/engine
+import compose/midi
 
 const BARS = 64
 
@@ -225,6 +227,18 @@ proc main() =
   let proj = here / "ensemble.eut"
   arr.writeProject(proj)
   echo "wrote ", proj
+
+  let rr = arr.render(here / "ensemble.wav")
+  if rr.ok:
+    echo "rendered ", rr.path, " (", rr.seconds, " s)"
+  else:
+    echo "render error: ", rr.error
+
+  # MIDI: один файл на всю пьесу и по файлу на инструмент.
+  let mm = arr.writeMidi(here / "ensemble.mid")
+  echo "wrote ", mm.files[0], " (", mm.tracks, " дорожек, ", mm.notes, " нот)"
+  let spl = arr.writeMidiTracks(here / "midi")
+  echo "wrote ", spl.files.len, " MIDI-файлов в ", here / "midi"
 
 when isMainModule:
   main()

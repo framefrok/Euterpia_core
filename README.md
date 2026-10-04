@@ -20,7 +20,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | MIDI | ✅ `midi_api` + RtMidi-адаптер, SMF-кодек в Commons |
 | Входной тракт и запись | ✅ вход → ноды/рекордер, RT-кольцо → worker → WAV |
 | Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
-| DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + 4 инструмента (`organ`, `piano`, `guitar`, `drums`) + нотный секвенсор `notes`; C-ядра с SIMD-дисплеями (#274) |
+| DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + 6 инструментов (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`) + нотный секвенсор `notes`; C-ядра с SIMD-дисплеями (#274, #301) |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
 | Тесты | ✅ 300+ unit-проверок + интеграционный набор; Core/Commons/инструменты покрыты (#57, #274, #290) |
 | CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290) и настройки окружения `config` (#258), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; `transport`, `play`, записи, плагинов и справочник — впереди |
@@ -46,6 +46,24 @@ euterpia analyze out.wav --fail-on warn  # CI-гейт: код 1 при дефе
 euterpia analyze out.wav --snippets /tmp/snips --heatmap spec.pgm
 ```
 
+## MIDI: отдать проект наружу
+
+Проект (и любую пьесу из `libs/compose`) можно выгрузить в Standard MIDI File —
+в DAW, нотатор или секвенсор:
+
+```bash
+euterpia midi ensemble.eut                        # один файл: ensemble.mid
+euterpia midi ensemble.eut --out build/song.mid   # один файл, свой путь
+euterpia midi ensemble.eut --split build/midi     # по файлу на инструмент
+```
+
+Один файл — формат 1: дорожка-«дирижёр» (имя, темп, размер) плюс по дорожке на
+каждую партию. `--split` пишет по файлу на инструмент (формат 0, имя начинается
+с номера дорожки). Тики проекта и SMF совпадают по разрешению, поэтому позиции
+не пересчитываются, а клипы раскрываются ровно так, как их играет движок
+(`core/sequencer`). Обёртки для кода — `libs/compose/midi`:
+`arr.writeMidi(path)` и `arr.writeMidiTracks(dir)`.
+
 Логика — в Core (`core/audio_inspect`, `core/spectrum`), поэтому тот же API
 позже использует Editor как **пассивный помощник** (v0.7, #178): он ничего не
 меняет ни в проекте, ни в звуке.
@@ -66,6 +84,10 @@ CLI**: `compositions/neo-romantic` (#275, ~2:48) и `compositions/dark-fantasy`
 nimble compose                          # собрать пьесу библиотекой и проверить
 ./compositions/dark-fantasy/build.sh    # то же для одной пьесы
 ```
+
+Пишите музыку на Nim: полное руководство — **[docs/libs/compose](docs/libs/compose/README.md)**
+(алгоритм, примеры, компиляция) и каталог инструментов —
+[docs/libs/compose/instruments.md](docs/libs/compose/instruments.md).
 
 У каждой пьесы рядом лежит `build_via_cli.sh` — тот же состав, собранный только
 командами CLI (§19). Оба пути дают идентичный рендер.

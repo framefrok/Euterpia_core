@@ -599,6 +599,335 @@ void eut_drums_all_off(EutDrums *g);
 EUT_TARGET_CLONES
 void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n);
 
+/* --- флейта ---------------------------------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float ph, dph;        /* основная фаза (почти синус) */
+  float breathLp, breathHp;  /* полоса дыхательного шума */
+  float chiff;          /* короткий шумовой «чиф» атаки */
+  float vibAmp;         /* задержанное вибрато: растёт после атаки */
+} EutFluteVoice;
+
+typedef struct {
+  EutFluteVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;       /* яркость: доля верхних гармоник и шума */
+  float breath;     /* уровень дыхания */
+  float vibrato;    /* глубина вибрато, центы */
+  float pan;
+  float level;
+  float lfoPhase, lfoInc;
+  int   seqCounter;
+  int   active;
+} EutFlute;
+
+void eut_flute_init(EutFlute *g, EutFluteVoice *voices, int voiceCount, float sampleRate);
+void eut_flute_reset(EutFlute *g);
+void eut_flute_set(EutFlute *g, float tone, float breath, float vibratoCents,
+                   float pan, float level);
+void eut_flute_note_on(EutFlute *g, int note, float velocity);
+void eut_flute_note_off(EutFlute *g, int note);
+void eut_flute_all_off(EutFlute *g);
+EUT_TARGET_CLONES
+void eut_flute_process(EutFlute *g, float *outL, float *outR, int stride,
+                       int n, float bendSemitones, float modCents);
+
+/* --- волынка --------------------------------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float ph, dph;        /* шантир (мелодия) */
+  float lp, hp;         /* формирование «тростникового» тембра */
+} EutBagpipeVoice;
+
+typedef struct {
+  EutBagpipeVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;        /* яркость шантира */
+  float droneLevel;  /* уровень бурдона */
+  float droneFreq;   /* частота бурдона, Гц */
+  float pan;
+  float level;
+  float dronePh1, dronePh2;  /* бурдон: тон и квинта выше */
+  float droneAmp;            /* плавное включение бурдона (без щелчка) */
+  float droneCoef;
+  int   seqCounter;
+  int   active;
+} EutBagpipe;
+
+void eut_bagpipe_init(EutBagpipe *g, EutBagpipeVoice *voices, int voiceCount, float sampleRate);
+void eut_bagpipe_reset(EutBagpipe *g);
+void eut_bagpipe_set(EutBagpipe *g, float tone, float droneLevel, float droneFreq,
+                     float pan, float level);
+void eut_bagpipe_note_on(EutBagpipe *g, int note, float velocity);
+void eut_bagpipe_note_off(EutBagpipe *g, int note);
+void eut_bagpipe_all_off(EutBagpipe *g);
+EUT_TARGET_CLONES
+void eut_bagpipe_process(EutBagpipe *g, float *outL, float *outR, int stride, int n);
+
+/* --- смычковые (струнный ансамбль) ----------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float ph;             /* фаза пилообразной волны */
+  float lp1, lp2;       /* двухполюсный ФНЧ (яркость/корпус) */
+  float detune;         /* микрорасстройка голоса (ансамбль), центы */
+  float vibAmp;         /* задержанное вибрато */
+} EutStringsVoice;
+
+typedef struct {
+  EutStringsVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;       /* яркость: срез ФНЧ (0..1) */
+  float vibrato;    /* глубина вибрато, центы */
+  float ensemble;   /* разброс расстройки, центы */
+  float pan;
+  float level;
+  float lfoPhase, lfoInc;
+  float lpCoef;
+  int   seqCounter;
+  int   active;
+} EutStrings;
+
+void eut_strings_init(EutStrings *g, EutStringsVoice *voices, int voiceCount, float sampleRate);
+void eut_strings_reset(EutStrings *g);
+void eut_strings_set(EutStrings *g, float tone, float vibratoCents, float ensembleCents,
+                     float pan, float level);
+void eut_strings_note_on(EutStrings *g, int note, float velocity);
+void eut_strings_note_off(EutStrings *g, int note);
+void eut_strings_all_off(EutStrings *g);
+EUT_TARGET_CLONES
+void eut_strings_process(EutStrings *g, float *outL, float *outR, int stride,
+                         int n, float bendSemitones, float modCents);
+
+/* --- колокол (трубчатый/церковный, ингармонические частичные) -------------- */
+
+#define EUT_INST_BELL_PARTIALS 8
+
+typedef struct {
+  EutInstVoice v;
+  float ph[EUT_INST_BELL_PARTIALS];
+  float dph[EUT_INST_BELL_PARTIALS];
+  float amp[EUT_INST_BELL_PARTIALS];    /* затухание частичных */
+  float ampCoef[EUT_INST_BELL_PARTIALS];
+} EutBellVoice;
+
+typedef struct {
+  EutBellVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tune;       /* множитель строя */
+  float decay;      /* множитель затухания */
+  float tone;       /* яркость (наклон частичных) */
+  float pan;
+  float level;
+  int   seqCounter;
+  int   active;
+} EutBell;
+
+void eut_bell_init(EutBell *g, EutBellVoice *voices, int voiceCount, float sampleRate);
+void eut_bell_reset(EutBell *g);
+void eut_bell_set(EutBell *g, float tune, float decay, float tone, float pan, float level);
+void eut_bell_note_on(EutBell *g, int note, float velocity);
+void eut_bell_note_off(EutBell *g, int note);
+void eut_bell_all_off(EutBell *g);
+EUT_TARGET_CLONES
+void eut_bell_process(EutBell *g, float *outL, float *outR, int stride, int n);
+
+/* --- щипковые (арфа, клавесин) --------------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  int   offset;         /* начало линии струны в арене g->memory */
+  int   len;            /* длина линии, кадров (период струны) */
+  int   pos;            /* текущая позиция в линии */
+  float damp;           /* множитель петли за сэмпл (затухание) */
+  float lp;             /* петлевой ФНЧ (яркость струны) */
+  float y1, y2;         /* резонатор корпуса (двухполюсный) */
+  float a1, a2, bg;     /* его коэффициенты: y = bg*x + a1*y1 + a2*y2 */
+} EutPluckVoice;
+
+typedef struct {
+  EutPluckVoice *voices;
+  int   voiceCount;
+  int   lineCap;        /* вместимость одной линии, кадров */
+  float *memory;        /* voiceCount * lineCap; выделяет хост */
+  float sampleRate;
+  float tone;           /* яркость петлевого ФНЧ 0..1 */
+  float damping;        /* затухание: 0 — короткий щипок, 1 — длинный звон */
+  float pluck;          /* резкость щипка (шумовая атака) 0..1 */
+  float body;           /* глубина резонатора корпуса 0..1 */
+  float bodyHz;         /* частота корпуса, Гц */
+  float pan;
+  float level;
+  int   seqCounter;
+  int   active;
+} EutPluck;
+
+void eut_pluck_init(EutPluck *g, EutPluckVoice *voices, int voiceCount,
+                    float *memory, int lineCap, float sampleRate);
+void eut_pluck_reset(EutPluck *g);
+void eut_pluck_set(EutPluck *g, float tone, float damping, float pluck,
+                   float body, float bodyHz, float pan, float level);
+void eut_pluck_note_on(EutPluck *g, int note, float velocity);
+void eut_pluck_note_off(EutPluck *g, int note);
+void eut_pluck_all_off(EutPluck *g);
+EUT_TARGET_CLONES
+void eut_pluck_process(EutPluck *g, float *outL, float *outR, int stride, int n);
+
+/* --- свирель/блокфлейта (деревянный духовой) ------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float ph, dph;
+  float breathLp, breathHp;
+  float chiff;
+  float vibAmp;
+} EutRecorderVoice;
+
+typedef struct {
+  EutRecorderVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;       /* яркость (доля верхних гармоник) */
+  float breath;     /* дыхание/шум 0..1 */
+  float vibrato;    /* глубина, центы */
+  float pan;
+  float level;
+  float lfoPhase, lfoInc;
+  int   seqCounter;
+  int   active;
+} EutRecorder;
+
+void eut_recorder_init(EutRecorder *g, EutRecorderVoice *voices, int voiceCount,
+                       float sampleRate);
+void eut_recorder_reset(EutRecorder *g);
+void eut_recorder_set(EutRecorder *g, float tone, float breath, float vibratoCents,
+                      float pan, float level);
+void eut_recorder_note_on(EutRecorder *g, int note, float velocity);
+void eut_recorder_note_off(EutRecorder *g, int note);
+void eut_recorder_all_off(EutRecorder *g);
+EUT_TARGET_CLONES
+void eut_recorder_process(EutRecorder *g, float *outL, float *outR, int stride,
+                          int n, float bendSemitones, float modCents);
+
+/* --- медь (труба/валторна) ------------------------------------------------- */
+
+typedef struct {
+  EutInstVoice v;
+  float ph;
+  float lp1, lp2;       /* мягкий ФНЧ (яркость) */
+  float f1y1, f1y2;     /* форманта меди (резонатор) */
+  float f1a1, f1a2, f1g;
+  float vibAmp;
+} EutBrassVoice;
+
+typedef struct {
+  EutBrassVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;       /* яркость/открытость раструба 0..1 */
+  float rasp;       /* «жёсткость», шумовой призвук атаки 0..1 */
+  float vibrato;    /* глубина, центы */
+  float pan;
+  float level;
+  float lfoPhase, lfoInc;
+  int   seqCounter;
+  int   active;
+} EutBrass;
+
+void eut_brass_init(EutBrass *g, EutBrassVoice *voices, int voiceCount,
+                    float sampleRate);
+void eut_brass_reset(EutBrass *g);
+void eut_brass_set(EutBrass *g, float tone, float rasp, float vibratoCents,
+                   float pan, float level);
+void eut_brass_note_on(EutBrass *g, int note, float velocity);
+void eut_brass_note_off(EutBrass *g, int note);
+void eut_brass_all_off(EutBrass *g);
+EUT_TARGET_CLONES
+void eut_brass_process(EutBrass *g, float *outL, float *outR, int stride,
+                       int n, float bendSemitones, float modCents);
+
+/* --- литавры (настраиваемый барабан) --------------------------------------- */
+
+#define EUT_INST_TIMPANI_MODES 4
+
+typedef struct {
+  EutInstVoice v;
+  float ph[EUT_INST_TIMPANI_MODES];
+  float dph[EUT_INST_TIMPANI_MODES];
+  float amp[EUT_INST_TIMPANI_MODES];
+  float ampCoef[EUT_INST_TIMPANI_MODES];
+  float noiseLp;
+} EutTimpaniVoice;
+
+typedef struct {
+  EutTimpaniVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tune;       /* общий строй, множитель */
+  float decay;      /* множитель затухания */
+  float tone;       /* яркость и шум атаки 0..1 */
+  float pan;
+  float level;
+  int   seqCounter;
+  int   active;
+} EutTimpani;
+
+void eut_timpani_init(EutTimpani *g, EutTimpaniVoice *voices, int voiceCount,
+                      float sampleRate);
+void eut_timpani_reset(EutTimpani *g);
+void eut_timpani_set(EutTimpani *g, float tune, float decay, float tone,
+                     float pan, float level);
+void eut_timpani_note_on(EutTimpani *g, int note, float velocity);
+void eut_timpani_note_off(EutTimpani *g, int note);
+void eut_timpani_all_off(EutTimpani *g);
+EUT_TARGET_CLONES
+void eut_timpani_process(EutTimpani *g, float *outL, float *outR, int stride, int n);
+
+/* --- хор (формантные гласные) ---------------------------------------------- */
+
+#define EUT_INST_CHOIR_FORMANTS 3
+
+typedef struct {
+  EutInstVoice v;
+  float ph;             /* фаза «голосовой щели» (источник) */
+  float y1[EUT_INST_CHOIR_FORMANTS], y2[EUT_INST_CHOIR_FORMANTS];
+  float a1[EUT_INST_CHOIR_FORMANTS], a2[EUT_INST_CHOIR_FORMANTS];
+  float gain[EUT_INST_CHOIR_FORMANTS];
+  float vibAmp;
+} EutChoirVoice;
+
+typedef struct {
+  EutChoirVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float vowel;      /* 0 — «а», 0.5 — «о», 1 — «и» */
+  float tone;       /* яркость источника 0..1 */
+  float vibrato;    /* глубина, центы */
+  float pan;
+  float level;
+  float lfoPhase, lfoInc;
+  int   seqCounter;
+  int   active;
+} EutChoir;
+
+void eut_choir_init(EutChoir *g, EutChoirVoice *voices, int voiceCount,
+                    float sampleRate);
+void eut_choir_reset(EutChoir *g);
+void eut_choir_set(EutChoir *g, float vowel, float tone, float vibratoCents,
+                   float pan, float level);
+void eut_choir_note_on(EutChoir *g, int note, float velocity);
+void eut_choir_note_off(EutChoir *g, int note);
+void eut_choir_all_off(EutChoir *g);
+EUT_TARGET_CLONES
+void eut_choir_process(EutChoir *g, float *outL, float *outR, int stride,
+                       int n, float bendSemitones, float modCents);
+
 
 /* ===========================================================================
  * ABI-проверка
@@ -627,6 +956,24 @@ int eut_abi_sizeof_guitar_voice(void);
 int eut_abi_sizeof_guitar(void);
 int eut_abi_sizeof_drum_voice(void);
 int eut_abi_sizeof_drums(void);
+int eut_abi_sizeof_flute_voice(void);
+int eut_abi_sizeof_flute(void);
+int eut_abi_sizeof_bagpipe_voice(void);
+int eut_abi_sizeof_bagpipe(void);
+int eut_abi_sizeof_strings_voice(void);
+int eut_abi_sizeof_strings(void);
+int eut_abi_sizeof_bell_voice(void);
+int eut_abi_sizeof_bell(void);
+int eut_abi_sizeof_pluck_voice(void);
+int eut_abi_sizeof_pluck(void);
+int eut_abi_sizeof_recorder_voice(void);
+int eut_abi_sizeof_recorder(void);
+int eut_abi_sizeof_brass_voice(void);
+int eut_abi_sizeof_brass(void);
+int eut_abi_sizeof_timpani_voice(void);
+int eut_abi_sizeof_timpani(void);
+int eut_abi_sizeof_choir_voice(void);
+int eut_abi_sizeof_choir(void);
 
 #ifdef __cplusplus
 }

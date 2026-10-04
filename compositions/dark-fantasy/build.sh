@@ -1,33 +1,21 @@
 #!/usr/bin/env bash
 # compositions/dark-fantasy/build.sh
 #
-# Сборка «Cathedral of Ash» БИБЛИОТЕКОЙ libs/compose (Nim, issue #285):
-# проект (.eut) строится нашим кодом — ноды, связи, параметры из описателей,
-# дорожки с нотами, — а рендер и проверка идут через CLI.
-#
-# Альтернативный путь (сборка тем же составом только через CLI, §19) —
-# в build_via_cli.sh; результат обязан совпадать.
+# Сборка и рендер «Cathedral of Ash» библиотекой libs/compose (issue #300):
+# генератор сам пишет .notes, .eut и .wav — обёртка почти не нужна. Здесь
+# только отдельный nimcache (иначе два генератора «generate.nim» делят кэш)
+# и проверка инспектором.
 #
 # Использование:  ./build.sh [путь-к-euterpia]
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 E="${1:-${EUTERPIA:-$HERE/../../build/euterpia}}"
-PROJ="$HERE/ensemble.eut"
-OUT="$HERE/ensemble.wav"
+ROOT="$HERE/../.."
 
-rm -f "$PROJ"
-
-run() { "$E" "$@"; }
-
-echo "--- generate (libs/compose, Nim) ---"
-nim r --hints:off "$HERE/generate.nim"
-
-echo "--- graph check ---"
-run graph check --file "$PROJ" | tail -3
-
-echo "--- render ---"
-run render "$PROJ" "$OUT" --bits 16 | tail -6
+echo "--- generate + render + MIDI (libs/compose) ---"
+nim c -r --hints:off --nimcache:"$ROOT/build/nc_compose_dark" \
+    --out:"$ROOT/build/compose_dark" "$HERE/generate.nim"
 
 echo "--- analyze ---"
-run analyze "$OUT" || true
+"$E" analyze "$HERE/ensemble.wav" --fail-on error

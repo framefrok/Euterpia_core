@@ -18,4 +18,22 @@ int eut_abi_sizeof_guitar_voice(void) { return (int)sizeof(EutGuitarVoice); }
 int eut_abi_sizeof_guitar(void)       { return (int)sizeof(EutGuitar); }
 int eut_abi_sizeof_drum_voice(void)   { return (int)sizeof(EutDrumVoice); }
 int eut_abi_sizeof_drums(void)        { return (int)sizeof(EutDrums); }
+int eut_abi_sizeof_flute_voice(void)  { return (int)sizeof(EutFluteVoice); }
+int eut_abi_sizeof_flute(void)        { return (int)sizeof(EutFlute); }
+int eut_abi_sizeof_bagpipe_voice(void){ return (int)sizeof(EutBagpipeVoice); }
+int eut_abi_sizeof_bagpipe(void)      { return (int)sizeof(EutBagpipe); }
+int eut_abi_sizeof_strings_voice(void){ return (int)sizeof(EutStringsVoice); }
+int eut_abi_sizeof_strings(void)      { return (int)sizeof(EutStrings); }
+int eut_abi_sizeof_bell_voice(void)   { return (int)sizeof(EutBellVoice); }
+int eut_abi_sizeof_bell(void)         { return (int)sizeof(EutBell); }
+int eut_abi_sizeof_pluck_voice(void)  { return (int)sizeof(EutPluckVoice); }
+int eut_abi_sizeof_pluck(void)        { return (int)sizeof(EutPluck); }
+int eut_abi_sizeof_recorder_voice(void){ return (int)sizeof(EutRecorderVoice); }
+int eut_abi_sizeof_recorder(void)     { return (int)sizeof(EutRecorder); }
+int eut_abi_sizeof_brass_voice(void)  { return (int)sizeof(EutBrassVoice); }
+int eut_abi_sizeof_brass(void)        { return (int)sizeof(EutBrass); }
+int eut_abi_sizeof_timpani_voice(void){ return (int)sizeof(EutTimpaniVoice); }
+int eut_abi_sizeof_timpani(void)      { return (int)sizeof(EutTimpani); }
+int eut_abi_sizeof_choir_voice(void)  { return (int)sizeof(EutChoirVoice); }
+int eut_abi_sizeof_choir(void)        { return (int)sizeof(EutChoir); }
 

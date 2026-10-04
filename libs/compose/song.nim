@@ -19,14 +19,14 @@
 #
 # Слой: верхний (libs). Зависит от Core и Nodes — наоборот быть не может.
 
-import std/[json, os, tables, times]
+import std/[json, os, times]
 
 import signal_types
 import transport
 import project
-import sdk/node_api
 import sdk/node_registry
 import builtin/builtin_registry
+import compose/builder
 import compose/score
 
 {.push raises: [].}
@@ -89,24 +89,8 @@ proc ceilToBar(ticks, barTicks: int32): int32 =
 
 proc makeNode(reg: NodeRegistry; typeId, name: string; nodeId: int;
               overrides: seq[tuple[name: string; value: float32]]): NodeFormat =
-  ## Нода по описателю типа: порты и умолчания параметров — из реестра,
-  ## затем переопределения. Так проект получает ровно то, что умеет нода.
-  let entry = reg.findNodeType(typeId)
-  doAssert(not entry.isNil, "неизвестный тип ноды: " & typeId)
-  let d = entry.desc
-  result.id = nodeId
-  result.nodeType = typeId
-  result.name = name
-  result.audioInCount = int(d.audioInCount)
-  result.audioOutCount = int(d.audioOutCount)
-  result.ctrlInCount = int(d.ctrlInCount)
-  result.ctrlOutCount = int(d.ctrlOutCount)
-  result.eventInCount = int(d.eventInCount)
-  result.eventOutCount = int(d.eventOutCount)
-  for k in 0 ..< int(d.paramCount):
-    result.parameters[readFixed(d.params[k].name)] = d.params[k].defaultValue
-  for ov in overrides:
-    result.parameters[ov.name] = ov.value
+  ## Нода по описателю типа (делегат к `compose/builder`).
+  nodeFrom(reg, typeId, name, nodeId, overrides)
 
 # ============================================================================
 # Сборка

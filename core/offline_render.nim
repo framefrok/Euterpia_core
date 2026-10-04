@@ -156,9 +156,16 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
                   opts: OfflineRenderOptions): OfflineRenderReport =
   ## Считает пайплайн офлайн и пишет WAV.
   ##
-  ## Пайплайн остаётся собственностью вызывающего: рендер его не
-  ## освобождает (он может быть отрендерен повторно или с другой
-  ## автоматизацией). Освобождается только движок, созданный здесь.
+  ## ВЛАДЕНИЕ — важное: пайплайн ПЕРЕХОДИТ этой функции. Движок забирает
+  ## его себе (`postGraphUpdate`) и освобождает вместе с движком
+  ## (`destroyAudioEngine`); если передать граф не удалось, освобождаем сами.
+  ##
+  ## Раньше здесь было написано «пайплайн остаётся собственностью
+  ## вызывающего» — и это было неправдой: движок освобождал его, а сцена
+  ## потом освобождала повторно (двойное освобождение; ловится только
+  ## ASan/ASan+useMalloc, а в обычной сборке портит кучу и падает через
+  ## несколько аллокаций). Поэтому вызывающий обязан «забыть» указатель:
+  ## `scene.pipeline = nil` (или `detachPipeline(scene)`) до вызова.
   result.ok = false
   result.path = path
 
@@ -178,6 +185,13 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
     result.error = "глубина — 16 или 24 бита, получено: " & $opts.bitsPerSample
     return
 
+  # Пайплайн теперь наш: движок освободит его сам. Если до передачи графа
+  # что-то не сложилось — освобождаем здесь, чтобы память не текла.
+  var handedOver = false
+  defer:
+    if not handedOver:
+      destroyPipeline(p)
+
   let tempo = if opts.tempo > 1.0: opts.tempo else: 120.0
   let samplesPerTick =
     float64(opts.sampleRate) * 60.0 / (tempo * float64(PpqTicksPerQuarter))
@@ -192,6 +206,7 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
   if not engine.postGraphUpdate(p):
     result.error = "движок не принял граф"
     return
+  handedOver = true
   discard engine.postSetTempo(tempo)
   discard engine.postPlay()
 
