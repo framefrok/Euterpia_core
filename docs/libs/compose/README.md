@@ -152,13 +152,14 @@ organ.setParam("bars", 0.6f32)
 arr.add(organ, genOrgan())
 ```
 
-Идентификаторы нод «из коробки» — **все 25** (10 DSP-нод, 14 инструментов
+Идентификаторы нод «из коробки» — **все 28** (10 DSP-нод, 17 инструментов
 и нотный секвенсор):
 
 - инструменты: `euterpia.organ`, `euterpia.piano`, `euterpia.guitar`,
   `euterpia.drums`, `euterpia.flute`, `euterpia.bagpipe`, `euterpia.strings`,
   `euterpia.bell`, `euterpia.harp`, `euterpia.harpsichord`,
-  `euterpia.recorder`, `euterpia.brass`, `euterpia.timpani`, `euterpia.choir`;
+  `euterpia.recorder`, `euterpia.brass`, `euterpia.timpani`, `euterpia.choir`,
+  `euterpia.ukulele`, `euterpia.accordion`, `euterpia.harmonica`;
 - обработка и суммирование: `euterpia.input`, `euterpia.gain`,
   `euterpia.pan`, `euterpia.mix`, `euterpia.biquad`, `euterpia.svf`,
   `euterpia.delay`, `euterpia.compressor`, `euterpia.osc`, `euterpia.noise`;

@@ -32,6 +32,7 @@ import builtin/instruments/recorder
 import builtin/instruments/brass
 import builtin/instruments/timpani
 import builtin/instruments/choir
+import builtin/instruments/reed
 
 const
   Sr = 48000.0'f32
@@ -232,6 +233,111 @@ proc bandRms(buf: seq[float32]; first, count: int; fc: float32; high: bool;
   sqrt(float32(acc / float64(count)))
 
 # ----------------------------------------------------------------------------
+# Мерки для третьей партии (#321): щипковый нейлон и свободноязычковые.
+#
+# Язычок и струна — не осцилляторы: «мягче верх», «есть разлив» и «шум
+# воздуха слышен» проверяются только по записанному сигналу. Ниже — те же
+# приёмы, что для гитары: автокорреляция (строй), энергия в полосах
+# (яркость) и огибающая (биения разлива).
+# ----------------------------------------------------------------------------
+
+const
+  PluckProbeNote = 69
+    ## A4: укулеле обязан держать ту же высоту, что арфа и клавесин.
+  ReedProbeNote = 60
+    ## C4 ≈ 261.6 Гц (лаг 183 при 48 кГц) — середина диапазона язычков.
+  ReedProbeBlock = 512
+
+proc pluckRender(note: int; vel, nylon: float32; seconds: float32):
+    seq[float32] =
+  ## Один щипок через C-движок щипковых. `nylon` — доля нейлоновой струны
+  ## (0 — сталь арфы и клавесина, 1 — укулеле).
+  var g = newPluck(8, Sr)
+  doAssert g.isReady
+  pluckSet(addr g, 0.7f, 0.9f, 0.4f, 0.3f, 200.0f, nylon, 0.0f, 0.8f)
+  pluckNoteOn(addr g, note, vel)
+  var l, r: array[ReedProbeBlock, float32]
+  let total = int(Sr * seconds)
+  result = newSeq[float32](total)
+  var pos = 0
+  while pos < total:
+    for i in 0 ..< l.len:
+      l[i] = 0.0f
+      r[i] = 0.0f
+    pluckProcess(addr g, addr l[0], addr r[0], 1, l.len)
+    for i in 0 ..< min(l.len, total - pos): result[pos + i] = l[i]
+    pos += l.len
+  freePluck(addr g)
+
+proc reedRender(note: int; vel: float32; seconds: float32; tone, detune, noise,
+                attack, formantHz: float32): seq[float32] =
+  ## Одна нота через C-движок свободноязычковых. Характер инструмента — это
+  ## ровно `detune` (разлив) и `formantHz` (камера): так нода задаёт баян и
+  ## гармошку, и так же их проверяет тест.
+  var g = newReed(12, Sr)
+  doAssert g.isReady
+  reedSet(addr g, tone, detune, noise, attack, formantHz, 0.0f, 0.8f)
+  reedNoteOn(addr g, note, vel)
+  var l, r: array[ReedProbeBlock, float32]
+  let total = int(Sr * seconds)
+  result = newSeq[float32](total)
+  var pos = 0
+  while pos < total:
+    for i in 0 ..< l.len:
+      l[i] = 0.0f
+      r[i] = 0.0f
+    reedProcess(addr g, addr l[0], addr r[0], 1, l.len)
+    for i in 0 ..< min(l.len, total - pos): result[pos + i] = l[i]
+    pos += l.len
+  freeReed(addr g)
+
+proc signalPeak(buf: seq[float32]): float32 =
+  ## Пик записи: «движок отдал звук» и «движок отдал тишину».
+  for v in buf:
+    result = max(result, abs(v))
+
+proc envelopeVar(buf: seq[float32]; win: int): float32 =
+  ## Разброс огибающей: RMS по окнам `win` кадров, затем коэффициент
+  ## вариации (σ/μ). Биения разлива видны именно здесь: ровный язычок даёт
+  ## единицы процентов, разлив — десятки.
+  var sums: seq[float64]
+  var pos = 0
+  while pos + win <= buf.len:
+    var acc = 0.0'f64
+    for i in pos ..< pos + win:
+      acc += float64(buf[i]) * float64(buf[i])
+    sums.add sqrt(acc / float64(win))
+    pos += win
+  if sums.len == 0: return 0.0f
+  var mean = 0.0'f64
+  for v in sums: mean += v
+  mean /= float64(sums.len)
+  if mean <= 0.0: return 0.0f
+  var variance = 0.0'f64
+  for v in sums:
+    variance += (v - mean) * (v - mean)
+  sqrt(float32(variance / float64(sums.len))) / float32(mean)
+
+proc diffRms(a, b: seq[float32]): float32 =
+  ## RMS разницы двух записей. Нужен там, где параметр ничего не меняет
+  ## «в среднем» (шум воздуха поверх тона), но обязан быть слышен.
+  let n = min(a.len, b.len)
+  if n == 0: return 0.0f
+  var acc = 0.0'f64
+  for i in 0 ..< n:
+    let d = float64(a[i] - b[i])
+    acc += d * d
+  sqrt(float32(acc / float64(n)))
+
+proc paramDefault(desc: NodeDesc; name: string): float32 =
+  ## Значение параметра по умолчанию: им нода говорит, каким инструмент
+  ## рождён (разлив баяна, нейлон укулеле).
+  for k in 0 ..< int(desc.paramCount):
+    if readFixed(desc.params[k].name) == name:
+      return desc.params[k].defaultValue
+  -1.0f
+
+# ----------------------------------------------------------------------------
 # Движки напрямую (C-контракт)
 # ----------------------------------------------------------------------------
 
@@ -339,7 +445,7 @@ suite "инструменты: C-движки (eut_inst.c)":
       var g = newPluck(4, Sr)
       check g.isReady
       check pluckInitAt(addr g, 44100.0f)
-      pluckSet(addr g, 0.6f, 0.7f, 0.4f, 0.4f, 200.0f, 0.0f, 0.8f)
+      pluckSet(addr g, 0.6f, 0.7f, 0.4f, 0.4f, 200.0f, 0.0f, 0.0f, 0.8f)
       pluckNoteOn(addr g, 60, 0.9f)
       var peak = 0.0f
       for b in 0 ..< 8:
@@ -409,7 +515,7 @@ suite "инструменты: C-движки (eut_inst.c)":
   test "щипковые держат строй: арфа на ноте A4 даёт ~440 Гц":
     var g = newPluck(4, Sr)
     check g.isReady
-    pluckSet(addr g, 0.7f, 0.9f, 0.4f, 0.3f, 200.0f, 0.0f, 0.8f)
+    pluckSet(addr g, 0.7f, 0.9f, 0.4f, 0.3f, 200.0f, 0.0f, 0.0f, 0.8f)
     pluckNoteOn(addr g, 69, 1.0f)
     var l, r: array[512, float32]
     var n = 0
@@ -538,7 +644,7 @@ suite "инструменты: C-движки (eut_inst.c)":
     # обнулить, «заряженная» струна звучит после паники.
     var g = newPluck(4, Sr)
     check g.isReady
-    pluckSet(addr g, 0.7f, 0.9f, 0.4f, 0.3f, 200.0f, 0.0f, 0.8f)
+    pluckSet(addr g, 0.7f, 0.9f, 0.4f, 0.3f, 200.0f, 0.0f, 0.0f, 0.8f)
     pluckNoteOn(addr g, 69, 1.0f)
     var l, r: array[512, float32]
     for b in 0 ..< 4:
@@ -558,6 +664,121 @@ suite "инструменты: C-движки (eut_inst.c)":
         peak = max(peak, abs(l[i]))
     check peak == 0.0f
     freePluck(addr g)
+
+  # --- третья партия: укулеле, баян, гармошка (#321) -------------------------
+
+  test "нейлон глушит верх струны: укулеле темнее стали (#321)":
+    # Укулеле — это тот же Карплус-Стронг с нейлоновой струной: мягче
+    # возбуждение и быстрее спад ВЧ в петле. Мерка — отношение энергии выше
+    # 2 кГц к энергии ниже: яркость струны, а не её громкость.
+    proc brightness(buf: seq[float32]): float32 =
+      bandRms(buf, 2400, 9600, 2000.0f, true, 3) /
+        bandRms(buf, 2400, 9600, 2000.0f, false, 3)
+
+    let steel = pluckRender(PluckProbeNote, 1.0f, 0.0f, 1.0f)
+    let half = pluckRender(PluckProbeNote, 1.0f, 0.5f, 1.0f)
+    let nylon = pluckRender(PluckProbeNote, 1.0f, 1.0f, 1.0f)
+    check signalPeak(steel) > 0.05f
+    check signalPeak(nylon) > 0.02f
+    let bs = brightness(steel)
+    let bh = brightness(half)
+    let bn = brightness(nylon)
+    # Замер с ядра: 0.111 → 0.064 → 0.028. Спад обязан быть монотонным:
+    # ручка «нейлон» не переключатель, а доля.
+    check bn < bh
+    check bh < bs
+    check bn < 0.5f * bs
+    # Сталь не тронута: при `nylon = 0` формулы петли и возбуждения прежние,
+    # поэтому яркость держится на историческом уровне (замер с ядра: 0.111).
+    # Мерка сторожит именно путь арфы и клавесина: правка «для укулеле»,
+    # задевшая сталь, сдвинет эту границу.
+    check abs(bs - 0.111f) < 0.03f
+
+  test "при nylon = 0 струна прежняя: у steel-инструментов параметр выключен (#321)":
+    # Гарантия «арфа и клавесин звучат бит-в-бит как раньше» держится на
+    # том, что формула петли и возбуждения при `nylon = 0` не меняется.
+    # Проверяем то, чем она обеспечена: новые ручки выключены у steel-нод и
+    # включены у укулеле, разлив у баяна есть, у гармошки — нет.
+    check paramDefault(getHarpDesc()[], "nylon") == 0.0f
+    check paramDefault(getHarpsichordDesc()[], "nylon") == 0.0f
+    check paramDefault(getUkuleleDesc()[], "nylon") == 1.0f
+    check paramDefault(getAccordionDesc()[], "detune") > 0.0f
+    check paramDefault(getHarmonicaDesc()[], "detune") == 0.0f
+    check paramDefault(getUkuleleDesc()[], "tone") > 0.0f
+
+  test "язычковые держат строй: баян и гармошка дают C4 (#321)":
+    # Лаг 183 при 48 кГц — это 262 Гц. Разлив на строй не влияет: три
+    # язычка расходятся на центы, период остаётся общим.
+    let acc = reedRender(ReedProbeNote, 0.9f, 1.5f, 0.50f, 12.0f, 0.0f, 0.05f,
+                         1400.0f)
+    let har = reedRender(ReedProbeNote, 0.9f, 1.5f, 0.72f, 0.0f, 0.0f, 0.018f,
+                         2600.0f)
+    check signalPeak(acc) > 0.05f
+    check signalPeak(har) > 0.05f
+    for buf in [acc, har]:
+      # Второй секунды нет — строй садится за десятки мс, и по окну сразу
+      # после атаки виден уже установившийся тон.
+      let f = Sr / autocorrLag(buf, 9600, 8192, 150, 220)
+      check abs(f - 261.63f) < 4.0f
+
+  test "разлив баяна качает огибающую, сухой язычок ровен (#321)":
+    # Разлив — это биения расстроенных язычков: их слышно как «дыхание»
+    # громкости. Мерка — коэффициент вариации RMS по окнам 50 мс.
+    let spread = reedRender(ReedProbeNote, 0.9f, 1.5f, 0.50f, 12.0f, 0.0f,
+                            0.05f, 1400.0f)
+    let dry = reedRender(ReedProbeNote, 0.9f, 1.5f, 0.50f, 0.0f, 0.0f, 0.05f,
+                         1400.0f)
+    let spreadVar = envelopeVar(spread, 2400)
+    let dryVar = envelopeVar(dry, 2400)
+    check dryVar > 0.0f
+    # Замер с ядра: 0.264 против 0.071 — разлив качает огибающую в разы.
+    check spreadVar > 2.0f * dryVar
+
+  test "воздух язычка слышен и пропорционален параметру шума (#321)":
+    # Шум меха/дыхания не меняет тон «в среднем», поэтому мера — энергия
+    # разницы с записью без шума: она обязана расти вместе с параметром.
+    let quiet = reedRender(ReedProbeNote, 0.9f, 1.0f, 0.72f, 0.0f, 0.0f,
+                           0.018f, 2600.0f)
+    let again = reedRender(ReedProbeNote, 0.9f, 1.0f, 0.72f, 0.0f, 0.0f,
+                           0.018f, 2600.0f)
+    let mid = reedRender(ReedProbeNote, 0.9f, 1.0f, 0.72f, 0.0f, 0.3f, 0.018f,
+                         2600.0f)
+    let loud = reedRender(ReedProbeNote, 0.9f, 1.0f, 0.72f, 0.0f, 1.0f, 0.018f,
+                          2600.0f)
+    # Один и тот же вход — один и тот же выход: шум язычка детерминирован
+    # (как и у остальных движков — от ноты, а не от времени).
+    check diffRms(quiet, again) == 0.0f
+    let dMid = diffRms(mid, quiet)
+    let dLoud = diffRms(loud, quiet)
+    # Замер с ядра: 0.00098 при 0.3 и 0.00326 при 1.0 — рост линейный.
+    check dMid > 1.0e-4f
+    check dLoud > 2.5f * dMid
+
+  test "reset язычковых обнуляет состояние голосов — следующий блок тишина (#321)":
+    # Контракт паники распространяется и на новый движок: фаз язычков,
+    # резонаторов камеры и шума воздуха после `reedReset` быть не должно.
+    var g = newReed(8, Sr)
+    check g.isReady
+    reedSet(addr g, 0.5f, 12.0f, 0.6f, 0.05f, 1400.0f, 0.0f, 0.8f)
+    reedNoteOn(addr g, 60, 0.9f)
+    var l, r: array[512, float32]
+    for b in 0 ..< 4:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      reedProcess(addr g, addr l[0], addr r[0], 1, l.len)
+
+    reedReset(addr g)
+    var peak = 0.0f
+    for b in 0 ..< 4:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      reedProcess(addr g, addr l[0], addr r[0], 1, l.len)
+      for i in 0 ..< l.len:
+        peak = max(peak, abs(l[i]))
+    check peak == 0.0f
+    freeReed(addr g)
 
 
 # ----------------------------------------------------------------------------
@@ -583,6 +804,9 @@ suite "инструменты: ноды играют по событиям":
       (getBrassFactory(), getBrassDesc(), 60),
       (getTimpaniFactory(), getTimpaniDesc(), 45),
       (getChoirFactory(), getChoirDesc(), 60),
+      (getUkuleleFactory(), getUkuleleDesc(), 60),
+      (getAccordionFactory(), getAccordionDesc(), 60),
+      (getHarmonicaFactory(), getHarmonicaDesc(), 60),
       (getDrumsFactory(), getDrumsDesc(), 38)
     ]
     for (factory, desc, note) in rigs:
@@ -647,6 +871,9 @@ suite "инструменты: выход прямо в драйвер (interlea
       (getGuitarFactory(), getGuitarDesc(), 57),
       (getFluteFactory(), getFluteDesc(), 57),
       (getBagpipeFactory(), getBagpipeDesc(), 57),
+      (getUkuleleFactory(), getUkuleleDesc(), 57),
+      (getAccordionFactory(), getAccordionDesc(), 57),
+      (getHarmonicaFactory(), getHarmonicaDesc(), 57),
       (getDrumsFactory(), getDrumsDesc(), 38)
     ]
     for (factory, desc, note) in rigs:

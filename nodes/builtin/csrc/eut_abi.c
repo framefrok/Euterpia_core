@@ -36,4 +36,6 @@ int eut_abi_sizeof_timpani_voice(void){ return (int)sizeof(EutTimpaniVoice); }
 int eut_abi_sizeof_timpani(void)      { return (int)sizeof(EutTimpani); }
 int eut_abi_sizeof_choir_voice(void)  { return (int)sizeof(EutChoirVoice); }
 int eut_abi_sizeof_choir(void)        { return (int)sizeof(EutChoir); }
+int eut_abi_sizeof_reed_voice(void)   { return (int)sizeof(EutReedVoice); }
+int eut_abi_sizeof_reed(void)         { return (int)sizeof(EutReed); }
 

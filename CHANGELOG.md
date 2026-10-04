@@ -24,6 +24,20 @@
 - `OfflineRenderOptions.onProgress` — колбэк прогресса ядра: раз в секунду
   аудио и всегда на последнем кадре; `nil` — не вызывается вовсе
   ([#310](https://github.com/framefrok/Euterpia_core/issues/310)).
+- Третья партия инструментов: `euterpia.ukulele`, `euterpia.accordion`
+  (баян) и `euterpia.harmonica` (губная гармошка) — всего в реестре
+  28 типов ([#321](https://github.com/framefrok/Euterpia_core/issues/321)):
+  - `EutReed` — новый C-движок свободноязычковых (язычок в камере):
+    разлив из расстроенных язычков, шум меха/дыхания, клац клапана,
+    посадка строя после атаки и нелинейность язычка от velocity. Две
+    точки входа — баян (разлив 12 центов, камера ≈1.4 кГц) и гармошка
+    (сухой строй, ≈2.6 кГц) — `nodes/builtin/instruments/reed.nim`;
+  - `EutPluck` получил параметр `nylon` (доля нейлоновой струны), и на нём
+    построен `euterpia.ukulele`: мягче возбуждение и быстрее спад верха —
+    глухой «деревянный» щипок вместо звона стали;
+  - укулеле, баян и гармошка в `builtin_registry`, биндинги и
+    `abiCheck` (`EutReedVoice`/`EutReed` — 180/64, `EutPluck` 64→72),
+    справочник `docs/libs/compose/instruments.md`.
 
 ### Изменено
 - `euterpia.guitar`: звук струны стал «живее» — тело корпуса (мягкая полка
@@ -34,6 +48,10 @@
   (`EutGuitarVoice` 104→116, `EutGuitar` 80→88 — хост берёт их из
   `eut_abi_sizeof_guitar*`)
   ([#318](https://github.com/framefrok/Euterpia_core/issues/318)).
+- `euterpia.harp` и `euterpia.harpsichord` звучат **бит-в-бит** как раньше:
+  новый `nylon` у `EutPluck` у них выключен (`0`), поэтому ни возбуждение,
+  ни петля не изменились
+  ([#321](https://github.com/framefrok/Euterpia_core/issues/321)).
 
 ### Исправлено
 - `libs/compose`: раскладка проверяется до сборки проекта. Неизвестный
