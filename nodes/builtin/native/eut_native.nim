@@ -1762,8 +1762,8 @@ proc abiCheck*(): bool =
   c_size_guitar_voice() == 116 and
   c_size_guitar() == 88 and
   c_size_guitar() mod 8 == 0 and
-  c_size_drum_voice() == 184 and
-  c_size_drums() == 56 and
+  c_size_drum_voice() == 328 and
+  c_size_drums() == 72 and
   c_size_drums() mod 8 == 0 and
   c_size_flute_voice() == 96 and
   c_size_flute() == 56 and
