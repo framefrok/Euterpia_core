@@ -16,9 +16,7 @@
 
 ```nim
 import std/os
-import compose/score
-import compose/song
-import compose/engine
+import compose/compose   # score + song + engine + progress одной строкой
 
 let here = parentDir(currentSourcePath())
 
@@ -234,6 +232,52 @@ build/euterpia analyze song.wav --fail-on warn
 Готовые примеры: `compositions/neo-romantic/generate.nim`,
 `compositions/dark-fantasy/generate.nim`; задача `nimble compose` собирает одну
 из пьес целиком.
+
+## Ошибки и предупреждения
+
+Пьеса проверяется **до** сборки проекта, и ошибки называют, что делать
+(issue #311):
+
+```nim
+var i = instrument("euterpia.kazoo", "K", "k")   # такого типа нет
+i.setParam("blabla", 1.0)                        # такого параметра нет
+```
+
+```text
+compose: партия 0 («k»): ошибка: неизвестный тип ноды: euterpia.kazoo
+       доступные типы: euterpia.bagpipe, euterpia.bell, …
+compose: пьеса не собрана, проблем: 1
+ok=false
+```
+
+Правила:
+
+| текст | что значит | что делать |
+|---|---|---|
+| `ошибка: неизвестный тип ноды` | нет такого `euterpia.*` | сверить имя со списком в сообщении или с [instruments.md](instruments.md) |
+| `ошибка: у ноды … нет параметра` | опечатка в `setParam` | имя из списка «допустимые параметры» |
+| `ошибка: имя ноды … уже занято` | две партии с одним именем | имена нод уникальны |
+| `внимание: партия без тактов` | партия пустая, будет тишина | добавить такты или убрать партию |
+| `внимание: в раскладке нет ни одной партии` | проект пустой | добавить `arr.add(...)` |
+
+- **Ошибка** останавливает сборку: проект не пишется, `render` возвращает
+  `ok = false` и текст в `rr.error`. Раньше неизвестный тип ронял скрипт
+  `AssertionDefect` со стектреймом, а опечатка в параметре **терялась
+  молча** — рендер был «успешным», а музыка звучала не так.
+- **Предупреждение** не мешает: печатается в stderr и попадает в
+  `rr.warnings`.
+- Проверить раскладку самому, не рендеря:
+
+```nim
+for problem in validate(arr):
+  echo problem
+```
+
+- Свой файловый/проектный путь: `writeProjectChecked(arr, path, problems)`
+  вернёт `false` и заполнит `problems`, не создав файл.
+
+Забытый импорт — тоже частая причина «Error: attempting to call undeclared
+routine: 'render'». Один импорт решает: `import compose/compose`.
 
 ## MIDI: проект в файл
 

@@ -11,6 +11,8 @@
 #
 # Слой: верхний (libs), поверх Core и Nodes.
 
+import std/sequtils
+
 import project
 import sdk/node_registry
 import builtin/builtin_registry
@@ -26,6 +28,10 @@ type
     error*: string
     path*: string
     seconds*: float64
+    warnings*: seq[string]
+      ## Предупреждения проверки раскладки: пустые партии, «в раскладке
+      ## нет ни одной партии». Рендер при этом честно считает тишину, но
+      ## сказать об этом обязан (#311).
 
 proc renderProject*(proj: ProjectFormat; wavPath: string; tempo: float64;
                     tailSeconds: float64 = 2.0; blockSize: int32 = 512;
@@ -73,5 +79,15 @@ proc render*(arr: Arrangement; wavPath: string; tailSeconds: float64 = 2.0;
              blockSize: int32 = 512; bits: int32 = 16;
              onProgress: RenderProgressProc = nil): RenderResult =
   ## Рендер раскладки из `compose/song`.
+  ##
+  ## Проверка ДО сборки (#311): неизвестный тип ноды или опечатка в имени
+  ## параметра возвращаются как `ok = false` с текстом, а не падают и не
+  ## теряются молча.
+  let problems = validate(arr)
+  if hasErrors(problems):
+    result.error = problemBlock(problems)
+    return
+  warnComposition(problems)
+  result.warnings = problems.filterIt(not isError(it))
   renderProject(buildProject(arr), wavPath, float64(arr.tempo), tailSeconds,
                 blockSize, bits, onProgress)
