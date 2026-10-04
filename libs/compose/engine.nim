@@ -86,6 +86,11 @@ proc render*(arr: Arrangement; wavPath: string; tailSeconds: float64 = 2.0;
   let problems = validate(arr)
   if hasErrors(problems):
     result.error = problemBlock(problems)
+    # Печатаем, а не только возвращаем: скрипт вправе не смотреть в
+    # `rr.error` (многие только печатают `ok = false`), а молчаливая
+    # ошибка — ровно то, что чиним (#311). Дублирование с собственным
+    # `echo rr.error` безобидно: это stderr, а не отчёт команды.
+    toStderr(problemBlock(problems))
     return
   warnComposition(problems)
   result.warnings = problems.filterIt(not isError(it))
