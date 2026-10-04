@@ -159,7 +159,7 @@ proc problemBlock*(problems: seq[string]): string =
     for line in p.splitLines():
       result.add "\n  " & line
 
-proc toStderr(text: string) =
+proc toStderr*(text: string) =
   ## Запись в stderr не должна ронять рендер из-за сломанного потока —
   ## то же правило, что в `cli/context.nim` и `compose/progress`.
   try:
