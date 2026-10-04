@@ -1,4 +1,10 @@
-#waveform_cache.nim
+# core/waveform_cache.nim
+#
+# Кэш пиков волновой формы для отрисовки таймлайна и клипов.
+#
+# Живёт в Core, а не в Commons (MANIFEST §25/§26, issue #5): модуль работает
+# с аудио-доменом и читает файлы через audio_file_io, то есть знает о Core.
+# Commons обязан оставаться нейтральным (не знает ни о Core, ни о Nodes).
 import std/[tables, os, locks, math, deques, times]
 import audio_file_io
 

@@ -1,9 +1,10 @@
 # tests/unit/test_audio_file_io.nim
 #
-# commons/audio_file_io.nim — фасад чтения/записи аудиофайлов (issue #57).
+# core/audio_file_io.nim — фасад чтения/записи аудиофайлов (issue #57).
 #
-# Модуль — единственная точка, где осталась зависимость Commons -> Core
-# (issue #5). Здесь это не проверяется; проверяется поведение фасада:
+# Модуль перенесён в Core из commons/ в issue #5: он использует wav_codec и
+# audio_buffer, а Commons не знает о Core (MANIFEST §26/§27). Проверяется
+# поведение фасада:
 #   - round-trip WAV для 16/24/32-bit (int и float), стерео, порядок каналов;
 #   - диспетчер форматов: неподдерживаемое расширение -> IOError;
 #   - отсутствующий файл -> IOError;
