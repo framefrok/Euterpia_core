@@ -19,7 +19,7 @@
 #
 # Слой: верхний (libs). Зависит от Core и Nodes — наоборот быть не может.
 
-import std/[json, os, times]
+import std/[json, os, strutils, tables, times]
 
 import signal_types
 import transport
@@ -93,6 +93,96 @@ proc makeNode(reg: NodeRegistry; typeId, name: string; nodeId: int;
   nodeFrom(reg, typeId, name, nodeId, overrides)
 
 # ============================================================================
+# Проверка ДО сборки (issue #311)
+# ============================================================================
+#
+# Правило простое: «ошибка:» — сборка невозможна, «внимание:» — сборка
+# возможна, но человек должен знать. Разделение нужно, потому что пустой
+# проект законен, а опечатка в параметре — нет.
+
+proc validate*(arr: Arrangement): seq[string] =
+  ## Проблемы раскладки, найденные ДО сборки проекта. Пустой список —
+  ## всё в порядке. Собирается всё сразу, а не падает на первом: пять
+  ## опечаток должны быть видны за один запуск, а не за пять.
+  var reg = initNodeRegistry()
+  discard registerBuiltinNodes(reg)
+
+  if arr.entries.len == 0:
+    return @["внимание: в раскладке нет ни одной партии — проект будет пустым"]
+
+  var used: Table[string, int]
+  for i, e in arr.entries:
+    let who = "партия " & $i & " («" & e.part.name & "»)"
+    for problem in nodeProblems(reg, e.inst.nodeType, e.inst.nodeName,
+                                e.inst.params):
+      result.add who & ": " & problem
+    if e.inst.notesName.len == 0:
+      result.add who & ": ошибка: пустое имя нотной ноды (notesName)"
+    for key in [e.inst.nodeName, e.inst.notesName]:
+      if key.len == 0:
+        continue
+      # getOrDefault, а не `used[key]`: под `raises: []` обращение к
+      # отсутствующему ключу компилятор считает KeyError — проверка ниже
+      # делает KeyError недостижимым, но сигнатуру это не отменяет.
+      let prior = used.getOrDefault(key, -1)
+      if prior >= 0:
+        result.add who & ": ошибка: имя ноды «" & key &
+                 "» уже занято партией " & $prior &
+                 " — имена нод должны быть уникальны"
+      else:
+        used[key] = i
+    if e.part.bars.len == 0:
+      result.add who & ": внимание: партия без тактов — будет тишина"
+
+proc isError*(problem: string): bool =
+  ## Проблема — ошибка (а не предупреждение)?
+  ##
+  ## Ищем маркер ВНУТРИ строки, а не в её начале: текст собирается как
+  ## «партия 2 («Flute»): ошибка: …», и проверка `startsWith` на такой строке
+  ## молча даёт false — то есть ровно тот дефект, который мы чиним (#311).
+  problem.find("ошибка:") >= 0
+
+proc hasErrors*(problems: seq[string]): bool =
+  ## Есть ли среди проблем нечто, из-за чего сборка невозможна.
+  for p in problems:
+    if isError(p):
+      return true
+  false
+
+proc problemBlock*(problems: seq[string]): string =
+  ## Текст для stderr: заголовок и список. Отдельная функция, чтобы
+  ## одинаково печатали и `writeProject`, и рендер.
+  if problems.len == 0:
+    return ""
+  result = "compose: пьеса не собрана, проблем: " & $problems.len
+  for p in problems:
+    for line in p.splitLines():
+      result.add "\n  " & line
+
+proc toStderr(text: string) =
+  ## Запись в stderr не должна ронять рендер из-за сломанного потока —
+  ## то же правило, что в `cli/context.nim` и `compose/progress`.
+  try:
+    stderr.writeLine(text)
+    stderr.flushFile()
+  except CatchableError:
+    discard
+
+proc warnComposition*(problems: seq[string]) =
+  ## Предупреждения — в stderr и всегда. Скрипт `nim r generate.nim`
+  ## может их и не смотреть, а человек обязан знать, что партия пустая.
+  for p in problems:
+    if not isError(p):
+      toStderr("compose: " & p)
+
+proc failComposition*(problems: seq[string]) {.noreturn.} =
+  ## Громкая остановка без стектрейма: понятный текст и ненулевой код.
+  ## Раньше тот же случай давал `AssertionDefect` и падение в
+  ## `builder.nim` — диагностика, которой нельзя воспользоваться (#311).
+  toStderr(problemBlock(problems))
+  quit(1)
+
+# ============================================================================
 # Сборка
 # ============================================================================
 
@@ -150,9 +240,29 @@ proc buildProject*(arr: Arrangement): ProjectFormat =
 # Запись
 # ============================================================================
 
-proc writeProject*(arr: Arrangement; path: string) {.raises: [IOError].} =
-  ## Записать проект в `.eut` (JSON из Core — формат не разъезжается).
+proc writeProjectChecked*(arr: Arrangement; path: string;
+                         problems: var seq[string]): bool {.raises: [IOError].} =
+  ## Записать проект `.eut`, если он собираем. Возвращает false и заполняет
+  ## `problems`, когда сборка невозможна; сам файл при этом НЕ создаётся —
+  ## на диске не должно остаться «полуправленного» результата (#311).
+  problems = validate(arr)
+  if hasErrors(problems):
+    return false
+  warnComposition(problems)
   writeFile(path, pretty(toJson(buildProject(arr))))
+  true
+
+proc writeProject*(arr: Arrangement; path: string) {.raises: [IOError].} =
+  ## Записать проект `.eut` (JSON из Core — формат не разъезжается).
+  ##
+  ## Поведение изменилось: раскладка с опечаткой или неизвестным типом
+  ## ноды больше не падает `AssertionDefect` и не пишет «полуправленного»
+  ## проекта — она печатает список проблем и завершает скрипт с кодом 1
+  ## (#311). `render` и `writeProjectChecked` — варианты для вызывающего,
+  ## который хочет решать сам.
+  var problems: seq[string]
+  if not writeProjectChecked(arr, path, problems):
+    failComposition(problems)
 
 proc writeNotes*(arr: Arrangement; dir: string) {.raises: [IOError].} =
   ## Записать текстовые партитуры (нотация ядра) — человеку и CLI.
