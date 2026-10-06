@@ -19,6 +19,9 @@ grep'ом на три имени адаптера. Перечень имён р�
 
     Nodes   ─X→ CLI / Editor
     Nodes   ─X→ adapters
+    Nodes   ─X→ GUI (точки входа `editor`/`main`)
+
+    Core/Nodes/Commons ─X→ GUI (этим держится встраивание ядра, §6, #213)
 
 Разрешено обратное: `adapters → Core`, `Nodes → Core`, `Core/Nodes → Commons`,
 `CLI/Editor → всё публичное`.
@@ -53,6 +56,18 @@ MODULE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_./\\]*")
 
 # Слова, которые шаблон MODULE_RE выхватит, но модулями слоя не являются.
 NOT_A_MODULE = frozenset({"import", "include", "from", "std", "pkg", "system"})
+
+# GUI-слой (§6, #213). В отличие от core/nodes/commons это не папка, а
+# корневые точки входа: `editor.nim` (будущий редактор) и `main.nim`
+# (композитный запуск). Перечень задан явно — вычислять его из состава
+# корня нельзя, там лежат и `cli.nim`, и `euterpia_version.nim`.
+#
+# Почему правило отдельное: импорт `editor`/`main` из ядра — это не просто
+# «не туда посмотрели», а конец встраивания. Ядро, дёрнувшее GUI, перестаёт
+# собираться как библиотека в чужом процессе (#213) и требует редактора там,
+# где его нет (§6, §66). Префикс `editor/` ждёт папку, когда она появится.
+GUI_MODULES = frozenset({"editor", "main"})
+GUI_PREFIXES = ("editor/",)
 
 
 def strip_comment(line: str) -> str:
@@ -162,6 +177,11 @@ def build_rules() -> list[tuple[str, frozenset[str], tuple[str, ...], str]]:
         ("core", frozenset(), ("cli/", "editor/"), "core ─X→ cli/editor"),
         ("nodes", frozenset(), ("cli/", "editor/"), "nodes ─X→ cli/editor"),
         ("commons", frozenset(), ("cli/", "editor/"), "commons ─X→ cli/editor"),
+        # GUI (§6, #213): проверяются и плоские имена точек входа
+        # (`import editor`, `import main`), и будущая папка `editor/`.
+        ("core", GUI_MODULES, GUI_PREFIXES, "core ─X→ gui"),
+        ("nodes", GUI_MODULES, GUI_PREFIXES, "nodes ─X→ gui"),
+        ("commons", GUI_MODULES, GUI_PREFIXES, "commons ─X→ gui"),
     ]
 
 

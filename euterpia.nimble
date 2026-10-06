@@ -225,6 +225,43 @@ task clapMock, "Сборка mock CLAP-плагина и сквозной тес
   exec "nim c -r --hints:off --out:build/clap_mock_test tests/clap_mock_test.nim"
 
 # ---------------------------------------------------------------------------
+# Встраивание ядра (#213). Ядро без GUI проверяется не словами, а двумя
+# разными хостами:
+#   * `embedExample` — Nim-хост (examples/embed_render.nim): граф из нод,
+#     блоки в «своём» audio-callback, офлайн-рендер в WAV;
+#   * `embedLib` — C-ABI-фасад (examples/embed_lib.nim) собирается в
+#     РАЗДЕЛЯЕМУЮ библиотеку и грузится из Python через ctypes. Это и есть
+#     проверка границы: если фасад потянет GUI, рантайм или лишние символы
+#     Nim, загрузка из чужого процесса перестанет работать.
+#
+# Отдельные цели, а не часть `nimble test`: `--app:lib` и внешний
+# интерпретатор в unit-набор не входят (та же причина, что у `clapMock`).
+# Джоб CI — `embed`, только Linux (ABI разделяемых библиотек).
+# ---------------------------------------------------------------------------
+task embedExample, "Пример встраивания: Nim-хост собирается и прогоняется (#213)":
+  mkDir buildDir
+  buildLog "embed example (nim host)"
+  exec "nim c -r --hints:off --out:build/embed_example examples/embed_render.nim"
+
+task embedLib, "C-ABI ядра: shared-библиотека + загрузка из Python ctypes (#213)":
+  mkDir buildDir
+  buildLog "embed lib (c abi, shared library)"
+  let embedLibPath =
+    when defined(windows): "build/euterpia_embed.dll"
+    elif defined(macosx): "build/libeuterpia_embed.dylib"
+    else: "build/libeuterpia_embed.so"
+  exec "nim c --app:lib -d:release --hints:off " &
+    "--nimcache:build/nc_embedlib --out:" & embedLibPath &
+    " examples/embed_lib.nim"
+  when defined(windows):
+    # Загрузка ctypes — шаг Linux-джоба `embed`: на Windows упаковка
+    # символьной таблицы своя (`__declspec(dllexport)` против `-rdynamic`).
+    echo "skip: загрузка ctypes выполняется в Linux-джобе embed (#213)"
+  else:
+    buildLog "host ctypes (python)"
+    exec "python3 examples/host_ctypes.py " & embedLibPath
+
+# ---------------------------------------------------------------------------
 # «Композиция как код» (#285): пьеса собирается библиотекой libs/compose,
 # рендерится и проверяется командами CLI. Демонстрирует, что прикладной
 # слой (libs) строится поверх публичных API Core/Nodes, а не лезет внутрь.
