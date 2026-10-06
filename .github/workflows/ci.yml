@@ -3,9 +3,19 @@ name: CI
 on:
   push:
     branches: [ main ]
+  # Без фильтра по base-ветке (#361): раньше `branches: [main]` отсекал
+  # stacked-PR (ветки серии ветвятся не от main), и PR без базы main
+  # получал НИ ОДНОГО чека. Тяжёлые джобы отсекаются условием `if:` ниже —
+  # для PR не в main остаётся обязательный минимум: unit + integration
+  # и архитектурные guard'ы.
   pull_request:
-    branches: [ main ]
   workflow_dispatch:
+
+# Полный набор (все джобы) — для push в main, workflow_dispatch и PR,
+# чья база — main. Stacked-PR (base ≠ main) получает только джобы
+# без этой условия: test и architecture.
+# Экономия: ~10 тяжёлых джобов (санитайзеры, 3×CLI, рендер эталонов)
+# не крутятся на каждой синхронизации промежуточной ветки.
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,6 +58,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: release build with LTO
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +84,7 @@ jobs:
   # -----------------------------------------------------------------------
   rtguard:
     name: realtime guard (debug + release)
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -129,6 +141,7 @@ jobs:
   # ---------------------------------------------------------------------------
   miniaudio:
     name: miniaudio backend smoke (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -157,6 +170,7 @@ jobs:
   # ---------------------------------------------------------------------------
   cli:
     name: cli smoke (build + contract)
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -177,6 +191,7 @@ jobs:
   # ---------------------------------------------------------------------------
   analyze:
     name: audio inspector (reference render)
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -352,6 +367,17 @@ jobs:
             exit 1
           fi
 
+      - name: Направление зависимостей слоёв (§27, #50)
+        run: |
+          # Правило §27 в исполняемом виде: скрипт разбирает ТОЛЬКО строки
+          # import/include/from (подстрока в докстроке или комментарии
+          # зависимостью не является) и падает на core ─X→ adapters/nodes,
+          # nodes ─X→ adapters, commons ─X→ core/nodes. Запрет сформулирован
+          # по СЛОЮ — состав папок вычисляется из дерева, поэтому новый
+          # адаптер не может «протечь» мимо проверки. Локально тот же запуск:
+          # `nimble archGuard`.
+          python3 tools/check_architecture.py
+
   # ---------------------------------------------------------------------------
   # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool / ring_buffer.
   #
@@ -365,6 +391,7 @@ jobs:
   # ---------------------------------------------------------------------------
   tsan:
     name: thread sanitizer
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -403,6 +430,7 @@ jobs:
   # ---------------------------------------------------------------------------
   ubsan:
     name: undefined behavior sanitizer
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -426,6 +454,7 @@ jobs:
   # ---------------------------------------------------------------------------
   asan:
     name: address sanitizer
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -450,6 +479,7 @@ jobs:
   # ---------------------------------------------------------------------------
   clap:
     name: clap host integration (mock plugin)
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -471,6 +501,7 @@ jobs:
   # ---------------------------------------------------------------------------
   artifacts:
     name: cli artifact (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

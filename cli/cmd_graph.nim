@@ -24,9 +24,11 @@
 import std/[algorithm, json, math, strutils, tables]
 
 import project
+import handles
 import context
 import checks
 import catalog
+import addressing
 import cmd_project
 import sdk/graph_check
 
@@ -167,14 +169,26 @@ type
     kind: PortKind
     index: int
 
-proc resolveNode(proj: ProjectFormat; refText: string):
+proc resolveNode(proj: ProjectFormat; tbl: HandleTable; refText: string):
     tuple[ok: bool; node: NodeRef; rep: Report] =
-  ## Нода по id или по имени. Имя ищется без учёта регистра, и если так
-  ## называются две ноды — отказ: «угадать за пользователя» здесь означало бы
-  ## править не тот граф (§82).
+  ## Нода по адресу (`node:3.2`), id, имени или короткому имени типа.
+  ## Адрес разбирается ПЕРВЫМ и не «на словах»: если фраза разобралась как
+  ## адрес, отвечать «нет такой ноды» значило бы скрыть, что адрес просрочен
+  ## или принадлежит чужому документу (§82).
   if refText.len == 0:
     return (false, NodeRef(index: -1),
             usageError("не указана нода", "список нод: euterpia node list"))
+  if looksLikeHandleText(refText):
+    let addressed = resolveNodeHandle(tbl, refText)
+    if not addressed.ok:
+      return (false, NodeRef(index: -1), addressed.rep)
+    for i in 0 ..< proj.graph.nodes.len:
+      if proj.graph.nodes[i].id == addressed.nodeId:
+        return (true, NodeRef(index: i), okReport())
+    return (false, NodeRef(index: -1),
+            usageError("адрес " & refText & " указывает на ноду #" &
+                       $addressed.nodeId & ", которой нет в этом файле",
+                       HandleHint))
   if refText.allCharsInSet({'0'..'9'}):
     let id = parseInt(refText)
     for i in 0 ..< proj.graph.nodes.len:
@@ -291,7 +305,7 @@ proc parsePortSpec(text: string):
   (true, head, kind, index, dir, okReport())
 
 proc resolvePort(proj: ProjectFormat; cat: seq[NodeTypeInfo];
-                 text: string; isSource: bool):
+                 tbl: HandleTable; text: string; isSource: bool):
     tuple[ok: bool; port: PortRef; rep: Report] =
   ## Полный разбор ссылки на порт с проверкой по описателю: нода есть, тип
   ## зарегистрирован, вид порта совпадает с ролью в команде, номер в
@@ -301,7 +315,7 @@ proc resolvePort(proj: ProjectFormat; cat: seq[NodeTypeInfo];
   if not parsed.ok:
     return (false, PortRef(), parsed.rep)
 
-  let node = resolveNode(proj, parsed.node)
+  let node = resolveNode(proj, tbl, parsed.node)
   if not node.ok:
     return (false, PortRef(), node.rep)
   let nodeId = proj.graph.nodes[node.node.index].id
@@ -406,7 +420,7 @@ proc commitEdit(ctx: Ctx; path: string; proj: ProjectFormat;
 # =============================================================================
 
 proc nodeJson(node: NodeFormat; cat: seq[NodeTypeInfo];
-              connections: int): JsonNode =
+              connections: int; tbl: HandleTable): JsonNode =
   ## Нода в машинном виде: и то, что лежит в файле, и то, что о типе знает
   ## каталог. Поле `known` — не украшение: по нему агент отличает «нода из
   ## будущей версии/плагина» от «опечатка в типе».
@@ -428,6 +442,10 @@ proc nodeJson(node: NodeFormat; cat: seq[NodeTypeInfo];
     "params": params,
     "connections": connections,
   }
+  # Адрес — машинный контракт: по нему клиент возвращается к сущности после
+  # правок графа, поэтому он печатается и в короткой, и в полной форме.
+  result["handle"] = %nodeHandleText(tbl, node.id)
+  result["handleRef"] = %nodeHandleRef(tbl, node.id)
   let typeIdx = typeIndexOf(cat, node.nodeType)
   result["known"] = %(typeIdx >= 0)
   if typeIdx >= 0:
@@ -480,10 +498,11 @@ proc runNodeList(ctx: var Ctx; scan: ArgScan): Report =
   if not loaded.ok: return loaded.rep
   let proj = loaded.proj
   let cat = catalog()
+  let tbl = documentTable(scan.path, proj)
 
   var nodes = newJArray()
   for node in proj.graph.nodes:
-    nodes.add nodeJson(node, cat, countConnections(proj, node.id))
+    nodes.add nodeJson(node, cat, countConnections(proj, node.id), tbl)
 
   var conns = newJArray()
   for conn in proj.graph.connections:
@@ -504,7 +523,8 @@ proc runNodeList(ctx: var Ctx; scan: ArgScan): Report =
       tail = ": " & portText(cat[typeIdx])
     else:
       tail = ": тип не зарегистрирован"
-    lines.add "  #" & $node.id & " " & node.name & " (" & node.nodeType & ")" & tail
+    lines.add "  #" & $node.id & " " & node.name & " (" & node.nodeType & ") [" &
+              nodeHandleText(tbl, node.id) & "]" & tail
   lines.add "связей: " & $proj.graph.connections.len
   for conn in proj.graph.connections:
     lines.add "  " & connectionText(conn, proj)
@@ -583,14 +603,16 @@ proc runNodeAdd(ctx: var Ctx; scan: ArgScan): Report =
   proj.graph.nodes.add node
   proj.metadata.modified = nowStamp()
 
+  let tbl = documentTable(scan.path, proj)
   var body = projectBody(proj, scan.path)
   body["node"] = nodeJson(proj.graph.nodes[^1], cat,
-                          countConnections(proj, newId))
+                          countConnections(proj, newId), tbl)
   body["change"] = %*{"action": "node.add", "id": newId,
                       "type": info.id, "name": node.name}
   commitEdit(ctx, scan.path, proj, body, @[
     "файл: " & scan.path,
-    "добавлена нода #" & $newId & " " & node.name & " (" & info.id & ")",
+    "добавлена нода #" & $newId & " " & node.name & " (" & info.id & ") [" &
+      nodeHandleText(tbl, newId) & "]",
     "порты: " & portText(info),
     "параметров: " & $info.params.len & " (умолчания типа)",
   ])
@@ -609,7 +631,8 @@ proc runNodeRm(ctx: var Ctx; scan: ArgScan): Report =
   var proj = loaded.proj
   let cat = catalog()
 
-  let found = resolveNode(proj, scan.positionals[0])
+  let tbl = documentTable(scan.path, proj)
+  let found = resolveNode(proj, tbl, scan.positionals[0])
   if not found.ok: return found.rep
   let node = proj.graph.nodes[found.node.index]
 
@@ -674,7 +697,8 @@ proc runNodeShow(ctx: var Ctx; scan: ArgScan): Report =
   let proj = loaded.proj
   let cat = catalog()
 
-  let found = resolveNode(proj, scan.positionals[0])
+  let tbl = documentTable(scan.path, proj)
+  let found = resolveNode(proj, tbl, scan.positionals[0])
   if not found.ok: return found.rep
   let node = proj.graph.nodes[found.node.index]
   let typeIdx = typeIndexOf(cat, node.nodeType)
@@ -684,7 +708,7 @@ proc runNodeShow(ctx: var Ctx; scan: ArgScan): Report =
     "#" & $node.id & " " & node.name & " — " & node.nodeType,
     "  связей: " & $countConnections(proj, node.id),
   ]
-  var body = nodeJson(node, cat, countConnections(proj, node.id))
+  var body = nodeJson(node, cat, countConnections(proj, node.id), tbl)
 
   if typeIdx >= 0:
     let info = cat[typeIdx]
@@ -723,10 +747,11 @@ proc runConnect(ctx: var Ctx; scan: ArgScan): Report =
   if not loaded.ok: return loaded.rep
   var proj = loaded.proj
   let cat = catalog()
+  let tbl = documentTable(scan.path, proj)
 
-  let src = resolvePort(proj, cat, scan.positionals[0], isSource = true)
+  let src = resolvePort(proj, cat, tbl, scan.positionals[0], isSource = true)
   if not src.ok: return src.rep
-  let dst = resolvePort(proj, cat, scan.positionals[1], isSource = false)
+  let dst = resolvePort(proj, cat, tbl, scan.positionals[1], isSource = false)
   if not dst.ok: return dst.rep
 
   if src.port.kind != dst.port.kind:
@@ -783,6 +808,7 @@ proc runDisconnect(ctx: var Ctx; scan: ArgScan): Report =
   if not loaded.ok: return loaded.rep
   var proj = loaded.proj
   let cat = catalog()
+  let tbl = documentTable(scan.path, proj)
 
   # Порт можно не указывать (`disconnect osc gain`) — тогда снимаются все
   # связи между этими двумя нодами. Указание порта сужает выбор до одной.
@@ -794,24 +820,24 @@ proc runDisconnect(ctx: var Ctx; scan: ArgScan): Report =
   var dstIdx = -1
 
   if ':' in scan.positionals[0]:
-    let src = resolvePort(proj, cat, scan.positionals[0], isSource = true)
+    let src = resolvePort(proj, cat, tbl, scan.positionals[0], isSource = true)
     if not src.ok: return src.rep
     srcId = proj.graph.nodes[src.port.nodeRef.index].id
     srcKind = ord(src.port.kind)
     srcIdx = src.port.index
   else:
-    let node = resolveNode(proj, scan.positionals[0])
+    let node = resolveNode(proj, tbl, scan.positionals[0])
     if not node.ok: return node.rep
     srcId = proj.graph.nodes[node.node.index].id
 
   if ':' in scan.positionals[1]:
-    let dst = resolvePort(proj, cat, scan.positionals[1], isSource = false)
+    let dst = resolvePort(proj, cat, tbl, scan.positionals[1], isSource = false)
     if not dst.ok: return dst.rep
     dstId = proj.graph.nodes[dst.port.nodeRef.index].id
     dstKind = ord(dst.port.kind)
     dstIdx = dst.port.index
   else:
-    let node = resolveNode(proj, scan.positionals[1])
+    let node = resolveNode(proj, tbl, scan.positionals[1])
     if not node.ok: return node.rep
     dstId = proj.graph.nodes[node.node.index].id
 
@@ -867,14 +893,15 @@ proc parseParamValue(text: string): tuple[ok: bool; value: float32; message: str
     (false, 0.0f, "значение параметра должно быть числом, получено: " & text)
 
 proc resolveParam(proj: ProjectFormat; cat: seq[NodeTypeInfo];
-                  nodeText, paramText: string):
+                  tbl: HandleTable; nodeText, paramText: string):
     tuple[ok: bool; nodeIndex: int; paramIndex: int; rep: Report] =
   ## Нода + параметр с проверкой по описателю типа. Тип обязан быть
   ## зарегистрирован: без описателя CLI не знает ни диапазона, ни настоящего
   ## имени параметра, а записывать «наугад» — значит портить проект.
-  let node = resolveNode(proj, nodeText)
+  let node = resolveNode(proj, tbl, nodeText)
   if not node.ok:
     return (false, -1, -1, node.rep)
+  let nodeId = proj.graph.nodes[node.node.index].id
   let nodeType = proj.graph.nodes[node.node.index].nodeType
   let typeIdx = typeIndexOf(cat, nodeType)
   if typeIdx < 0:
@@ -882,7 +909,14 @@ proc resolveParam(proj: ProjectFormat; cat: seq[NodeTypeInfo];
             usageError("тип ноды " & nodeType & " не зарегистрирован",
                        "доступные типы: euterpia node types"))
   let info = cat[typeIdx]
-  let paramIdx = findParam(info, paramText)
+  # Параметр адресуется либо именем, либо вложенным адресом `node:1.1/param:0`:
+  # номер в описателе типа устойчив к переименованию, имя — нет.
+  var paramIdx = findParam(info, paramText)
+  if paramIdx < 0 and looksLikeHandleText(paramText):
+    let addressed = resolveParamHandle(tbl, paramText, nodeId)
+    if not addressed.ok:
+      return (false, -1, -1, addressed.rep)
+    paramIdx = addressed.paramIndex
   if paramIdx < 0:
     var names: seq[string] = @[]
     for p in info.params:
@@ -893,12 +927,14 @@ proc resolveParam(proj: ProjectFormat; cat: seq[NodeTypeInfo];
                        "параметры: " & names.join(", ")))
   (true, node.node.index, paramIdx, okReport())
 
-proc paramFacts(p: ParamInfo; node: NodeFormat): JsonNode =
+proc paramFacts(p: ParamInfo; node: NodeFormat; tbl: HandleTable;
+                paramIndex: int): JsonNode =
   ## Один параметр целиком: значение в файле (если есть), умолчание типа,
   ## диапазон, шаг и флаги. Агент решает по этим полям, а не по тексту.
   let current = paramValue(node.parameters, p.name)
   %*{
     "id": p.id, "name": p.name,
+    "handle": nodeParamHandleText(tbl, node.id, paramIndex),
     "value": (if current.found: current.value else: p.defaultValue),
     "source": (if current.found: "file" else: "default"),
     "default": p.defaultValue,
@@ -921,7 +957,8 @@ proc runParamList(ctx: var Ctx; scan: ArgScan): Report =
   let proj = loaded.proj
   let cat = catalog()
 
-  let node = resolveNode(proj, scan.positionals[0])
+  let tbl = documentTable(scan.path, proj)
+  let node = resolveNode(proj, tbl, scan.positionals[0])
   if not node.ok: return node.rep
   let current = proj.graph.nodes[node.node.index]
   let typeIdx = typeIndexOf(cat, current.nodeType)
@@ -932,13 +969,14 @@ proc runParamList(ctx: var Ctx; scan: ArgScan): Report =
     let info = cat[typeIdx]
     lines.add "#" & $current.id & " " & current.name & " (" & info.id & "): параметров " &
       $info.params.len
-    for p in info.params:
-      params.add paramFacts(p, current)
+    for paramIndex, p in info.params:
+      params.add paramFacts(p, current, tbl, paramIndex)
       let currentValue = paramValue(current.parameters, p.name)
       lines.add "  " & p.name & " = " &
         $(if currentValue.found: currentValue.value else: p.defaultValue) &
         " (" & (if currentValue.found: "файл" else: "умолчание") &
-        "; " & $p.minValue & "…" & $p.maxValue & ")"
+        "; " & $p.minValue & "…" & $p.maxValue & ") [" &
+        nodeParamHandleText(tbl, current.id, paramIndex) & "]"
   else:
     lines.add "#" & $current.id & " " & current.name &
       ": тип не зарегистрирован, показаны только значения из файла"
@@ -963,7 +1001,9 @@ proc runParamGet(ctx: var Ctx; scan: ArgScan): Report =
   let proj = loaded.proj
   let cat = catalog()
 
-  let found = resolveParam(proj, cat, scan.positionals[0], scan.positionals[1])
+  let tbl = documentTable(scan.path, proj)
+  let found = resolveParam(proj, cat, tbl, scan.positionals[0],
+                           scan.positionals[1])
   if not found.ok: return found.rep
   let node = proj.graph.nodes[found.nodeIndex]
   let info = cat[typeIndexOf(cat, node.nodeType)]
@@ -982,7 +1022,8 @@ proc runParamGet(ctx: var Ctx; scan: ArgScan): Report =
   if flags.len > 0:
     lines.add "  флаги: " & flags.join("+")
   okReport(body = %*{"path": scan.path, "node": node.id, "nodeType": node.nodeType,
-                     "param": paramFacts(p, node)}, lines = lines)
+                     "param": paramFacts(p, node, tbl, found.paramIndex)},
+               lines = lines)
 
 # =============================================================================
 # param set
@@ -998,7 +1039,9 @@ proc runParamSet(ctx: var Ctx; scan: ArgScan): Report =
   var proj = loaded.proj
   let cat = catalog()
 
-  let found = resolveParam(proj, cat, scan.positionals[0], scan.positionals[1])
+  let tbl = documentTable(scan.path, proj)
+  let found = resolveParam(proj, cat, tbl, scan.positionals[0],
+                           scan.positionals[1])
   if not found.ok: return found.rep
   let info = cat[typeIndexOf(cat, proj.graph.nodes[found.nodeIndex].nodeType)]
   let p = info.params[found.paramIndex]
@@ -1026,7 +1069,8 @@ proc runParamSet(ctx: var Ctx; scan: ArgScan): Report =
 
   var body = projectBody(proj, scan.path)
   body["node"] = %proj.graph.nodes[found.nodeIndex].id
-  body["param"] = paramFacts(p, proj.graph.nodes[found.nodeIndex])
+  body["param"] = paramFacts(p, proj.graph.nodes[found.nodeIndex], tbl,
+                             found.paramIndex)
   body["change"] = %*{
     "action": "param.set", "node": proj.graph.nodes[found.nodeIndex].id,
     "param": p.name, "id": p.id,
@@ -1037,7 +1081,9 @@ proc runParamSet(ctx: var Ctx; scan: ArgScan): Report =
   commitEdit(ctx, scan.path, proj, body, @[
     "файл: " & scan.path,
     "#" & $proj.graph.nodes[found.nodeIndex].id & " " & p.name & ": " &
-      $(if before.found: before.value else: p.defaultValue) & " → " & $value,
+      $(if before.found: before.value else: p.defaultValue) & " → " & $value &
+      " [" & nodeParamHandleText(tbl, proj.graph.nodes[found.nodeIndex].id,
+                                found.paramIndex) & "]",
   ])
 
 # =============================================================================

@@ -5,26 +5,17 @@
 
 import std/[streams, os, math]
 
+# Контракт форматов — общий для всех кодеков (#356). Реэкспортируем его,
+# чтобы существующий код с `import wav_codec` не менялся; сам `wav_codec`
+# теперь зависит от контракта, а не хранит его. С приходом FLAC `flac_codec`
+# будет импортировать `codec_api`, а не соседний кодек.
+import codec_api
+export codec_api
+
 const
   MAX_RIFF_SIZE = 4_294_967_295'i64  # 4GB - 1
 
 type
-  AudioFileFormat* = enum 
-    afWav
-    afFlac
-    afOgg
-    afMp3
-    afAiff
-  
-  AudioFileInfo* = object
-    sampleRate*: int32
-    channels*: int16
-    bitsPerSample*: int16
-    numFrames*: int64
-    isFloat*: bool
-    format*: AudioFileFormat
-    duration*: float64
-
   WavReader* = object
     stream: FileStream
     info*: AudioFileInfo
@@ -113,6 +104,24 @@ proc openWavReader*(path: string): WavReader =
       if not readFmtChunk(result.stream, result.info, chunkSize):
         result.stream.close()
         raise newException(IOError, "Unsupported PCM format")
+      # Валидация заголовка СРАЗУ после fmt (#354, #103): нулевые каналы
+      # давали `Defect: division by zero` при вычислении numFrames — Defect
+      # не ловится `except CatchableError` в CLI, и битый файл ронял процесс
+      # вместо кода возврата 2. Неподдерживаемая глубина (8 бит, 64 float)
+      # читалась бы «тишиной»: в readFrames веток для неё нет.
+      if result.info.channels <= 0 or result.info.channels > 512:
+        result.stream.close()
+        raise newException(IOError,
+          "Invalid channel count: " & $result.info.channels)
+      if result.info.sampleRate <= 0 or result.info.sampleRate > 768000:
+        result.stream.close()
+        raise newException(IOError,
+          "Invalid sample rate: " & $result.info.sampleRate)
+      if result.info.bitsPerSample notin [16'i16, 24'i16, 32'i16]:
+        result.stream.close()
+        raise newException(IOError,
+          "Unsupported bit depth: " & $result.info.bitsPerSample &
+          " (supported: 16, 24, 32)")
         
     elif chunkId == "data":
       result.dataOffset = startPos
@@ -133,7 +142,14 @@ proc openWavReader*(path: string): WavReader =
   if result.dataOffset == 0:
     result.stream.close()
     raise newException(IOError, "No data chunk found")
-  
+
+  # Последний рубеж перед делением (#354): если data шёл ДО fmt (порядок
+  # чанков не нормирован), заголовок ещё не прочитан — и numFrames был бы
+  # делением на ноль.
+  if result.info.channels <= 0 or result.info.bitsPerSample < 8:
+    result.stream.close()
+    raise newException(IOError, "WAV header missing or invalid (no fmt chunk)")
+
   let bytesPerFrame = int64(result.info.channels) * int64(result.info.bitsPerSample div 8)
   result.info.numFrames = result.dataSize div bytesPerFrame
   result.info.duration = float64(result.info.numFrames) / float64(result.info.sampleRate)
@@ -263,7 +279,18 @@ proc writeFrames*(writer: var WavWriter, buffer: ptr UncheckedArray[float32], fr
   var tempBuffer = newSeq[uint8](totalSamples * bytesPerSample)
   
   for s in 0 ..< totalSamples:
-    let sample = max(-1.0f, min(1.0f, buffer[s]))
+    # NaN/Inf guard (#358): сравнения с NaN дают false, поэтому наивные
+    # max/min пропускают NaN в конвертацию float→int (неопределённое
+    # поведение), а +Inf даёт переполнение. Формула та же, что в
+    # `audio_recorder.writeWavFrames` — два писателя ядра не должны
+    # расходиться (унификация хелпера — #356).
+    var sample = buffer[s]
+    if sample != sample:          # NaN
+      sample = 0.0f
+    if sample > 1.0f:
+      sample = 1.0f
+    elif sample < -1.0f:
+      sample = -1.0f
     
     if writer.info.bitsPerSample == 16:
       let intVal = int16(sample * 32767.0f)

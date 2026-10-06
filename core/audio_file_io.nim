@@ -4,6 +4,7 @@
 # и быстрого полиморфизма без использования экспериментальных concept'ов.
 
 import std/[os, strutils]
+import codec_api
 import wav_codec
 import audio_buffer
 
@@ -78,29 +79,52 @@ proc close*(encoder: var AudioEncoder) =
 proc streamFileToBuffer*(path: string, rtBuffer: var StreamingAudioBuffer) {.thread.} =
   ## Background Thread процедура.
   ## Обернута в try/except, чтобы ошибка I/O не обрушила Audio Thread хоста.
+  ##
+  ## Запись идёт через двухсегментный `getWritePtr(framesRequested)` (#357):
+  ## старый однопараметровый `getWritePtr()` не разбивал запись на границе
+  ## кольца и не смотрел на свободное место, поэтому readFrames писал до
+  ## `blockSize` фреймов за конец аллокации — «спящий» heap overflow (кламп в
+  ## commitWrite срабатывал уже ПОСЛЕ записи). Теперь readFrames получает
+  ## ровно те сегменты, что вернуло кольцо, а когда места нет — поток уступает
+  ## процессор Audio Thread.
   try:
     var decoder = openDecoder(path)
     let info = decoder.getInfo()
-    
-    let blockSize = 4096
-    let bytesPerFrame = int(info.channels) * int(info.bitsPerSample div 8)
+
+    let channels = int(info.channels)
+    let bytesPerFrame = max(1, channels * int(info.bitsPerSample div 8))
+
+    const blockSize = 4096
     var rawBuf = newSeq[uint8](blockSize * bytesPerFrame)
-    
-    var totalFramesRead: int64 = 0
-    
-    while totalFramesRead < info.numFrames:
-      let framesRead = decoder.readFrames(
-        cast[ptr UncheckedArray[uint8]](addr rawBuf[0]),
-        rtBuffer.getWritePtr(),
-        int32(blockSize)
-      )
-      
-      if framesRead == 0:
-        break
-      
-      rtBuffer.advanceWritePtr(framesRead)
-      totalFramesRead += int64(framesRead)
-      
+
+    var framesRemaining = info.numFrames
+    while framesRemaining > 0:
+      # До двух непрерывных сегментов внутри кольца; n1 + n2 никогда не
+      # выходит за аллокацию, а суммарно не превышает свободное место.
+      let (p1, p2, n1, n2) = rtBuffer.getWritePtr(int32(blockSize))
+      let capacity = n1 + n2
+      if capacity <= 0:
+        # Кольцо полно: ждём, пока Audio Thread освободит место.
+        sleep(1)
+        continue
+
+      var committed = 0'i32
+      let got1 = decoder.readFrames(
+        cast[ptr UncheckedArray[uint8]](addr rawBuf[0]), p1, n1)
+      committed += got1
+      # Второй сегмент читаем только если первый заполнен целиком (иначе
+      # это конец файла посреди сегмента — читать «через границу» нельзя).
+      if got1 == n1 and n2 > 0:
+        committed += decoder.readFrames(
+          cast[ptr UncheckedArray[uint8]](addr rawBuf[0]), p2, n2)
+
+      if committed <= 0:
+        break  # конец файла
+      rtBuffer.commitWrite(committed)
+      framesRemaining -= int64(committed)
+      if committed < capacity:
+        break  # конец файла: прочитано меньше, чем было свободного места
+
     decoder.close()
   except:
     # В фоновом потоке мы не можем пробрасывать исключения в Audio Thread.
@@ -123,19 +147,34 @@ proc loadAudioFile*(path: string): tuple[samples: seq[float32], info: AudioFileI
 
   result.samples = newSeq[float32](totalSamples)
 
-  var rawBuf = newSeq[uint8](1024 * 1024)
+  # Чтение БЛОКАМИ, а не файл целиком (#355): раньше один вызов readFrames
+  # клал весь файл в raw-буфер фиксированных 1 МиБ, и файл длиннее ~6 секунд
+  # (стерео, 16 бит, 44.1 кГц) переполнял кучу — ASan падал, обычной сборкой
+  # это порча памяти рядом с seq. Размер блока — в КАДРАХ, поэтому и
+  # `int32(frames)` в вызове не переполняется на многочасовых файлах.
+  const blockSize = 4096
+  let bytesPerFrame = max(1, int(info.channels) * int(info.bitsPerSample div 8))
+  var rawBuf = newSeq[uint8](blockSize * bytesPerFrame)
 
-  let framesRead = decoder.readFrames(
-    cast[ptr UncheckedArray[uint8]](addr rawBuf[0]),
-    cast[ptr UncheckedArray[float32]](addr result.samples[0]),
-    int32(info.numFrames)
-  )
+  var framesDone: int64 = 0
+  while framesDone < info.numFrames:
+    let want = int32(min(int64(blockSize), info.numFrames - framesDone))
+    let offset = int(framesDone * int64(info.channels))
+    let framesRead = decoder.readFrames(
+      cast[ptr UncheckedArray[uint8]](addr rawBuf[0]),
+      cast[ptr UncheckedArray[float32]](addr result.samples[offset]),
+      want)
+    if framesRead <= 0:
+      break
+    framesDone += int64(framesRead)
+    if framesRead < want:
+      break
 
   decoder.close()
 
-  if framesRead < int32(info.numFrames):
-    result.samples.setLen(int(framesRead * int64(info.channels)))
-    result.info.numFrames = int64(framesRead)
+  if framesDone < info.numFrames:
+    result.samples.setLen(int(framesDone * int64(info.channels)))
+    result.info.numFrames = framesDone
 
 proc exportAudio*(path: string, info: AudioFileInfo, samples: openArray[float32]) =
   var encoder = openEncoder(path, info)

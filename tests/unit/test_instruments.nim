@@ -232,6 +232,65 @@ proc bandRms(buf: seq[float32]; first, count: int; fc: float32; high: bool;
     acc += float64(y) * float64(y)
   sqrt(float32(acc / float64(count)))
 
+proc drumMono(note: int; vel: float32; frames: int = 48000): seq[float32] =
+  ## Левая дорожка одного удара: свой движок на каждый замер, чтобы тесты не
+  ## мешали друг другу, и фиксированные параметры узла по умолчанию.
+  var g = newDrums(4, Sr)
+  drumsSet(addr g, 1.0f, 1.0f, 1.0f, 0.5f, 0.15f, 0.0f, 0.85f)
+  drumsNoteOn(addr g, note, vel)
+  result = newSeq[float32](frames)
+  var l, r: array[Block, float32]
+  var pos = 0
+  while pos < frames:
+    let n = min(Block, frames - pos)
+    for i in 0 ..< n:
+      l[i] = 0.0f
+      r[i] = 0.0f
+    drumsProcess(addr g, addr l[0], addr r[0], 1, n)
+    for i in 0 ..< n:
+      result[pos + i] = l[i]
+    pos += n
+  freeDrums(addr g)
+
+proc envRms(buf: openArray[float32]; win: int): seq[float32] =
+  ## Огибающая RMS окнами по `win` сэмплов.
+  var i = 0
+  while i + win <= buf.len:
+    var acc = 0.0
+    for k in i ..< i + win:
+      acc += float64(buf[k]) * float64(buf[k])
+    result.add sqrt(float32(acc / float64(win)))
+    i += win
+
+proc countBursts(buf: openArray[float32]; within = 0.08f): int =
+  ## Число всплесков огибающей в первые `within` секунд: хлопок поднимается
+  ## выше 30% максимума, пауза между хлопками — ниже 15%.
+  let env = envRms(buf, int(0.001f * Sr))
+  var mx = 0.0f
+  for x in env: mx = max(mx, x)
+  if mx <= 0.0f: return 0
+  let limit = min(env.len, int(within * Sr / (0.001f * Sr)))
+  var rising = false
+  for i in 0 ..< limit:
+    if not rising and env[i] > 0.30f * mx:
+      rising = true
+      inc result
+    elif rising and env[i] < 0.15f * mx:
+      rising = false
+
+proc t40(buf: openArray[float32]): float32 =
+  ## Время от пика огибающей до спада на 40 дБ, с.
+  const W = 128
+  let env = envRms(buf, W)
+  if env.len == 0: return 0.0f
+  var pk = 0
+  for k in 0 ..< env.len:
+    if env[k] > env[pk]: pk = k
+  let thr = env[pk] * 0.01f
+  var k = pk
+  while k < env.len and env[k] > thr: inc k
+  float32(k - pk) * float32(W) / Sr
+
 # ----------------------------------------------------------------------------
 # Мерки для третьей партии (#321): щипковый нейлон и свободноязычковые.
 #
@@ -389,6 +448,58 @@ suite "инструменты: C-движки (eut_inst.c)":
     # раньше хэт/тарелка давали ~0.003 против ~0.06 у малого (разрыв ×20).
     check hat > 0.25f * snare
     check crash > 0.25f * snare
+
+  test "яркость удара растёт с velocity, а не только уровень (#326)":
+    # Мерка: доля ВЧ (выше 6 кГц) в общем уровне. У «тумблера» она от силы
+    # удара не зависит; у живого удара сильный — ярче.
+    proc bright(b: seq[float32]): float32 =
+      let hf = bandRms(b, 0, 2400, 6000.0f, true, 2)
+      let lf = bandRms(b, 0, 2400, 6000.0f, false, 2)
+      if lf <= 0.0f: 0.0f else: hf / lf
+    let soft = bright(drumMono(42, 0.25f))
+    let hard = bright(drumMono(42, 0.95f))
+    check soft > 0.0f
+    check hard > 1.3f * soft
+
+  test "у клэпа ≥3 хлопка, у бочки — транзиент ударника (#326)":
+    check countBursts(drumMono(39, 0.95f)) >= 3
+    # Щелчок живёт первые миллисекунды: ВЧ есть в атаке и почти пропадают
+    # в теле. У «808» без ударника ВЧ в атаке не было бы вовсе.
+    let kick = drumMono(36, 0.95f)
+    let clickHf = bandRms(kick, 0, 240, 4000.0f, true, 2)
+    let bodyHf = bandRms(kick, 2400, 240, 4000.0f, true, 2)
+    check clickHf > 4.0f * bodyHf
+
+  test "слои затухают по-разному: хэт садится, тарелка звенит (#326)":
+    # Закрытый хэт и тарелка — одна механика, разные времена: у металла
+    # каждый частичный гаснет сам, поэтому и хвосты разные.
+    let hat = t40(drumMono(42, 0.95f, 120000))
+    let crash = t40(drumMono(49, 0.95f, 120000))
+    check hat > 0.05f
+    check hat < 0.5f * crash
+
+  test "сброс ударных не оставляет щелчка от состояния фильтров (#326)":
+    # drumsReset зовут на остановке транспорта. Если состояние пост-ФНЧ не
+    # обнулить, оно остаётся от последнего громкого удара и вылезает щелчком
+    # в первой ноте нового проигрывания.
+    var g = newDrums(16, Sr)
+    drumsSet(addr g, 1.0f, 1.0f, 1.0f, 0.5f, 0.15f, 0.0f, 0.85f)
+    drumsNoteOn(addr g, 36, 0.95f)
+    var l, r: array[256, float32]
+    for b in 0 ..< 4:
+      for i in 0 ..< l.len:
+        l[i] = 0.0f
+        r[i] = 0.0f
+      drumsProcess(addr g, addr l[0], addr r[0], 1, l.len)
+    drumsReset(addr g)
+    drumsNoteOn(addr g, 38, 0.95f)
+    for i in 0 ..< l.len:
+      l[i] = 0.0f
+      r[i] = 0.0f
+    drumsProcess(addr g, addr l[0], addr r[0], 1, l.len)
+    # Атака слоёв начинается с нуля: первый сэмпл — не выброс фильтра.
+    check abs(l[0]) < 0.01f
+    freeDrums(addr g)
 
 
   test "гитара переинициализируется в пределах выделенной памяти струн":

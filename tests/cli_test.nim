@@ -1137,3 +1137,105 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
     check candidates.code == 0
     check "node" in candidates.output
 
+
+# =============================================================================
+# Handle-адресация (#143, MANIFEST §35/§36)
+# =============================================================================
+
+suite "CLI: handle-адресация (#143)":
+  let dir = getTempDir() / "euterpia_cli_handles"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  test "адрес печатается, принимается и переживает правки графа":
+    check runCliIn(dir, ["init", "a.eut", "--name", "A"]).code == 0
+    check runCliIn(dir, ["node", "add", "osc", "a.eut"]).code == 0
+    check runCliIn(dir, ["node", "add", "gain", "a.eut"]).code == 0
+
+    # Адрес виден человеку в списке и машине в JSON — обе формы, чтобы клиент
+    # не разбирал «node:1.1» из строки.
+    let listed = runCliIn(dir, ["node", "list", "a.eut"])
+    check listed.code == 0
+    check "[node:1.1]" in listed.output
+    check "[node:2.1]" in listed.output
+
+    let machine = parseJson(runCliIn(dir,
+      ["--json", "node", "list", "a.eut"]).output)
+    check machine["nodes"][0]["handle"].getStr == "node:1.1"
+    let qualified = machine["nodes"][0]["handleRef"].getStr
+    check qualified.startsWith("node:1.1@")
+    check qualified.len == "node:1.1@".len + 8
+
+    # Адрес — рабочая ссылка и для ноды, и для её параметра.
+    let shown = runCliIn(dir, ["node", "show", "node:1.1", "a.eut"])
+    check shown.code == 0
+    check "#1" in shown.output
+
+    # У осциллятора параметр 0 — waveform (целочисленный), поэтому freq
+    # адресуется вторым: заодно видно, что номер из описателя типа, а не
+    # позиция в файле.
+    let param = parseJson(runCliIn(dir,
+      ["--json", "param", "get", "node:1.1", "node:1.1/param:1", "a.eut"]).output)
+    check param["param"]["handle"].getStr == "node:1.1/param:1"
+    check param["param"]["name"].getStr == "freq"
+
+    # Правка по адресу попадает в ту же ноду.
+    let edited = runCliIn(dir,
+      ["param", "set", "node:1.1", "node:1.1/param:1", "330", "a.eut"])
+    check edited.code == 0
+    check "node:1.1/param:1" in edited.output
+    check parseJson(readFile(dir / "a.eut"))["graph"]["nodes"][0]["parameters"]["freq"].getFloat == 330.0
+
+    # Вставка новой ноды не сдвигает адреса уже напечатанных.
+    check runCliIn(dir, ["node", "add", "noise", "a.eut"]).code == 0
+    check "[node:1.1]" in runCliIn(dir, ["node", "list", "a.eut"]).output
+
+    # Адрес параметра чужой ноды — ошибка, а не тихая подмена на «ту же».
+    let mismatch = runCliIn(dir,
+      ["param", "get", "node:1.1", "node:2.1/param:1", "a.eut"])
+    check mismatch.code == 1
+    check "указанной ноде" in mismatch.errput
+
+    # Удалённая нода адреса не имеет; адрес живой ноды продолжает работать.
+    check runCliIn(dir, ["node", "rm", "node:2.1", "a.eut"]).code == 0
+    let gone = runCliIn(dir, ["node", "show", "node:2.1", "a.eut"])
+    check gone.code == 1
+    check "нет ноды с адресом" in gone.errput
+    check runCliIn(dir, ["node", "show", "node:1.1", "a.eut"]).code == 0
+
+  test "полный адрес отвергает другой документ, сломанный — понятной ошибкой":
+    check runCliIn(dir, ["init", "b.eut", "--name", "B"]).code == 0
+    let machine = parseJson(runCliIn(dir,
+      ["--json", "node", "list", "a.eut"]).output)
+    let qualified = machine["nodes"][0]["handleRef"].getStr
+
+    let foreign = runCliIn(dir, ["node", "show", qualified, "b.eut"])
+    check foreign.code == 1
+    check "другому документу" in foreign.errput
+
+    let broken = runCliIn(dir, ["node", "show", "node:две.раз", "a.eut"])
+    check broken.code == 1
+    check "адрес" in broken.errput
+
+    let notANode = runCliIn(dir, ["node", "show", "track:1.1", "a.eut"])
+    check notANode.code == 1
+    check "нужна нода" in notANode.errput
+
+  test "проект называет свой документ: адреса из разных файлов не совпадут":
+    let shown = parseJson(runCliIn(dir, ["--json", "project", "show", "a.eut"]).output)
+    check shown["documentId"].getStr.len == 8
+    let other = parseJson(runCliIn(dir, ["--json", "project", "show", "b.eut"]).output)
+    check other["documentId"].getStr != shown["documentId"].getStr
+
+    let human = runCliIn(dir, ["project", "show", "a.eut"])
+    check human.code == 0
+    check "документ: " & shown["documentId"].getStr in human.output
+    check "[node:1.1]" in human.output
+
+  test "вывод с адресами детерминирован (адрес не плывёт между запусками)":
+    let first = runCliIn(dir, ["node", "list", "a.eut"]).output
+    let second = runCliIn(dir, ["node", "list", "a.eut"]).output
+    check first == second
+    check "node:1.1" in first

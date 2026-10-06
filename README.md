@@ -151,6 +151,8 @@ MANIFEST.md  — архитектурный манифест
 | `audio_buffer`, `signal_types`, `node_interface` | контракты буферов, событий, нод |
 | `param_registry`, `audio_params` | реестр параметров |
 | `wav_codec` | WAV read/write |
+| `audio_file_io` | фасад чтения/записи аудиофайлов (issue #5: перенесён из `commons/`) |
+| `waveform_cache` | кэш пиков волновой формы для таймлайна (issue #5) |
 | `audio_backend_api` | контракт аудио-бэкенда (PortAudio — в `adapters/`) |
 | `midi_api`, `midi_events` | контракт MIDI-бэкенда и MIDI → `RealtimeEvent` (issue #28) |
 | `plugin_api` | контракт хостинга плагинов: CLAP/EUT/… — в `adapters/` (issue #29) |
@@ -191,10 +193,10 @@ callback (причины — MANIFEST §104).
 
 ### `commons/` — нейтральные инструменты
 
-`audio_file_io`, `midi_io` (нейтральный кодек Standard MIDI File),
-`undo_redo`, `waveform_cache`. Commons не должен знать о Core — остаточные
-отклонения (`audio_file_io` → `wav_codec`/`audio_buffer`) отслеживаются
-в issue #5. `midi_io` после развязки (issue #28) Core не знает:
+`midi_io` (нейтральный кодек Standard MIDI File) и `undo_redo`. Commons не
+знает ни о Core, ни о Nodes (MANIFEST §26/§27): `audio_file_io` и
+`waveform_cache` перенесены в `core/` (issue #5), потому что работают с
+аудио-доменом. `midi_io` после развязки (issue #28) Core не знает:
 устройства MIDI живут в `adapters/rtmidi` за контрактом `core/midi_api`.
 
 ## План
@@ -205,6 +207,12 @@ callback (причины — MANIFEST §104).
 Линии идут по возрастанию номера: **v0.3 — CLI**, **v0.4 — фундамент и скелет
 GUI**, **v0.5 — тесты ядра и надёжность**, **v0.6 — GUI: повседневная работа**,
 **v0.7 — глубина и уникальность**. Закрытые линии — в конце раздела.
+
+Линия CLI не закончилась на `.5`: дальше идут шаги **v0.3.6–v0.3.11** —
+контракт команд (`libs/cli_spec`), сценарии (`libs/script`), сравнение и
+проверки (`libs/diff`), шаблоны и сет-листы (`libs/presets`), итеративная
+работа в терминале (`libs/watch`) и поставка. Порядок и зависимости —
+`docs/plans/v0.3.6-v0.3.11.md` (#352).
 
 ### Закрыто: фундамент ядра и экосистема (до перенумерации линий)
 
@@ -678,6 +686,17 @@ nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адап
 nimble ubsan           # unit-набор под UndefinedBehaviorSanitizer (#13)
 nimble asan            # unit-набор под AddressSanitizer (#13)
 nimble clapMock        # сборка mock CLAP-плагина + сквозной тест хостинга (#53)
+nimble archGuard       # направление зависимостей слоёв (§27, #50)
+```
+
+`nimble archGuard` — статическая проверка правила MANIFEST §27: скрипт
+`tools/check_architecture.py` разбирает только строки `import`/`include`/`from`
+и падает на `core ─X→ adapters/nodes`, `nodes ─X→ adapters`,
+`commons ─X→ core/nodes`. Тот же скрипт запускает джоб CI `architecture`.
+Локально без nimble:
+
+```bash
+python3 tools/check_architecture.py
 ```
 
 `nimble miniaudioSmoke` — единственная проверка, которая реально собирает

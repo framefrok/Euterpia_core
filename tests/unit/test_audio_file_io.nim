@@ -1,9 +1,10 @@
 # tests/unit/test_audio_file_io.nim
 #
-# commons/audio_file_io.nim — фасад чтения/записи аудиофайлов (issue #57).
+# core/audio_file_io.nim — фасад чтения/записи аудиофайлов (issue #57).
 #
-# Модуль — единственная точка, где осталась зависимость Commons -> Core
-# (issue #5). Здесь это не проверяется; проверяется поведение фасада:
+# Модуль перенесён в Core из commons/ в issue #5: он использует wav_codec и
+# audio_buffer, а Commons не знает о Core (MANIFEST §26/§27). Проверяется
+# поведение фасада:
 #   - round-trip WAV для 16/24/32-bit (int и float), стерео, порядок каналов;
 #   - диспетчер форматов: неподдерживаемое расширение -> IOError;
 #   - отсутствующий файл -> IOError;
@@ -11,6 +12,7 @@
 
 import std/[unittest, os, math]
 import audio_file_io
+import audio_buffer
 import wav_codec
 
 proc writeWav(path: string; info: AudioFileInfo; samples: seq[float32]) =
@@ -182,4 +184,201 @@ suite "audio_file_io: оборванная запись (#76)":
     let (samples, gotInfo) = loadAudioFile(path)
     check gotInfo.numFrames == 128
     check samples.len == 128
+
+suite "audio_file_io: файлы длиннее сырого буфера (#355)":
+  test "round-trip файла > 1 МиБ сырых данных читается целиком":
+    ## Регрессия heap-переполнения: раньше loadAudioFile клал весь файл в
+    ## raw-буфер фиксированных 1 МиБ одним вызовом readFrames. Стерео,
+    ## 16 бит, 48 кГц, 6 секунд = 288 000 кадров = 1 152 000 байт сырых —
+    ## больше старого буфера. ASan на старом коде падал здесь.
+    let path = getTempDir() / "euterpia_afio_long.wav"
+    let frames = 48000 * 6
+    var src = newSeq[float32](frames * 2)
+    for f in 0 ..< frames:
+      # Линейный рамп вместо синуса: побайтовая сверка после round-trip
+      # ловит и потерю блоков, и сдвиг порядка каналов.
+      let v = float32(f mod 1000) / 1000.0f - 0.5f
+      src[f * 2] = v
+      src[f * 2 + 1] = -v
+    writeWav(path, info(16, 2, false), src)
+    defer: removeFile(path)
+
+    check getFileSize(path) > 1_048_576'i64   # условие старого переполнения
+
+    let (got, gotInfo) = loadAudioFile(path)
+    check gotInfo.numFrames == int64(frames)
+    check got.len == src.len
+    # Ошибка квантования 16 бит — не больше шага; главное — длина и порядок.
+    var maxErr = 0.0f
+    for i in 0 ..< src.len:
+      maxErr = max(maxErr, abs(got[i] - src[i]))
+    check maxErr < 1e-3f
+
+suite "audio_file_io: NaN/Inf в сигнале (#358)":
+  ## Регрессия: наивные max/min пропускают NaN (сравнения с NaN дают false)
+  ## в конвертацию float→int — в файл попадало недетерминированное значение.
+  ## Recorder такие сигналы обнулял, wav_codec — нет: писатели ядра
+  ## расходились. Guard обязан дать один и тот же результат в обоих путях.
+
+  proc checkGuarded(bits: int16; isFloat: bool; tol: float32) =
+    let path = getTempDir() / "euterpia_afio_nan.wav"
+    var src = newSeq[float32](8)
+    src[0] = NaN                 # → 0.0
+    src[1] = NegInf              # → -1.0
+    src[2] = Inf                 # → +1.0
+    src[3] = 0.5f                # → без изменений
+    src[4] = -2.0f * NaN         # NaN, но не литерал: тоже → 0.0
+    src[5] = 1e30f               # за пределом → +1.0
+    src[6] = -1e30f              # за пределом → -1.0
+    src[7] = 0.0f
+    writeWav(path, info(bits, 1, isFloat), src)
+    defer: removeFile(path)
+
+    let (got, _) = loadAudioFile(path)
+    check got.len == 8
+    for i, v in got:
+      check v == v              # ни одного NaN в прочитанных данных
+    check got[0] == 0.0f
+    check abs(got[1] - (-1.0f)) < tol
+    check abs(got[2] - 1.0f) < tol
+    check abs(got[3] - 0.5f) < tol
+    check got[4] == 0.0f
+    check abs(got[5] - 1.0f) < tol
+    check abs(got[6] - (-1.0f)) < tol
+    check got[7] == 0.0f
+
+  test "32-bit float: NaN → 0, Inf → ±1, остальное не тронуто":
+    checkGuarded(32, true, 1e-6f)
+
+  test "16-bit PCM: тот же guard, что и в audio_recorder":
+    checkGuarded(16, false, 1e-3f)
+
+suite "audio_file_io: враждебный заголовок (#354)":
+  ## Битый WAV обязан дать IOError (CLI ловит CatchableError и возвращает
+  ## код 2), а НЕ Defect — тот не наследует CatchableError и ронял процесс.
+
+  proc writeRawWav(path: string; channels, sampleRate, bits: uint16;
+                   audioFormat: uint16 = 1) =
+    ## Минимальный валидный RIFF/WAVE побайтово: раскладка fmt —
+    ## 20 audioFormat, 22 channels, 24 sampleRate, 28 byteRate,
+    ## 32 blockAlign, 34 bitsPerSample, 36 "data", 40 dataSize.
+    var b = newString(52)
+    b[0 .. 3] = "RIFF"
+    b[8 .. 11] = "WAVE"
+    b[12 .. 15] = "fmt "
+    b[36 .. 39] = "data"
+    proc putU32(off: int; v: uint32) =
+      b[off] = char(v and 0xff)
+      b[off + 1] = char((v shr 8) and 0xff)
+      b[off + 2] = char((v shr 16) and 0xff)
+      b[off + 3] = char((v shr 24) and 0xff)
+    proc putU16(off: int; v: uint16) =
+      b[off] = char(v and 0xff)
+      b[off + 1] = char((v shr 8) and 0xff)
+    let blockAlign = channels * (bits div 8)
+    putU32(4, 44'u32)             # RIFF size
+    putU32(16, 16'u32)            # fmt size
+    putU16(20, audioFormat)
+    putU16(22, channels)
+    putU32(24, uint32(sampleRate))
+    putU32(28, uint32(sampleRate) * uint32(blockAlign))
+    putU16(32, blockAlign)
+    putU16(34, bits)
+    putU32(40, 4'u32)             # data size
+    writeFile(path, b)
+
+  test "channels=0 — IOError, а не division by zero":
+    let path = getTempDir() / "euterpia_afio_ch0.wav"
+    writeRawWav(path, channels = 0, sampleRate = 44100, bits = 16)
+    defer: removeFile(path)
+    expect IOError:
+      discard loadAudioFile(path)
+
+  test "sampleRate=0 — IOError, а не duration=inf":
+    let path = getTempDir() / "euterpia_afio_sr0.wav"
+    writeRawWav(path, channels = 2, sampleRate = 0, bits = 16)
+    defer: removeFile(path)
+    expect IOError:
+      discard loadAudioFile(path)
+
+  test "8-бит PCM — честный отказ, а не тишина без ошибки":
+    let path = getTempDir() / "euterpia_afio_8bit.wav"
+    writeRawWav(path, channels = 2, sampleRate = 44100, bits = 8)
+    defer: removeFile(path)
+    expect IOError:
+      discard loadAudioFile(path)
+
+  test "мусорная глубина (bits=4) — IOError":
+    let path = getTempDir() / "euterpia_afio_4bit.wav"
+    writeRawWav(path, channels = 1, sampleRate = 44100, bits = 4)
+    defer: removeFile(path)
+    expect IOError:
+      discard loadAudioFile(path)
+
+
+suite "audio_file_io: streamFileToBuffer на границе кольца (#357)":
+  ## Регрессия «спящего» heap overflow: однопараметровый getWritePtr() не
+  ## разбивал запись на границе кольца и не смотрел на свободное место, и
+  ## readFrames писал до blockSize (4096) фреймов за конец аллокации.
+  ## Кольцо здесь намеренно МЕНЬШЕ блока, поэтому запись пересекает границу
+  ## на каждом шаге; под ASan старая версия падала на записи.
+
+  type
+    StreamJob = object
+      path: array[256, char]
+      rtBuf: ptr StreamingAudioBuffer
+
+  proc streamJobRun(job: pointer) {.thread.} =
+    let j = cast[ptr StreamJob](job)
+    streamFileToBuffer($cast[cstring](unsafeAddr j.path[0]), j.rtBuf[])
+
+  test "файл длиннее кольца заливается целиком, без записи мимо границ":
+    let path = getTempDir() / "euterpia_afio_stream_wrap.wav"
+    let frames = 5000
+    # Моно 32-bit float: сравнение после round-trip точное, без квантования.
+    var src = newSeq[float32](frames)
+    for i in 0 ..< frames:
+      src[i] = float32(i mod 97) / 97.0f - 0.5f
+    writeWav(path, info(32, 1, true), src)
+    defer: removeFile(path)
+
+    # Кольцо 64 кадра << blockSize: запись принудительно режется границей
+    # кольца многократно (startIdx переходит через capacity).
+    var rtBuf = StreamingAudioBuffer.init(64'i64, 1'i32)
+    defer: rtBuf.destroy()
+
+    doAssert path.len < 256
+    let job = cast[ptr StreamJob](allocShared0(sizeof(StreamJob)))
+    doAssert job != nil
+    defer: deallocShared(job)
+    job.rtBuf = addr rtBuf
+    for i, ch in path:
+      job.path[i] = ch
+    job.path[path.len] = '\0'
+
+    var th: Thread[pointer]
+    createThread(th, streamJobRun, cast[pointer](job))
+
+    var got = newSeq[float32](frames)
+    var received = 0
+    var idleSpins = 0
+    var chunk: array[256, float32]
+    while received < frames and idleSpins < 5000:
+      let n = rtBuf.read(cast[ptr UncheckedArray[float32]](addr chunk[0]), 256)
+      if n > 0:
+        for k in 0 ..< int(n):
+          got[received + k] = chunk[k]
+        received += int(n)
+        idleSpins = 0
+      else:
+        sleep(1)          # кольцо пусто: ждём продюсера
+        inc idleSpins
+
+    joinThread(th)
+
+    check received == frames        # ничего не потеряно по дороге
+    var maxErr = 0.0f
+    for i in 0 ..< frames:
+      maxErr = max(maxErr, abs(got[i] - src[i]))
+    check maxErr < 1e-6f            # порядок и значения не перепутаны
 
