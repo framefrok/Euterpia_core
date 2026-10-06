@@ -14,6 +14,7 @@ import
   ../sdk/node_api,
   ../sdk/node_registry,
   io/input,
+  io/clip_player,
   generators/oscillator,
   generators/noise,
   filters/biquad,
@@ -50,7 +51,8 @@ type
     bnFlute, bnBagpipe, bnStrings, bnBell,
     bnHarp, bnHarpsichord, bnRecorder, bnBrass, bnTimpani, bnChoir,
     bnUkulele, bnAccordion, bnHarmonica,
-    bnNotes
+    bnNotes,
+    bnClip
 
   ## Порядок ниже совпадает с порядком нод в реестре и используется
   ## инструментами (CLI/Editor) для выборки по индексу.
@@ -69,7 +71,8 @@ const
     bnFlute, bnBagpipe, bnStrings, bnBell,
     bnHarp, bnHarpsichord, bnRecorder, bnBrass, bnTimpani, bnChoir,
     bnUkulele, bnAccordion, bnHarmonica,
-    bnNotes
+    bnNotes,
+    bnClip
   ]
 
 proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
@@ -102,6 +105,7 @@ proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
   of bnAccordion:   getAccordionDesc()
   of bnHarmonica:   getHarmonicaDesc()
   of bnNotes:       getNotesDesc()
+  of bnClip:        getClipDesc()
 
 proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   case id
@@ -133,6 +137,7 @@ proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   of bnAccordion:   getAccordionFactory()
   of bnHarmonica:   getHarmonicaFactory()
   of bnNotes:       getNotesFactory()
+  of bnClip:        getClipFactory()
 
 proc registerBuiltinNodes*(reg: var NodeRegistry): int =
   ## Регистрирует все builtin-ноды. Возвращает число зарегистрированных:

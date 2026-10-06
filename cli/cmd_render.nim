@@ -422,7 +422,8 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
   # Реестр собирается на вызов: он и так статический, а общего изменяемого
   # состояния в CLI быть не должно (§72).
   var reg = builtinRegistry()
-  var scene = loadScene(reg, proj, scan.master, int32(sampleRate))
+  var scene = loadScene(reg, proj, scan.master, int32(sampleRate),
+                        parentDir(scan.path))
   defer:
     destroyScene(scene)
 

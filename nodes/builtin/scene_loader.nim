@@ -34,6 +34,7 @@
 import std/[algorithm, tables, strutils]
 
 import
+  std/[os, tables, math],
   project,
   signal_types,
   transport,
@@ -41,10 +42,12 @@ import
   compiled_pipeline,
   offline_render,
   sequencer,
+  audio_file_io,
   ../sdk/node_api,
   ../sdk/node_registry,
   ../sdk/pipeline_builder,
-  sequencer/notes
+  sequencer/notes,
+  io/clip_player
 
 {.push raises: [].}
 
@@ -53,6 +56,11 @@ const
   ## бесконечный цикл: если рисунок короче клипа в тысячи раз, это ошибка
   ## данных, а не музыкальный приём.
   MaxLoopCopyCount* = 64
+
+  ClipTypeAudio = 1
+    ## Ординал `ctAudio` (`core/sequencer.ClipType`): признаки «клип — аудио».
+    ## У MIDI-клипов `resourceId` в объекте по умолчанию 0, поэтому одного
+    ## `resourceId >= 0` мало — аудиоклип помечается ещё и видом.
 
 type
   SceneIssue* = object
@@ -78,6 +86,9 @@ type
     noteNodeIds*: seq[int]
       ## Нотные ноды в порядке возрастания id: в этом же порядке им
       ## достались дорожки проекта.
+    clipNodeIds*: seq[int]
+      ## Ноды-плееры аудиоклипов в порядке возрастания id: в этом же порядке
+      ## им достались дорожки с аудиоклипами (issue #107).
     automation*: seq[OfflineAutomationLane]
       ## Автоматизация проекта в форме офлайн-рендера.
     issues*: seq[SceneIssue]
@@ -85,6 +96,10 @@ type
       ## поэтому вывод CLI воспроизводим (§21).
 
     states: seq[tuple[entry: ptr NodeTypeEntry, state: pointer]]
+    clipBuffers: seq[seq[float32]]
+      ## Сэмплы аудиоресурсов, которыми владеет сцена (issue #107). Ноды
+      ## держат на них УКАЗАТЕЛИ, поэтому буферы обязаны жить, пока живёт
+      ## сцена: список держит их до `destroyScene`.
 
 
 # ==============================================================================
@@ -233,9 +248,88 @@ proc fillPattern(st: ptr NotesState; track: TrackFormat;
 # Загрузка
 # ==============================================================================
 
+proc resourceById(proj: ProjectFormat; id: int32): int =
+  ## Индекс ресурса по id или -1.
+  for i in 0 ..< proj.resources.len:
+    if proj.resources[i].id == id:
+      return i
+  -1
+
+proc resolveResourcePath(baseDir, path: string): string =
+  ## Путь к аудиоресурсу: абсолютный берётся как есть, относительный —
+  ## от каталога проекта (`baseDir`, задаёт клиент; §58).
+  if path.len == 0:
+    return ""
+  if isAbsolute(path):
+    return path
+  if baseDir.len > 0:
+    return baseDir / path
+  path
+
+proc fillClips(nodeId: int; st: ptr ClipState; track: TrackFormat;
+               proj: ProjectFormat; baseDir: string;
+               sampleRate: int32; tempo: float64;
+               buffers: var seq[seq[float32]];
+               bufferIndex: var Table[int32, int];
+               issues: var seq[SceneIssue]) =
+  ## Раскладывает аудиоклипы дорожки в ноду-плеер (issue #107): читает
+  ## ресурсы, кэширует сэмплы по id ресурса и наполняет слоты.
+  if st.isNil:
+    return
+  clipClear(st[])
+
+  # Тик → сэмпл: переводится ОДИН раз здесь, чтобы в audio-потоке осталась
+  # только целочисленная арифметика.
+  let sr = if sampleRate > 0: float64(sampleRate) else: 48000.0
+  let bpm = if tempo > 1.0: tempo else: 120.0
+  let samplesPerTick = sr * 60.0 / (bpm * 960.0)
+
+  for clip in track.clips:
+    if clip.clipType != ClipTypeAudio or clip.resourceId < 0:
+      continue                       # не аудиоклип
+    let ridx = resourceById(proj, clip.resourceId)
+    if ridx < 0:
+      issues.add SceneIssue(nodeId: nodeId, what: "resource",
+        message: "клип \"" & clip.name & "\" ссылается на ресурс #" &
+          $clip.resourceId & ", которого нет в проекте")
+      continue
+
+    let res = proj.resources[ridx]
+    var bufIdx = bufferIndex.getOrDefault(res.id, -1)
+    if bufIdx < 0:
+      let path = resolveResourcePath(baseDir, res.path)
+      var samples: seq[float32]
+      try:
+        (samples, _) = loadAudioFile(path)
+      except CatchableError:
+        issues.add SceneIssue(nodeId: nodeId, what: "resource",
+          message: "аудиоресурс не прочитан: " & path)
+        continue
+      if samples.len == 0 or res.channels <= 0:
+        issues.add SceneIssue(nodeId: nodeId, what: "resource",
+          message: "аудиоресурс пуст: " & path)
+        continue
+      # Сначала кладём буфер в список (владение сцены), потом берём на него
+      # указатель: элементы seq не двигаются при росте ВНЕШНЕГО списка.
+      buffers.add samples
+      bufIdx = buffers.len - 1
+      bufferIndex[res.id] = bufIdx
+
+    let startSample = int64(round(float64(clip.startTick) * samplesPerTick))
+    let lengthSamples =
+      int64(round(float64(max(clip.lengthTicks, 0'i32)) * samplesPerTick))
+    let endSample = startSample + lengthSamples
+    let data = cast[ptr UncheckedArray[float32]](addr buffers[bufIdx][0])
+    if not clipAddSlot(st[], data, res.channels, res.numFrames,
+                       clip.offsetFrames, startSample, endSample):
+      issues.add SceneIssue(nodeId: nodeId, what: "clip",
+        message: "клип \"" & clip.name & "\" не поместился в ноду " & ClipTypeId &
+          " (слотов не больше " & $MaxClipSlots & ")")
+
 proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
                 masterNodeId: int = -1;
-                sampleRate: int32 = 48000): Scene =
+                sampleRate: int32 = 48000;
+                baseDir: string = ""): Scene =
   ## Собирает сцену из данных проекта.
   ##
   ## `masterNodeId` — нода, подключённая к мастер-шине. При -1 она
@@ -246,6 +340,9 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
   var g: NodeGraph
   var created: seq[tuple[entry: ptr NodeTypeEntry, state: pointer]] = @[]
   var noteStates: seq[tuple[id: int, st: ptr NotesState]] = @[]
+  var clipStates: seq[tuple[id: int, st: ptr ClipState]] = @[]
+  var clipBuffers: seq[seq[float32]] = @[]
+  var bufferIndex = initTable[int32, int]()
 
   result.ok = false
   result.sampleRate = if sampleRate > 0: sampleRate else: 48000
@@ -285,6 +382,8 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
     g.nodes[node.id] = en
     if node.nodeType == NotesTypeId:
       noteStates.add (node.id, cast[ptr NotesState](en.userData))
+    if node.nodeType == ClipTypeId:
+      clipStates.add (node.id, cast[ptr ClipState](en.userData))
 
     # --- параметры: имена из файла → значения в единицах ноды --------------
     for name in sortedParamNames(node.parameters):
@@ -379,6 +478,41 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
     let last = notesLastTick(noteStates[k].st[])
     if last > result.songEndTick:
       result.songEndTick = last
+
+  # --- аудиоклипы (issue #107) --------------------------------------------
+  # То же правило «дорожка → нода», что у нот: порядок дорожек и нод по id
+  # детерминирован, и дорожка с аудиоклипами получает свою ноду-плеер.
+  clipStates.sort(proc(a, b: tuple[id: int, st: ptr ClipState]): int =
+    cmp(a.id, b.id))
+  for item in clipStates:
+    result.clipNodeIds.add item.id
+
+  var withAudio: seq[int] = @[]
+  for i in 0 ..< proj.sequencer.tracks.len:
+    for clip in proj.sequencer.tracks[i].clips:
+      if clip.clipType == ClipTypeAudio and clip.resourceId >= 0:
+        withAudio.add i
+        break
+
+  if withAudio.len > clipStates.len:
+    return failScene(result,
+      "аудиодорожек " & $withAudio.len & ", а нод " & ClipTypeId & " — " &
+      $clipStates.len & ": добавьте ноду-плеер в граф")
+
+  for k in 0 ..< withAudio.len:
+    let track = proj.sequencer.tracks[withAudio[k]]
+    fillClips(clipStates[k].id, clipStates[k].st, track, proj, baseDir,
+              result.sampleRate, float64(proj.metadata.tempo),
+              clipBuffers, bufferIndex, result.issues)
+    # Конец сцены — по тикам клипов: рендер мыслит музыкальным временем.
+    for clip in track.clips:
+      if clip.clipType == ClipTypeAudio:
+        let endTick = int64(clip.startTick) + int64(max(clip.lengthTicks, 0'i32))
+        if endTick > int64(result.songEndTick):
+          result.songEndTick = int32(min(endTick, int64(high(int32))))
+
+  # Сэмплы ресурсов живут столько же, сколько сцена: ноды держат указатели.
+  result.clipBuffers = clipBuffers
 
   # --- автоматизация ------------------------------------------------------
   result.automation = automationFromProject(proj)
