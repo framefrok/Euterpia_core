@@ -103,6 +103,13 @@ proc ioAction(id, title, cli: string; issue = 0): ClientAction =
 proc viewAction(id, title, cli: string; issue = 0): ClientAction =
   ClientAction(id: id, title: title, scope: csView, cli: cli, issue: issue)
 
+proc historyAction(id, title, cli: string): ClientAction =
+  ## Действие над ИСТОРИЕЙ правок: документ меняется (откат/повтор), но не
+  ## командой control-слоя, а воспроизведением уже записанных обратных команд
+  ## (§66, #109, #331). Поэтому `hasControl=false`, а scope — `edit`: правка
+  ## документа, а не представление.
+  ClientAction(id: id, title: title, scope: csEdit, cli: cli)
+
 proc sessionAction(id, title, cli: string; issue = 0): ClientAction =
   ClientAction(id: id, title: title, scope: csSession, cli: cli, issue: issue)
 
@@ -175,6 +182,13 @@ proc clientActions*(): seq[ClientAction] =
     # --- окружение --------------------------------------------------------
     sessionAction("session.settings", "Настройки окружения", "config"),
     sessionAction("session.diagnostics", "Диагностика окружения", "doctor"),
+
+    # --- история правок (#331): откат и повтор поверх control-слоя (#109) -
+    # Документ меняется, но команды в перечислении нет: откат воспроизводит
+    # обратные команды записи, а не новую команду документа.
+    historyAction("edit.undo", "Отменить последнюю правку", "undo"),
+    historyAction("edit.redo", "Повторить отменённую правку", "redo"),
+    viewAction("view.history", "Показать историю правок", "history"),
 
     # --- само окно (#148): команды ядра нет, CLI-эквивалента быть не может -
     windowAction("window.palette", "Палитра команд (Ctrl+K)", issue = 148),

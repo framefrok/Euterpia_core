@@ -110,6 +110,9 @@ Input → Command → Core → State update → Render
 | `view.project` | проект: метаданные и треки | `view` | — | `project` | целиком |
 | `session.settings` | настройки окружения | `session` | — | `config` | целиком |
 | `session.diagnostics` | диагностика окружения | `session` | — | `doctor` | целиком |
+| `edit.undo` | отменить последнюю правку | `edit` | — | `undo` | целиком |
+| `edit.redo` | повторить отменённую правку | `edit` | — | `redo` | целиком |
+| `view.history` | история правок | `view` | — | `history` | целиком |
 | `window.palette` | палитра команд (Ctrl+K) | `window` | — | — | #148 |
 | `window.recordScript` | запись сессии в скрипт | `window` | — | — | #148 |
 | `window.attachSession` | attach к сессии (F2) | `window` | — | — | #148 |

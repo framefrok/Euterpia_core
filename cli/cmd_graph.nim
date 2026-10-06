@@ -30,6 +30,7 @@ import checks
 import catalog
 import cmd_project
 import control_bridge
+import history_file
 import control/error_frame
 import control/commands
 import control/document
@@ -549,18 +550,28 @@ proc typeJson(info: NodeTypeInfo): JsonNode =
     "params": params,
   }
 
-proc commitEdit(ctx: Ctx; path: string; proj: ProjectFormat;
-                body: JsonNode; lines: seq[string]): Report =
-  ## Общий хвост изменяющих команд: записать атомарно или (в `--dry-run`)
-  ## только сказать, что было бы записано. `metadata.modified` выставляет
-  ## команда ДО сборки ответа: `--json` обязан показывать то состояние,
-  ## которое записывается, а не прежнее (#89).
+proc commitEditWithHistory(ctx: Ctx; path: string; proj: ProjectFormat;
+                           plan: TransactionPlan; body: JsonNode;
+                           lines: seq[string]): Report =
+  ## Хвост ИЗМЕНЯЮЩИХ команд, оставляющих след в истории (#331): записывает
+  ## проект и запись истории (`<проект>.history`) вместе. Обратные команды уже
+  ## построены `planTransaction` — клиент лишь кладёт их в файл, а не
+  ## изобретает откат заново.
+  ##
+  ## Порядок записи: проект, затем история. Проект — источник правды; если
+  ## история не записалась (нет прав рядом с файлом), это ошибка среды с
+  ## указанием пути, а не молчаливый успех.
   if ctx.dryRun:
     return okReport(body = body,
                     lines = lines & @["не записан: " & path & " (--dry-run)"])
   let saved = writeAtomic(path, proj)
   if not saved.success:
     return saveError(saved, path)
+  let entry = HistoryEntry(redo: plan.redo, undo: plan.undo,
+                           description: plan.description)
+  let recorded = recordEntry(path, entry)
+  if not recorded.isOk():
+    return frameReport(recorded)
   okReport(body = body, lines = lines & @["записан: " & path])
 
 # =============================================================================
@@ -736,9 +747,12 @@ proc runNodeAdd(ctx: var Ctx; scan: ArgScan): Report =
 
   # Проверки «занятый id» и «неизвестный тип» живут в control-слое: клиент
   # переводит аргументы в команду и показывает ответ, а не решает сам (#139).
+  # Транзакцией, а не одиночной командой: она же даёт ОБРАТНЫЕ команды, из
+  # которых собирается запись истории для `undo` (#331).
   let requestedId = (if scan.haveId: int32(scan.id) else: 0'i32)
-  let frame = doc.applyCommand(createNode(info.id, scan.name, requestedId))
-  if not frame.isOk(): return frameReport(frame)
+  let plan = doc.applyTransaction(@[createNode(info.id, scan.name, requestedId)],
+                                  "добавить ноду " & info.id)
+  if not plan.frame.isOk(): return frameReport(plan.frame)
 
   # Что добавилось, читает Query API: id назначает control-слой (максимум + 1),
   # и клиент не повторяет это правило у себя (#336).
@@ -752,7 +766,7 @@ proc runNodeAdd(ctx: var Ctx; scan: ArgScan): Report =
   body["node"] = nodeJson(added.node, cat)
   body["change"] = %*{"action": "node.add", "id": newId,
                       "type": info.id, "name": added.node.name}
-  commitEdit(ctx, scan.path, doc.proj, body, @[
+  commitEditWithHistory(ctx, scan.path, doc.proj, plan, body, @[
     "файл: " & scan.path,
     "добавлена нода #" & $newId & " " & added.node.name & " (" & info.id & ") [" &
       added.node.handle & "]",
@@ -794,8 +808,9 @@ proc runNodeRm(ctx: var Ctx; scan: ArgScan): Report =
     if state.nodeId == node.id:
       inc removedStates
 
-  let frame = doc.applyCommand(deleteNode(int32(node.id)))
-  if not frame.isOk(): return frameReport(frame)
+  let plan = doc.applyTransaction(@[deleteNode(int32(node.id))],
+                                  "удалить ноду #" & $node.id)
+  if not plan.frame.isOk(): return frameReport(plan.frame)
 
   var body = projectBody(doc, scan.path)
   body["removed"] = %*{
@@ -803,7 +818,7 @@ proc runNodeRm(ctx: var Ctx; scan: ArgScan): Report =
     "name": node.name, "connections": removedConns,
     "automationLanes": removedLanes, "pluginStates": removedStates,
   }
-  commitEdit(ctx, scan.path, doc.proj, body, @[
+  commitEditWithHistory(ctx, scan.path, doc.proj, plan, body, @[
     "файл: " & scan.path,
     "удалена нода #" & $node.id & " " & node.name & " (" & node.nodeType & ")",
     "удалено связей: " & $removedConns,
@@ -890,12 +905,13 @@ proc runConnect(ctx: var Ctx; scan: ArgScan): Report =
   # Самосоединение и цикл здесь не запрещаются: обратная связь через ноду
   # задержки — законный приём, а собирается ли граф — решает `graph check`
   # и компилятор (#90), а не догадка CLI.
-  let frame = doc.applyCommand(connect(
+  let plan = doc.applyTransaction(@[connect(
     port(int32(src.port.nodeId), controlPortKind(src.port.kind),
          int32(src.port.index)),
     port(int32(dst.port.nodeId), controlPortKind(dst.port.kind),
-         int32(dst.port.index))))
-  if not frame.isOk(): return frameReport(frame)
+         int32(dst.port.index)))],
+    "соединить " & scan.positionals[0] & " → " & scan.positionals[1])
+  if not plan.frame.isOk(): return frameReport(plan.frame)
 
   # Добавленную связь читает Query API: она последняя в списке документа, а
   # не «угаданная» клиентом по своим аргументам (#336).
@@ -909,7 +925,7 @@ proc runConnect(ctx: var Ctx; scan: ArgScan): Report =
     "sigType": conn.sigType, "kind": src.port.kind.portKindName,
   }
   body["change"] = %*{"action": "connect", "applied": true}
-  commitEdit(ctx, scan.path, doc.proj, body, @[
+  commitEditWithHistory(ctx, scan.path, doc.proj, plan, body, @[
     "файл: " & scan.path,
     "соединено: " & connectionText(conn),
     "связей: " & $conns.len,
@@ -974,10 +990,11 @@ proc runDisconnect(ctx: var Ctx; scan: ArgScan): Report =
                               conn.dstPortIdx == dstIndex)):
       removed.add conn
 
-  let frame = doc.applyCommand(disconnect(
+  let plan = doc.applyTransaction(@[disconnect(
     port(int32(srcId), kind, int32(srcIndex)),
-    port(int32(dstId), kind, int32(dstIndex)), portSpecified))
-  if not frame.isOk(): return frameReport(frame)
+    port(int32(dstId), kind, int32(dstIndex)), portSpecified)],
+    "разъединить " & scan.positionals[0] & " → " & scan.positionals[1])
+  if not plan.frame.isOk(): return frameReport(plan.frame)
 
   var removedJson = newJArray()
   for conn in removed:
@@ -996,7 +1013,7 @@ proc runDisconnect(ctx: var Ctx; scan: ArgScan): Report =
   for conn in removed:
     lines.add "  " & connectionText(conn)
   lines.add "осталось связей: " & $remaining.len
-  commitEdit(ctx, scan.path, doc.proj, body, lines)
+  commitEditWithHistory(ctx, scan.path, doc.proj, plan, body, lines)
 
 # =============================================================================
 # param: разбор значения и параметра
@@ -1159,8 +1176,10 @@ proc runParamSet(ctx: var Ctx; scan: ArgScan): Report =
   # «команда прошла» не должно означать «в проекте лежит значение, которого
   # нода не понимает», и проверять это должен один код — тот же, что у Editor.
   # Клиент знает только, что параметр найден, — этого достаточно для отчёта.
-  let frame = doc.applyCommand(setParameter(int32(node.node.id), value, p.name))
-  if not frame.isOk(): return frameReport(frame)
+  let plan = doc.applyTransaction(@[setParameter(int32(node.node.id), value, p.name)],
+                                  "параметр #" & $node.node.id & "." & p.name &
+                                  " = " & $value)
+  if not plan.frame.isOk(): return frameReport(plan.frame)
 
   # Отчёт читает то, что записано: значение приходит из Query API, а не из
   # переменной запроса — иначе отчёт мог бы разойтись с проектом (#336).
@@ -1176,7 +1195,7 @@ proc runParamSet(ctx: var Ctx; scan: ArgScan): Report =
     "after": value,
     "applied": true,
   }
-  commitEdit(ctx, scan.path, doc.proj, body, @[
+  commitEditWithHistory(ctx, scan.path, doc.proj, plan, body, @[
     "файл: " & scan.path,
     "#" & $node.node.id & " " & p.name & ": " & $before & " → " & $value &
       " [" & p.handle & "]",

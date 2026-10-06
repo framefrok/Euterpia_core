@@ -26,6 +26,7 @@ import cmd_project
 import cmd_render
 import cmd_analyze
 import cmd_midi
+import cmd_history
 import euterpia_version
 
 var gCommands: seq[CommandDef]
@@ -276,6 +277,9 @@ proc setupRegistry*() =
     CommandDef(spec: DisconnectSpec, run: runDisconnectCommand),
     CommandDef(spec: ParamSpec, run: runParam),
     CommandDef(spec: GraphSpec, run: runGraph),
+    CommandDef(spec: UndoSpec, run: runUndo),
+    CommandDef(spec: RedoSpec, run: runRedo),
+    CommandDef(spec: HistorySpec, run: runHistory),
     CommandDef(spec: RenderSpec, run: runRender),
     CommandDef(spec: NotationSpec, run: runNotation),
     CommandDef(spec: AnalyzeSpec, run: runAnalyze),

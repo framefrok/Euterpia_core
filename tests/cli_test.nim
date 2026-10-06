@@ -1154,6 +1154,195 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
 
 
 # =============================================================================
+# История правок: undo/redo/history (#331)
+# =============================================================================
+#
+# CLI — процесс на одну команду, поэтому «отменить последнее» возможно только
+# если история ПЕРЕЖИВАЕТ перезапуск. Каждый вызов `runCliIn` — отдельный
+# процесс, поэтому уже сам факт успешного `undo` в следующем запуске доказывает,
+# что история лежит в файле, а не в памяти.
+
+suite "CLI: история — undo/redo/history (#331)":
+  let dir = getTempDir() / "euterpia_cli_history"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  let work = dir / "cwd"
+  createDir(work)
+
+  proc freshProject(name: string) =
+    ## Новый проект и чистый сайдкар истории: иначе история протекла бы между
+    ## тестами, и тест перестал бы проверять СВОЙ сценарий.
+    check runCliIn(work, ["init", name, "--force", "--name", "H"]).code == 0
+    let hist = work / (name & ".history")
+    if fileExists(hist):
+      removeFile(hist)
+
+  proc nodeCount(name: string): int =
+    parseJson(readFile(work / name))["graph"]["nodes"].len
+
+  test "node add оставляет запись: undo убирает ноду, redo возвращает":
+    freshProject("a.eproj")
+    check runCliIn(work, ["node", "add", "osc", "--name", "osc", "a.eproj"]).code == 0
+
+    # Сайдкар истории появился рядом с проектом и переживает процесс.
+    check fileExists(work / "a.eproj.history")
+    check "добавить ноду euterpia.osc" in
+      runCliIn(work, ["history", "a.eproj"]).output
+
+    let undone = runCliIn(work, ["undo", "a.eproj"])
+    check undone.code == 0
+    check undone.errput.len == 0
+    check "отменено: добавить ноду euterpia.osc" in undone.output
+    check nodeCount("a.eproj") == 0
+
+    let redone = runCliIn(work, ["redo", "a.eproj"])
+    check redone.code == 0
+    check "повторено: добавить ноду euterpia.osc" in redone.output
+    check nodeCount("a.eproj") == 1
+
+  test "история переживает перезапуск: undo в другом процессе находит запись":
+    freshProject("p.eproj")
+    check runCliIn(work, ["node", "add", "gain", "p.eproj"]).code == 0
+
+    # Отдельный процесс: он не «помнит» ничего, кроме файла истории.
+    let hist = runCliIn(work, ["history", "p.eproj"])
+    check hist.code == 0
+    check "отменить 1, повторить 0" in hist.output
+
+    check runCliIn(work, ["undo", "p.eproj"]).code == 0
+    check nodeCount("p.eproj") == 0
+    # И отмена тоже переживает перезапуск: повтор в новом процессе работает.
+    check runCliIn(work, ["redo", "p.eproj"]).code == 0
+    check nodeCount("p.eproj") == 1
+
+  test "param set отменяется к прежнему значению":
+    freshProject("param.eproj")
+    check runCliIn(work, ["node", "add", "osc", "param.eproj"]).code == 0
+
+    proc freqValue(): float =
+      parseJson(runCliIn(work,
+        ["--json", "param", "get", "1", "freq", "param.eproj"]).output)["param"]["value"].getFloat
+
+    let before = freqValue()
+    check runCliIn(work, ["param", "set", "1", "freq", "220", "param.eproj"]).code == 0
+    check freqValue() == 220.0
+
+    let undone = runCliIn(work, ["undo", "param.eproj"])
+    check undone.code == 0
+    check "отменено: параметр #1.freq = 220" in undone.output
+    check freqValue() == before
+
+  test "connect отменяется: связь снимается и возвращается повтор":
+    freshProject("conn.eproj")
+    check runCliIn(work, ["node", "add", "osc", "conn.eproj"]).code == 0
+    check runCliIn(work, ["node", "add", "gain", "conn.eproj"]).code == 0
+    check runCliIn(work, ["connect", "osc:out", "gain:in", "conn.eproj"]).code == 0
+    check parseJson(readFile(work / "conn.eproj"))["graph"]["connections"].len == 1
+
+    check runCliIn(work, ["undo", "conn.eproj"]).code == 0
+    check parseJson(readFile(work / "conn.eproj"))["graph"]["connections"].len == 0
+
+    check runCliIn(work, ["redo", "conn.eproj"]).code == 0
+    check parseJson(readFile(work / "conn.eproj"))["graph"]["connections"].len == 1
+  test "node rm отменяется: нода возвращается вместе со связями":
+    freshProject("rm.eproj")
+    check runCliIn(work, ["node", "add", "osc", "rm.eproj"]).code == 0
+    check runCliIn(work, ["node", "add", "gain", "rm.eproj"]).code == 0
+    check runCliIn(work, ["connect", "osc:out", "gain:in", "rm.eproj"]).code == 0
+    check runCliIn(work, ["node", "rm", "2", "rm.eproj"]).code == 0
+    check nodeCount("rm.eproj") == 1
+
+    let undone = runCliIn(work, ["undo", "rm.eproj"])
+    check undone.code == 0
+    check "отменено: удалить ноду #2" in undone.output
+    check nodeCount("rm.eproj") == 2
+    # Связь вернулась вместе с нодой: откат применяет ОБРАТНЫЕ команды, а не
+    # «создать пустую ноду».
+    check parseJson(readFile(work / "rm.eproj"))["graph"]["connections"].len == 1
+
+  test "отменять и повторять нечего — код 1 с причиной, а не тихий успех":
+    freshProject("empty.eproj")
+    let undo = runCliIn(work, ["undo", "empty.eproj"])
+    check undo.code == 1
+    check undo.output.len == 0
+    check "отменять нечего" in undo.errput
+
+    let redo = runCliIn(work, ["redo", "empty.eproj"])
+    check redo.code == 1
+    check "повторять нечего" in redo.errput
+
+  test "новая правка сбрасывает повтор (как в Commons)":
+    freshProject("reset.eproj")
+    check runCliIn(work, ["node", "add", "osc", "reset.eproj"]).code == 0
+    check runCliIn(work, ["undo", "reset.eproj"]).code == 0
+    check "отменить 0, повторить 1" in
+      runCliIn(work, ["history", "reset.eproj"]).output
+    # Новая правка обнуляет «будущее»: повторять больше нечего.
+    check runCliIn(work, ["node", "add", "gain", "reset.eproj"]).code == 0
+    let redo = runCliIn(work, ["redo", "reset.eproj"])
+    check redo.code == 1
+    check "повторять нечего" in redo.errput
+
+  test "битый и несовместимый файл истории — код 1, а не «пустая история»":
+    freshProject("bad.eproj")
+    writeFile(work / "bad.eproj.history", "это не JSON")
+    let broken = runCliIn(work, ["undo", "bad.eproj"])
+    check broken.code == 1
+    check "файл истории" in broken.errput
+
+    writeFile(work / "bad.eproj.history", "{\"v\": 999}")
+    let future = runCliIn(work, ["history", "bad.eproj"])
+    check future.code == 1
+    check "версия файла истории" in future.errput
+
+  test "--dry-run: показывает отмену, но не пишет ни проект, ни историю":
+    freshProject("dry.eproj")
+    check runCliIn(work, ["node", "add", "osc", "dry.eproj"]).code == 0
+    let before = readFile(work / "dry.eproj")
+    let histBefore = readFile(work / "dry.eproj.history")
+
+    let planned = runCliIn(work, ["--dry-run", "undo", "dry.eproj"])
+    check planned.code == 0
+    check "будет отменено: добавить ноду euterpia.osc" in planned.output
+    check "(--dry-run)" in planned.output
+    check readFile(work / "dry.eproj") == before
+    check readFile(work / "dry.eproj.history") == histBefore
+
+  test "history --json: глубины и содержимое стеков машинно":
+    freshProject("j.eproj")
+    check runCliIn(work, ["node", "add", "osc", "j.eproj"]).code == 0
+    check runCliIn(work, ["node", "add", "gain", "j.eproj"]).code == 0
+    check runCliIn(work, ["undo", "j.eproj"]).code == 0
+
+    let r = runCliIn(work, ["--json", "history", "j.eproj"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["ok"].getBool
+    check node["command"].getStr == "history"
+    check node["undoDepth"].getInt == 1
+    check node["redoDepth"].getInt == 1
+    check node["undo"][0]["description"].getStr == "добавить ноду euterpia.osc"
+    check node["redo"][0]["description"].getStr == "добавить ноду euterpia.gain"
+
+  test "справка, машинная схема и автодополнение знают undo/redo/history":
+    for name in ["undo", "redo", "history"]:
+      check name in machineCommandNames()
+
+    let undoHelp = runCliIn(work, ["help", "undo"])
+    check undoHelp.code == 0
+    check "undo [файл]" in undoHelp.output
+    check "--file" in undoHelp.output
+
+    let candidates = runCli(["__complete", "--", "re"])
+    check candidates.code == 0
+    check "redo" in candidates.output
+
+
+
+# =============================================================================
 # Расширение файла проекта: .eproj основное, .eut историческое (#370)
 # =============================================================================
 #
