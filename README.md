@@ -306,6 +306,14 @@ CLI — полноценный интерфейс управления (MANIFEST
       (**`nimble cliDocs`**, служебная `__reference`); CI сверяет раздел
       байт-в-байт и проверяет, что каждый объявленный ключ принимается
       разбором, а каждое поле схемы приходит в ответе
+- [x] #336 чтение через Query API — ✅ сделано: `node list/show`,
+      `param list/get/set`, `connect`/`disconnect` и `project show` читают
+      DTO (`core/control/query.nim`), а не `ProjectFormat`; у Query API
+      появились метаданные, автоматизация, состояния плагинов и разбор
+      адреса параметра; `node list` получил `--filter/--type/--limit/--offset`
+      для проектов на 1000 нод; обход коллекций документа запрещён guard'ом
+      (`nimble archGuard`); сверка с «вторым клиентом» — suite «чтение через
+      Query API» в `tests/cli_test.nim`
 - [ ] #97 батч/REPL (`--script`)
 - [x] #105 `doctor` (самодиагностика окружения) — ✅ сделано: секции
       build/audio/midi/plugins/fs/csrc, human и `--json`, exit 0/2

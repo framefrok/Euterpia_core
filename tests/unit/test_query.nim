@@ -14,7 +14,7 @@
 #   - один и тот же вопрос из двух клиентов даёт одинаковый ответ (критерий #139
 #     для чтения), а коды ответа адресации переводятся в коды control-слоя (#117).
 
-import std/[json, strutils, tables, unittest]
+import std/[json, strutils, tables, times, unittest]
 
 import project
 import handles
@@ -243,6 +243,100 @@ suite "query: сводка и коды":
     check summary.notes == 1
     check summary.documentId == doc.docId
     check summary.document.len == 8
+    # Состояния плагинов считаются объёмом: по нему видно «тяжёлый» проект,
+    # не разворачивая сами состояния (#336).
+    check summary.pluginStates == 0
+    check summary.pluginStateBytes == 0
+
+  test "метаданные приходят значением, а не ссылкой на поле формата":
+    var doc = newDoc()
+    doc.proj.metadata.name = "Demo"
+    doc.proj.metadata.author = "Автор"
+    doc.proj.metadata.tempo = 140.0f32
+    doc.proj.metadata.sampleRate = 44100.0f32
+    doc.proj.metadata.timeSignature =
+      TimeSignatureFormat(numerator: 3, denominator: 4)
+    let meta = doc.queryMetadata()
+    check meta.name == "Demo"
+    check meta.author == "Автор"
+    check meta.tempo == 140.0f32
+    check meta.sampleRate == 44100.0f32
+    check meta.tsNumerator == 3
+    check meta.tsDenominator == 4
+
+  test "автоматизация и состояния плагинов читаются списками DTO":
+    var doc = newDoc()
+    discard doc.applyCommand(createNode("test.gain", "Gain"))
+    doc.proj.sequencer.automationLanes = @[
+      AutomationLaneFormat(nodeId: 1, paramId: 0,
+        points: @[AutomationPointFormat(tick: 0, value: 0.0f32),
+                  AutomationPointFormat(tick: 480, value: 1.0f32)]),
+    ]
+    doc.proj.pluginStates = @[
+      PluginStateFormat(nodeId: 1, pluginId: "euterpia.test",
+        state: @[1'u8, 2'u8, 3'u8]),
+    ]
+    let lanes = doc.queryAutomationLanes()
+    check lanes.len == 1
+    check lanes[0].nodeId == 1
+    check lanes[0].paramId == 0
+    check lanes[0].points == 2
+    let states = doc.queryPluginStates()
+    check states.len == 1
+    check states[0].nodeId == 1
+    check states[0].pluginId == "euterpia.test"
+    check states[0].bytes == 3
+    # Сводка считает то же самое: объём состояний — отдельным полем.
+    let summary = doc.querySummary()
+    check summary.automationLanes == 1
+    check summary.automationPoints == 2
+    check summary.pluginStates == 1
+    check summary.pluginStateBytes == 3
+
+  test "параметр адресуется и путём, а чужой путь — отказ с подсказкой":
+    let doc = filled()
+    let byPath = doc.queryParam("1", "node:1.1/param:0")
+    check byPath.ok
+    check byPath.param.name == "gain"
+    # Путь в другую ноду: параметр НЕ берётся «оттуда» — это ошибка вызова.
+    let foreign = doc.queryParam("1", "node:2.1/param:0")
+    check not foreign.ok
+    check foreign.frame.code == ecInvalidArgument
+    check "указанной ноде" in foreign.frame.hint
+    # Путь в другую сущность: ядро отвечает «нужен параметр», а не «нет ноды».
+    let wrongKind = doc.queryParam("1", "node:1.1")
+    check not wrongKind.ok
+    check wrongKind.frame.code == ecKindMismatch
+
+  test "проект на 1000 нод: чтение укладывается в бюджет кадра":
+    ## Критерий #141 («проект на 1000 нод укладывается в бюджет кадра без
+    ## блокировок») для чтения. Бюджет — один кадр при 48 кГц (20.8 мс); на
+    ## обычной сборке запрос укладывается в него с большим запасом, потому что
+    ## читает неизменяемый снимок и ничего не запирает.
+    ##
+    ## В сборке под санитайзером время НЕ проверяется: инструментирование
+    ## замедляет код на порядок (CI-джоб `thread sanitizer` мерил бы
+    ## инструмент, а не код). Такие сборки помечены флагом `-d:sanitizer`
+    ## (`nimble tsan`-шаг в CI, `nimble asan`/`ubsan`). Форма роста остаётся
+    ## под проверкой всегда: окно и фильтр не зависят от размера проекта.
+    var doc = newDoc()
+    for i in 1 .. 1000:
+      discard doc.applyCommand(createNode("test.gain", "N" & $i))
+    let started = epochTime()
+    let listed = doc.queryNodes()
+    let elapsed = epochTime() - started
+    check listed.frame.isOk()
+    check listed.total == 1000
+    check listed.nodes.len == 1000
+    when defined(sanitizer):
+      echo "SKIP: сборка под санитайзером — бюджет времени не проверяется " &
+           "(замер: " & $elapsed & " с)"
+    else:
+      check elapsed < 0.020
+    # Фильтр и окно не зависят от размера проекта: клиент не пересылает всё.
+    let page = doc.queryNodes(NodeFilter(text: "N99", offset: 0, limit: 5))
+    check page.total >= 1
+    check page.nodes.len <= 5
 
   test "коды адресации переводятся в коды control-слоя":
     check heOk.errorCodeOf == ecOk

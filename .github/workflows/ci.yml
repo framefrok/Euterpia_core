@@ -410,6 +410,35 @@ jobs:
           python3 tools/check_architecture.py
           echo "ok: зависимости от GUI нет, guard её ловит (§6, #213)"
 
+      # Критерий приёмки #336 «CLI не обходит внутренности модели» (§63) в
+      # исполняемом виде: та же пара «чистое дерево проходит / искусственная
+      # протечка падает». Правило с исключениями легко превратить в
+      # разрешение-на-всё, поэтому проверяется не только запрет, но и то, что
+      # он кусается: обход коллекции документа в новой процедуре CLI обязан
+      # упасть, даже если исключения объявлены.
+      - name: CLI читает модель через Query API (§63, #336)
+        run: |
+          python3 tools/check_architecture.py
+          probe=cli/tmp_doc_access_probe.nim
+          trap 'rm -f "$probe"' EXIT
+          printf 'proc probeAmmonition(proj: ProjectFormat): int =\\n  proj.graph.nodes.len\\n' > "$probe"
+          set +e
+          python3 tools/check_architecture.py > doc_guard_probe.log 2>&1
+          code=$?
+          set -e
+          if [ "$code" = "0" ]; then
+            echo "::error::guard не поймал обход документа в cli/ (§63, #336)"
+            exit 1
+          fi
+          grep -q "внутренности документа" doc_guard_probe.log || {
+            echo "::error::guard упал, но не по правилу §63: см. doc_guard_probe.log"
+            cat doc_guard_probe.log
+            exit 1
+          }
+          rm -f "$probe"
+          python3 tools/check_architecture.py
+          echo "ok: CLI не обходит модель, guard обход ловит (§63, #336)"
+
   # ---------------------------------------------------------------------------
   # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool / ring_buffer.
   #
@@ -436,7 +465,11 @@ jobs:
       - name: Сборка и прогон под TSan
         run: |
           mkdir -p build
-          nim c -r --hints:off \
+          # -d:sanitizer: тест «проект на 1000 нод укладывается в бюджет кадра»
+          # мерит ВРЕМЯ, а инструментированная сборка замедляет код на порядок —
+          # мерить ею бюджет значило бы мерить инструмент. Под этим флагом
+          # проверка времени пропускается, а форма роста остаётся под тестом.
+          nim c -r --hints:off -d:sanitizer \
             --passC:-fsanitize=thread --passC:-g \
             --passL:-fsanitize=thread \
             --out:build/euterpia_unit_tests_tsan \

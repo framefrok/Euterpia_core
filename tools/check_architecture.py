@@ -221,11 +221,124 @@ def report(violations: list[tuple[str, str, str]]) -> int:
     return 1
 
 
+# ---------------------------------------------------------------------------
+# CLI не читает внутренности документа (issue #336, MANIFEST §63)
+# ---------------------------------------------------------------------------
+#
+# §63: клиенту не достаются внутренние структуры ядра. Чтение идёт через
+# Query API (`core/control/query.nim`): `node list/show`, `param list/get`,
+# `project show` задают вопросы и печатают ответы, а не обходят `ProjectFormat`
+# руками. Это не стилистика: пока каждый клиент читает модель сам, Editor
+# повторяет ту же логику, и «один и тот же вопрос — один и тот же ответ»
+# проверить нечем (#139).
+#
+# Проверка ищет обращения к КОЛЛЕКЦИЯМ документа: `proj.graph.nodes`,
+# `proj.graph.connections`, `proj.sequencer.tracks`, `proj.sequencer.automationLanes`,
+# `proj.pluginStates`, `proj.metadata`. Комментарии отбрасываются, а имена
+# вроде `summary.pluginStates` (поле DTO) — не совпадают: шаблон привязан к
+# переменной документа.
+#
+# Исключения перечислены ПОИМЁННО (файл → процедуры с причиной). Это не
+# «потом починим», а разделение по роли кода: валидатор проверяет целостность
+# ДОКУМЕНТА, а путь записи пишет в него — их предмет и есть файл. Список
+# намеренно короткий: новое исключение — отдельное решение с обоснованием,
+# а не строка, добавленная по привычке. Перевод этих путей в control-команды и
+# DTO ведётся отдельной задачей (#373).
+CLI_INTERNALS_DIR = "cli"
+
+DOCUMENT_ACCESS_RE = re.compile(
+    r"\b(?:proj|project)\.(?:"
+    r"graph\.(?:nodes|connections)"
+    r"|sequencer\.(?:tracks|automationLanes)"
+    r"|pluginStates"
+    r"|metadata"
+    r")\b"
+)
+
+NIM_PROC_RE = re.compile(r"^proc\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+DOCUMENT_ACCESS_ALLOWED: dict[str, dict[str, str]] = {
+    "cli/cmd_project.nim": {
+        "setField": "запись полей метаданных (`project set`, `init`)",
+        "runProjectSet": "отметка `metadata.modified` — часть пути записи",
+        "runInit": "создание проекта: метаданные нового документа",
+        "validateGraph": "валидатор целостности документа (повторы id, висячие связи)",
+        "validateSequencer": "валидатор целостности документа (дорожки и клипы)",
+        "validatePlugins": "валидатор целостности документа (ссылки состояний плагинов)",
+    },
+    "cli/cmd_graph.nim": {
+        "nodeIndexById": "вход компилятора в `graph check`: связи адресуются id ноды",
+        "analyzeGraph": "`graph check` — проверка целостности документа",
+        "runGraphCheck": "`graph check` — сборка входа компилятора и отчёт",
+    },
+    "cli/cmd_notation.nim": {
+        "runNotationImport": "создание дорожки и клипа: путь записи (`notation import`)",
+    },
+}
+
+
+def scan_document_access() -> list[tuple[str, str, str]]:
+    """Обращения CLI к коллекциям документа вне объявленных исключений.
+
+    Имя текущей процедуры ведётся по строкам на нулевом отступе: тело proc в
+    Nim — всё, что идёт за объявлением с отступом, поэтому «следующий proc на
+    нулевом отступе» и есть граница.
+    """
+    found: list[tuple[str, str, str]] = []
+    for dirpath, _dirs, files in os.walk(os.path.join(ROOT, CLI_INTERNALS_DIR)):
+        for name in sorted(files):
+            if not name.endswith(".nim"):
+                continue
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
+            allowed = DOCUMENT_ACCESS_ALLOWED.get(rel, {})
+            current = "<верх уровня>"
+            with open(path, encoding="utf-8") as handle:
+                for number, line in enumerate(handle, start=1):
+                    proc_match = NIM_PROC_RE.match(line)
+                    if proc_match:
+                        current = proc_match.group(1)
+                    if not DOCUMENT_ACCESS_RE.search(strip_comment(line)):
+                        continue
+                    if current in allowed:
+                        continue
+                    where = f"{current}" if current != "<верх уровня>" else "top level"
+                    label = f"cli ─!→ внутренности документа (в {where})"
+                    found.append((f"{rel}:{number}", line.strip(), label))
+    return found
+
+
+def report_document_access(violations: list[tuple[str, str, str]]) -> int:
+    """Печатает нарушения правила «CLI читает через Query API»."""
+    if not violations:
+        allowed = sum(len(items) for items in DOCUMENT_ACCESS_ALLOWED.values())
+        print(
+            "ok: CLI не обходит модель — чтение идёт через Query API "
+            f"(исключений объявлено: {allowed}, MANIFEST §63, #336)"
+        )
+        return 0
+    github = os.environ.get("GITHUB_ACTIONS") == "true"
+    for where, line, label in violations:
+        message = (
+            f"{label}: {where} обращается к коллекции документа: «{line}». "
+            "Читайте через Query API (core/control/query.nim) или добавьте "
+            "процедуру в DOCUMENT_ACCESS_ALLOWED с причиной"
+        )
+        if github:
+            print(f"::error file={where.split(':')[0]}::{message}")
+        else:
+            print(f"ERROR: {message}")
+    print(f"нарушений правила §63 в CLI: {len(violations)}")
+    return 1
+
+
 def main() -> int:
     violations: list[tuple[str, str, str]] = []
     for subdir, forbidden, prefixes, label in build_rules():
         violations += scan(subdir, forbidden, prefixes, label)
-    return report(violations)
+    if violations:
+        return report(violations)
+    return report_document_access(scan_document_access())
 
 
 if __name__ == "__main__":
