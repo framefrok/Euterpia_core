@@ -5,26 +5,17 @@
 
 import std/[streams, os, math]
 
+# Контракт форматов — общий для всех кодеков (#356). Реэкспортируем его,
+# чтобы существующий код с `import wav_codec` не менялся; сам `wav_codec`
+# теперь зависит от контракта, а не хранит его. С приходом FLAC `flac_codec`
+# будет импортировать `codec_api`, а не соседний кодек.
+import codec_api
+export codec_api
+
 const
   MAX_RIFF_SIZE = 4_294_967_295'i64  # 4GB - 1
 
 type
-  AudioFileFormat* = enum 
-    afWav
-    afFlac
-    afOgg
-    afMp3
-    afAiff
-  
-  AudioFileInfo* = object
-    sampleRate*: int32
-    channels*: int16
-    bitsPerSample*: int16
-    numFrames*: int64
-    isFloat*: bool
-    format*: AudioFileFormat
-    duration*: float64
-
   WavReader* = object
     stream: FileStream
     info*: AudioFileInfo

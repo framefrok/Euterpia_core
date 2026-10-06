@@ -51,6 +51,7 @@ import test_logger
 import test_undo_redo
 import test_waveform_cache
 import test_audio_file_io
+import test_codec_api
 import test_instruments
 import test_mix
 import test_audio_inspect
