@@ -30,7 +30,6 @@
 import std/[algorithm, json, os, strutils, tables, times]
 
 import project
-import handles
 import context
 import checks
 import addressing

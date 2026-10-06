@@ -17,6 +17,13 @@
 
 import std/[unittest, os, osproc, strutils, json, streams, algorithm, strtabs]
 import euterpia_version
+# Control-слой нужен тесту как «второй клиент»: он строит тот же документ
+# мимо CLI и сравнивает результат (критерий #139 — один путь исполнения).
+import project
+import handles
+import control/error_frame
+import control/commands
+import control/document
 
 const
   DefaultCliPath =
@@ -1239,3 +1246,119 @@ suite "CLI: handle-адресация (#143)":
     let second = runCliIn(dir, ["node", "list", "a.eut"]).output
     check first == second
     check "node:1.1" in first
+
+# =============================================================================
+# Control Core: одна команда — один результат из CLI и из тестового клиента
+# (#139, MANIFEST §65)
+# =============================================================================
+
+suite "CLI: control-слой — те же команды, тот же документ (#139)":
+  let dir = getTempDir() / "euterpia_cli_control"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  proc specsFromCli(): seq[NodeTypeSpec] =
+    ## Описания типов берём У CLI (`node types --json`) — это тот же источник,
+    ## которым пользуется его провайдер для control-слоя. Тест не дублирует
+    ## реестр: если каталог изменится, тест увидит новое описание, а не
+    ## устаревшую копию.
+    let types = parseJson(runCliIn(dir, ["--json", "node", "types"]).output)["types"]
+    for t in types:
+      var spec = NodeTypeSpec(
+        id: t["id"].getStr,
+        name: t["name"].getStr,
+        audioIn: t["ports"]["audio"]["in"].getInt,
+        audioOut: t["ports"]["audio"]["out"].getInt,
+        ctrlIn: t["ports"]["ctrl"]["in"].getInt,
+        ctrlOut: t["ports"]["ctrl"]["out"].getInt,
+        eventIn: t["ports"]["event"]["in"].getInt,
+        eventOut: t["ports"]["event"]["out"].getInt,
+        latencyFrames: t["latencyFrames"].getInt
+      )
+      for p in t["params"].items:
+        var flags: seq[string] = @[]
+        for flag in p["flags"].items:
+          flags.add flag.getStr
+        spec.params.add ParamSpec(
+          name: p["name"].getStr,
+          minValue: p["min"].getFloat.float32,
+          maxValue: p["max"].getFloat.float32,
+          defaultValue: p["default"].getFloat.float32,
+          step: p["step"].getFloat.float32,
+          integerLike: ("integer" in flags) or ("choice" in flags)
+        )
+      result.add spec
+
+  proc providerFor(specs: seq[NodeTypeSpec]): NodeTypeProvider =
+    let captured = specs
+    result = proc(nodeType: string; spec: var NodeTypeSpec): bool =
+      for s in captured:
+        if s.id == nodeType:
+          spec = s
+          return true
+      false
+
+  proc blankProject(): ProjectFormat =
+    ## Пустой документ для клиента, который строит проект с нуля.
+    ProjectFormat(format: ProjectFormatName, version: ProjectFormatVersion)
+
+  proc withoutMetadata(node: JsonNode): JsonNode =
+    ## Документы сравниваются без метаданных: отметку времени ставит хозяин
+    ## (у CLI — системные часы, у теста — фиксированные), и именно она
+    ## единственная намеренно различающаяся часть.
+    result = node
+    if result.hasKey("metadata"):
+      result.delete("metadata")
+
+  test "CLI и тестовый клиент дают один и тот же документ":
+    let specs = specsFromCli()
+    check specs.len > 0
+
+    # 1. Тот же сценарий через CLI.
+    let project = dir / "same.eut"
+    check runCliIn(dir, ["init", "same.eut", "--name", "Same"]).code == 0
+    check runCliIn(dir, ["node", "add", "osc", "same.eut"]).code == 0
+    check runCliIn(dir, ["node", "add", "gain", "same.eut"]).code == 0
+    check runCliIn(dir, ["param", "set", "1", "freq", "330", "same.eut"]).code == 0
+    check runCliIn(dir, ["connect", "osc:out", "gain:in", "same.eut"]).code == 0
+
+    # 2. Тот же сценарий через control-слой, как это сделал бы Editor.
+    var doc: Document
+    initDocument(doc, blankProject(), documentIdForPath(absolutePath(dir / "same.eut")),
+                 providerFor(specs), proc(): string = "2026-01-01T00:00:00")
+    check doc.applyCommand(createNode("euterpia.osc")).isOk()
+    check doc.applyCommand(createNode("euterpia.gain")).isOk()
+    check doc.applyCommand(setParameter(1, 330.0f32, "freq")).isOk()
+    check doc.applyCommand(connect(port(1, cpkAudio, 0), port(2, cpkAudio, 0))).isOk()
+
+    # 3. Документы совпадают.
+    let fromCli = parseJson(readFile(project))
+    let fromControl = toJson(doc.proj)
+    check withoutMetadata(fromCli) == withoutMetadata(fromControl)
+
+  test "отказ команды одинаков у CLI и у control-слоя":
+    let specs = specsFromCli()
+    let project = dir / "reject.eut"
+    check runCliIn(dir, ["init", "reject.eut", "--name", "Reject"]).code == 0
+    check runCliIn(dir, ["node", "add", "gain", "reject.eut"]).code == 0
+    let before = readFile(project)
+
+    # Тот же отказ, что и у CLI: значение вне диапазона.
+    let cli = runCliIn(dir, ["--json", "param", "set", "1", "gain", "99", "reject.eut"])
+    check cli.code == 1
+    let cliBody = parseJson(cli.output)
+    check cliBody["errorCode"].getInt == frameCodeValue(ecOutOfRange)
+    check cliBody["error"]["kind"].getStr == "out_of_range"
+    check cliBody["exitCode"].getInt == 1
+    # Файл не тронут.
+    check readFile(project) == before
+
+    var doc: Document
+    initDocument(doc, loadProject(project).value, documentIdForPath(absolutePath(project)),
+                 providerFor(specs), nil)
+    let frame = doc.applyCommand(setParameter(1, 99.0f32, "gain"))
+    check frame.code == ecOutOfRange
+    check frameCodeValue(frame.code) == cliBody["errorCode"].getInt
+    check $frame.code == cliBody["error"]["kind"].getStr
