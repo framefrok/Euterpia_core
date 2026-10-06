@@ -15,7 +15,7 @@
 #   * `arrangement` + `add` — раскладка партий;
 #   * `buildProject` — `ProjectFormat`: ноды (ноты + инструмент на партию,
 #     сумматор в конце), события и аудиосвязи, дорожки с нотами;
-#   * `writeProject` / `writeNotes` — запись `.eut` и текстовых партитур.
+#   * `writeProject` / `writeNotes` — запись `.eproj` и текстовых партитур.
 #
 # Слой: верхний (libs). Зависит от Core и Nodes — наоборот быть не может.
 
@@ -242,7 +242,7 @@ proc buildProject*(arr: Arrangement): ProjectFormat =
 
 proc writeProjectChecked*(arr: Arrangement; path: string;
                          problems: var seq[string]): bool {.raises: [IOError].} =
-  ## Записать проект `.eut`, если он собираем. Возвращает false и заполняет
+  ## Записать проект `.eproj`, если он собираем. Возвращает false и заполняет
   ## `problems`, когда сборка невозможна; сам файл при этом НЕ создаётся —
   ## на диске не должно остаться «полуправленного» результата (#311).
   problems = validate(arr)
@@ -253,7 +253,7 @@ proc writeProjectChecked*(arr: Arrangement; path: string;
   true
 
 proc writeProject*(arr: Arrangement; path: string) {.raises: [IOError].} =
-  ## Записать проект `.eut` (JSON из Core — формат не разъезжается).
+  ## Записать проект `.eproj` (JSON из Core — формат не разъезжается).
   ##
   ## Поведение изменилось: раскладка с опечаткой или неизвестным типом
   ## ноды больше не падает `AssertionDefect` и не пишет «полуправленного»

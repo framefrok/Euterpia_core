@@ -144,15 +144,18 @@ Suite «паритет клиентов» в `tests/cli_test.nim` (`nimble cliSm
 Из §19 и §62: проект создаётся, изменяется и рендерится без Editor.
 
 ```bash
-euterpia init demo.eut --name Demo --tempo 120
-euterpia node add osc demo.eut
-euterpia node add gain demo.eut
-euterpia connect 1:out 2:in demo.eut
-euterpia param set 1 freq 330 demo.eut
-euterpia graph check demo.eut
-euterpia render demo.eut --out out.wav --seconds 2
-euterpia --json node list demo.eut
+euterpia init demo.eproj --name Demo --tempo 120
+euterpia node add osc demo.eproj
+euterpia node add gain demo.eproj
+euterpia connect 1:out 2:in demo.eproj
+euterpia param set 1 freq 330 demo.eproj
+euterpia graph check demo.eproj
+euterpia render demo.eproj --out out.wav --seconds 2
+euterpia --json node list demo.eproj
 ```
+
+Расширение проекта — `.eproj` (`docs/cli.md`); историческое `.eut` принимается
+наравне, потому что ядро определяет тип файла по содержимому, а не по имени.
 
 Те же шаги в окне — это те же действия (`graph.node.add`, `graph.connect`,
 `param.set`, …), а не вторая реализация: они видны в палитре и записываются в

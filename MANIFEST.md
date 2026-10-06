@@ -683,8 +683,14 @@ euterpia node add filter
 euterpia connect oscillator:out filter:in
 euterpia param set filter cutoff 1200
 euterpia transport tempo 140
-euterpia render project.eut
+euterpia render project.eproj
 ```
+
+Расширение файла проекта — `.eproj`. Историческое `.eut` принимается наравне:
+расширение — **подпись файла, а не часть формата** (тип файла определяется по
+содержимому, §58), поэтому переименование проекта (`demo.eut` → `demo.eproj`)
+не требует миграции. Слово «EUT» в других значениях (внутренний ABI ядер,
+формат плагинов, §104) к расширению файла проекта отношения не имеет.
 
 ---
 
@@ -1570,14 +1576,14 @@ temporary UI state
 Например:
 
 ```text
-project.eut
+project.eproj
 project.editor.json
 ```
 
 Или:
 
 ```text
-project.eut
+project.eproj
 .editor/
 ```
 
@@ -1684,16 +1690,16 @@ Builtin Nodes
 
 ```text
 project/
-├── project.eut
+├── project.eproj
 ├── assets/
 ├── presets/
 └── nodes/
 ```
 
-Например:
+Например — модуль ноды (разделяемая библиотека, не проект):
 
 ```text
-project/nodes/my_synth.eut
+project/nodes/my_synth.so
 ```
 
 или:
@@ -1701,6 +1707,10 @@ project/nodes/my_synth.eut
 ```text
 project/nodes/my_synth.dll
 ```
+
+Расширение `.eut` у модуля ноды не используется: «EUT» — имя формата плагинов и
+внутреннего ABI (§104), а не расширение файла; расширение `.eproj` закреплено за
+проектом (§19). Так «открыть проект» и «загрузить ноду» не выглядят одинаково.
 
 Но сам project не должен встраивать чужую реализацию в Core.
 
@@ -1787,10 +1797,14 @@ Core может развиваться.
 Но проект:
 
 ```text
-project_v1.eut
+project_v1.eproj
 ```
 
 не должен внезапно перестать загружаться без понятной причины.
+
+Расширение в этом не участвует: тип файла определяется по содержимому (§58),
+поэтому проект, переименованный из `project_v1.eut` в `project_v1.eproj`,
+загружается без миграции — `.eut` остаётся принятым историческим расширением.
 
 Нужен:
 

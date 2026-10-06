@@ -24,7 +24,6 @@ build/
 *.ogg
 *.mp3
 *.mid
-*.eutp
 rt_scratch*
 *.log
 

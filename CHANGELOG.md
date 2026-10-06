@@ -10,6 +10,33 @@
 
 ## [Unreleased]
 
+### Изменено
+- Расширение файла проекта — `.eproj`: `euterpia init` без аргументов создаёт
+  `project.eproj`, и команды (`node`, `connect`, `param`, `graph`, `render`,
+  `midi`) понимают `.eproj` в позиционном аргументе. Историческое `.eut`
+  принимается наравне — расширение это подпись файла, а не часть формата:
+  тип файла ядро определяет по содержимому (`format` = `euterpia-project`,
+  `core/project.nim`), поэтому `mv demo.eut demo.eproj` ничего не ломает и
+  миграции не требует (MANIFEST §19/§51/§55/§59, §58). Один список расширений
+  на все команды — `ProjectSuffixes`/`isProjectPath` в `cli/cmd_project.nim`:
+  раньше `cmd_graph` и `cmd_render` держали свои копии строки `.eut` и
+  «не понимали» чужой аргумент
+  ([#370](https://github.com/framefrok/Euterpia_core/issues/370)).
+- `.gitignore`: удалён мёртвый `*.eutp` (0 использований в репозитории)
+  ([#370](https://github.com/framefrok/Euterpia_core/issues/370)).
+
+### Исправлено
+- Подсказка `euterpia midi` при нечитаемом проекте ссылалась на несуществующую
+  команду `euterpia project info`; теперь называет формат и рабочую команду —
+  `euterpia project show`
+  ([#370](https://github.com/framefrok/Euterpia_core/issues/370)).
+
+### Добавлено
+- CLI smoke: расширение проекта — умолчание `project.eproj`, переименование
+  `.eut` → `.eproj` без миграции, `.eproj`/`.eut` в позиционном аргументе,
+  отказ на постороннее расширение и на два файла проекта в одной команде
+  ([#370](https://github.com/framefrok/Euterpia_core/issues/370)).
+
 ## [0.3.2] — Незакрытое
 
 ### Добавлено

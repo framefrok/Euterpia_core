@@ -174,7 +174,8 @@ proc setupRegistry*() =
       flags: InitFlags,
       notes: @[
         "файл по умолчанию: " & DefaultProjectFile &
-          " (расширение `.eut` — из примера MANIFEST §19)",
+          " (историческое `.eut` тоже принимается: расширение — подпись файла, " &
+          "а формат определяется по содержимому — MANIFEST §19/§58)",
         "--tempo " & $int(DefaultTempo) & " BPM, --sr " &
           $int(DefaultSampleRate) & " Гц, --ts " &
           $DefaultTimeSigNumerator & "/" & $DefaultTimeSigDenominator &
@@ -202,7 +203,7 @@ proc setupRegistry*() =
     CommandDef(
       name: "midi",
       summary: "экспорт проекта в MIDI: один файл или по файлу на инструмент",
-      usage: "midi <проект.eut> [--out файл.mid] [--split каталог]",
+      usage: "midi <проект.eproj> [--out файл.mid] [--split каталог]",
       flags: MidiKeys,
       notes: @[
         "формат 1: дорожка-дирижёр (имя, темп, размер) + по дорожке на каждый непустой трек",
@@ -218,7 +219,7 @@ proc setupRegistry*() =
     CommandDef(
       name: "node",
       summary: "ноды графа: список, каталог типов, добавление, удаление, показ",
-      usage: "node <list|types|add|rm|show> [аргументы] [--file проект.eut]",
+      usage: "node <list|types|add|rm|show> [аргументы] [--file проект.eproj]",
       subcommands: NodeSubcommands,
       flags: GraphKeys,
       notes: @[
@@ -226,7 +227,8 @@ proc setupRegistry*() =
         "порты, задержка и умолчания параметров берутся из типа: файл получает то, что умеет нода",
         "id назначается как максимум + 1; --id задаёт явно (занятый id — ошибка)",
         "node rm удаляет и связи, автоматизацию и состояния плагинов этой ноды",
-        "файл проекта: --file или аргумент с расширением .eut (по умолчанию " &
+        "файл проекта: --file или аргумент с расширением проекта (.eproj; " &
+          "историческое .eut принимается; по умолчанию " &
           DefaultProjectFile & ")",
         "`node types` печатает каталог: id, порты, параметры — и человеческим текстом, и в --json",
       ],
@@ -234,7 +236,7 @@ proc setupRegistry*() =
     CommandDef(
       name: "connect",
       summary: "соединить выход одной ноды со входом другой",
-      usage: "connect <источник> <приёмник> [--file проект.eut]",
+      usage: "connect <источник> <приёмник> [--file проект.eproj]",
       flags: GraphKeys,
       notes: @[
         "порт: `нода:out` | `нода:in` | `нода:audio:1` | `нода:ctrl:0` | `нода:event:0`",
@@ -245,7 +247,7 @@ proc setupRegistry*() =
     CommandDef(
       name: "disconnect",
       summary: "снять связь между нодами",
-      usage: "disconnect <источник>[:порт] <приёмник>[:порт] [--file проект.eut]",
+      usage: "disconnect <источник>[:порт] <приёмник>[:порт] [--file проект.eproj]",
       flags: GraphKeys,
       notes: @[
         "без портов снимаются все связи между парой нод",
@@ -255,7 +257,7 @@ proc setupRegistry*() =
     CommandDef(
       name: "param",
       summary: "параметры ноды: список, чтение, запись",
-      usage: "param <list|get|set> [аргументы] [--file проект.eut]",
+      usage: "param <list|get|set> [аргументы] [--file проект.eproj]",
       subcommands: ParamSubcommands,
       flags: GraphKeys,
       notes: @[
@@ -268,7 +270,7 @@ proc setupRegistry*() =
     CommandDef(
       name: "graph",
       summary: "проверка графа: типы, порты, связи и компиляция",
-      usage: "graph check [--file проект.eut]",
+      usage: "graph check [--file проект.eproj]",
       subcommands: GraphSubcommands,
       flags: GraphKeys,
       notes: @[
@@ -281,10 +283,10 @@ proc setupRegistry*() =
     CommandDef(
       name: "render",
       summary: "офлайн-рендер проекта в WAV без аудиоустройства",
-      usage: "render [проект.eut] [выход.wav] [ключи]",
+      usage: "render [проект.eproj] [выход.wav] [ключи]",
       flags: RenderKeys,
       notes: @[
-        "пример MANIFEST §19: euterpia render project.eut",
+        "пример MANIFEST §19: euterpia render project.eproj",
         "вывод — WAV (PCM 16 или 24 бита, стерео); MP3/OGG требуют кодировщика и в ядре отсутствуют",
         "длительность: --seconds, иначе конец последней ноты + --tail (умолчание " &
           $int(DefaultTailSeconds) & " с)",

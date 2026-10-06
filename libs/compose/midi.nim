@@ -18,7 +18,7 @@ export midi_export
 {.push raises: [].}
 
 proc toSmf*(arr: Arrangement): SmfFile =
-  ## Раскладка в SMF — через обычный `buildProject`, поэтому MIDI и `.eut`
+  ## Раскладка в SMF — через обычный `buildProject`, поэтому MIDI и `.eproj`
   ## описывают ровно одну и ту же музыку (один источник правды).
   midi_export.toSmf(buildProject(arr))
 

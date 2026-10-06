@@ -35,11 +35,27 @@ import checks
 import addressing
 
 const
-  DefaultProjectFile* = "project.eut"
+  ProjectExt* = ".eproj"
+    ## Основное расширение файла проекта.
+    ##
+    ## Расширение — **подпись файла, а не часть формата**: тип файла ядро
+    ## определяет по содержимому (`ProjectFormatName` внутри JSON), поэтому
+    ## переименование проекта (`demo.eut` → `demo.eproj`) ничего не ломает и
+    ## миграции не требует (§58/§59).
+  LegacyProjectExt* = ".eut"
+    ## Историческое расширение проекта (из примера MANIFEST §19 прежних
+    ## редакций). Принимается наравне с `ProjectExt`: существующие проекты,
+    ## скрипты и примеры не должны перестать работать (§59).
+    ##
+    ## Это НЕ имя формата плагинов EUT и не имя внутреннего ABI ядер (§104):
+    ## «EUT» там означает другое, и с расширением файла проекта не связано.
+  ProjectSuffixes* = @[ProjectExt, LegacyProjectExt]
+    ## Признак «позиционный аргумент — путь к проекту». Один список на все
+    ## команды (граф, render, редактор): иначе правило «какой аргумент файл»
+    ## разъедется по файлам, и команды начнут понимать разные наборы.
+  DefaultProjectFile* = "project" & ProjectExt
     ## Проект по умолчанию: MANIFEST §19 показывает `euterpia init` и
-    ## `euterpia project show` без аргументов, а расширение `.eut` — из
-    ## `euterpia render project.eut` (там же). Один источник для всех
-    ## четырёх команд: `show`/`set`/`validate` тоже работают без файла.
+    ## `euterpia project show` без аргументов. Один источник для всех команд.
 
   ProjectFields* = @["name", "author", "tempo", "sample-rate", "time-signature"]
     ## Поля, которыми управляет `project set`. Один источник для разбора,
@@ -71,6 +87,29 @@ const
   MaxSampleRate* = 1_000_000.0
     ## Границы значений объявлены явно и попадают в текст ошибки: правило
     ## видно пользователю, а не выясняется на опыте.
+
+proc isProjectPath*(path: string): bool =
+  ## Признак «путь похож на файл проекта»: основное расширение (`ProjectExt`)
+  ## или историческое (`LegacyProjectExt`).
+  ##
+  ## Регистр не важен: `DEMO.EPROJ` и `demo.eproj` — один и тот же файл, и
+  ## правило разбора не должно от него зависеть (§82: правило, а не
+  ## угадывание). Само содержимое проверяет ядро (`loadProject`): здесь
+  ## решается только «этот аргумент — путь, а не имя ноды».
+  let lower = path.toLowerAscii()
+  for ext in ProjectSuffixes:
+    if lower.endsWith(ext):
+      return true
+  false
+
+proc projectSuffixesHint*(): string =
+  ## Одна формула для всех сообщений об ошибке: «*.eproj или *.eut». Копия
+  ## строки в каждой команде разошлась бы с `ProjectSuffixes` — подсказка
+  ## и разбор обязаны читать один список.
+  var parts: seq[string] = @[]
+  for ext in ProjectSuffixes:
+    parts.add "*" & ext
+  parts.join(" или ")
 
 type
   LoadedProject* = object
@@ -177,7 +216,7 @@ proc nowStamp*(): string =
 
 proc defaultName*(path: string): string =
   ## Имя проекта по умолчанию — имя файла без расширения. Это правило
-  ## документировано в справке `init`, а не угадывается: `init demo.eut`
+  ## документировано в справке `init`, а не угадывается: `init demo.eproj`
   ## даёт проект «demo», и `project show` сразу показывает осмысленное имя.
   let stem = extractFilename(path).changeFileExt("")
   if stem.len > 0: stem else: "project"
@@ -400,7 +439,7 @@ proc parseInit(args: seq[string]): InitParse =
                  "--ts", "--time-signature"]:
       if i + 1 >= tokens.len:
         result.rep = usageError("ключ " & token & " требует значение",
-                                "например: euterpia init demo.eut --tempo 140")
+                                "например: euterpia init demo.eproj --tempo 140")
         return
       let value = tokens[i + 1]
       case token
@@ -444,7 +483,7 @@ proc parseInit(args: seq[string]): InitParse =
   if positional.len > 1:
     result.rep = usageError(
       "init принимает один файл проекта, получено: " & positional.join(" "),
-      "например: euterpia init demo.eut")
+      "например: euterpia init demo.eproj")
     return
   if positional.len == 1:
     result.options.path = positional[0]
@@ -625,7 +664,7 @@ proc runProjectShow*(ctx: var Ctx; args: seq[string]): Report =
 proc runProjectSet*(ctx: var Ctx; args: seq[string]): Report =
   ## `euterpia project set [файл] <поле> <значение>`.
   ##
-  ## Файл можно не указывать (тогда `project.eut`) — так пример из MANIFEST
+  ## Файл можно не указывать (тогда `project.eproj`) — так пример из MANIFEST
   ## §19 (`euterpia project set tempo 140`) работает как написан. Число
   ## аргументов различает формы однозначно: 2 — поле и значение, 3 — файл,
   ## поле и значение.
@@ -1085,7 +1124,7 @@ proc runProjectValidate*(ctx: var Ctx; args: seq[string]): Report =
 
 proc runProject*(ctx: var Ctx; args: seq[string]): Report =
   ## Диспетчер `project <show|set|validate> [файл] ...`. Форма без файла —
-  ## не магия, а задокументированное умолчание (`project.eut`): пример из
+  ## не магия, а задокументированное умолчание (`project.eproj`): пример из
   ## MANIFEST §19 (`euterpia project set tempo 140`) работает как написан.
   if args.len == 0:
     return usageError("project требует подкоманду",
