@@ -15,6 +15,7 @@
 
 import std/atomics
 import signal_types
+import aligned_mem
 
 {.push raises: [].}
 
@@ -88,60 +89,24 @@ proc alignUpInt(x: int, align: int): int {.inline.} =
   let y = x + m
   y - (y and m)
 
-proc alignUpUint(x: uint, align: uint): uint {.inline.} =
-  ## Выравнивание вверх для адресов.
-  ## Только для степеней двойки.
-  let m = align - uint(1)
-  let y = x + m
-  y - (y and m)
-
 # ==============================================================================
 # Safe aligned allocation
 # ==============================================================================
 #
-# Всегда резервируем место под заголовок перед выравниванием:
+# Само выравнивание — общая пара `alignedSharedAlloc0` / `alignedSharedDealloc`
+# (core/aligned_mem.nim). Правила те же, что были здесь, но теперь одни на всё
+# ядро: своя копия кода в аренах компилятора расходилась бы с пулами, а с
+# `-d:useMalloc` — просто теряла бы выравнивание (issue #364).
 #
-#   [raw pointer header][padding][aligned user area ...]
-#
-# Поэтому `aligned - sizeof(pointer)` всегда находится внутри выделенного блока.
+# Пул знает своё выравнивание (`PoolAlignment`) и не даёт его изменить: блоки
+# обязаны быть кратны строке кэша, иначе generation-handle и ABA-защита
+# остались бы, а смысл разнесения блоков по строкам — нет.
 
-proc alignedAlloc(size: int): pointer =
-  if size <= 0:
-    return nil
-
-  let header = uint(sizeof(pointer))
-  let total = uint(size) + uint(PoolAlignment) + header
-
-  if total > uint(high(int)):
-    return nil
-
-  let raw = allocShared0(int(total))
-  if raw == nil:
-    return nil
-
-  let rawAddr = cast[uint](raw)
-  let alignedAddr = alignUpUint(rawAddr + header, uint(PoolAlignment))
-
-  let headerPtr = cast[ptr pointer](alignedAddr - header)
-  headerPtr[] = raw
-
-  return cast[pointer](alignedAddr)
+proc alignedAlloc(size: int): pointer {.inline.} =
+  alignedSharedAlloc0(size, PoolAlignment)
 
 proc alignedDealloc(p: pointer) {.inline.} =
-  ## Освобождает ровно то, что вернул `alignedAlloc`.
-  ##
-  ## Принимает ТОЛЬКО результат `alignedAlloc`: заголовок с сырым указателем
-  ## лежит на `sizeof(pointer)` байт перед `p`. Чужой указатель — UB, поэтому
-  ## есть хотя бы дешёвая проверка заголовка (issue #80): нулевой указатель
-  ## означает, что освобождать нечего.
-  if p == nil:
-    return
-
-  let header = uint(sizeof(pointer))
-  let headerPtr = cast[ptr pointer](cast[uint](p) - header)
-  if headerPtr[] == nil:
-    return
-  deallocShared(headerPtr[])
+  alignedSharedDealloc(p)
 
 # ==============================================================================
 # Internal state encoding

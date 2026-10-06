@@ -8,6 +8,7 @@ import signal_types
 import node_interface
 import graph_compiler
 import compiled_pipeline
+import aligned_mem
 import sdk/audio_buffers
 
 proc passThroughProc(
@@ -64,6 +65,11 @@ suite "graph_compiler":
     check cr.pipeline.stepCount == 2
     check cr.pipeline.audioBufferPoolCount >= 1
     check cr.pipeline.audioBufferPool != nil
+    # Арена событий обязана быть выровнена по 64 байта при любом аллокаторе
+    # (#364): с -d:useMalloc allocShared0 даёт только MemAlign, и обращение
+    # к полю EventQueue.events становится UB (UBSan это и поймал).
+    check cr.pipeline.eventPool != nil
+    check isAlignedShared(cast[pointer](cr.pipeline.eventPool), alignof(EventQueue))
     destroyPipeline(cr.pipeline)
 
   test "версия пайплайна монотонно растёт между компиляциями":

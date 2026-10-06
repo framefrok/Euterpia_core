@@ -1,6 +1,6 @@
 # graph_compiler.nim
 import std/[algorithm, tables, math]
-import signal_types, node_interface, compiled_pipeline
+import signal_types, node_interface, compiled_pipeline, aligned_mem
 
 {.push raises: [].}
 
@@ -507,7 +507,13 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   p.ctrlPool = cast[ptr UncheckedArray[float32]](allocShared0(sizeof(float32) * maxCtrl))
   
   p.eventPoolCount = maxEvent
-  p.eventPool = cast[ptr UncheckedArray[EventQueue]](allocShared0(sizeof(EventQueue) * maxEvent))
+  # У EventQueue поле events помечено {.align: 64.}, а allocShared0 гарантирует
+  # только MemAlign (16). Пока аллокатор Nim'а отдавал страницы, выравнивание
+  # получалось само; с -d:useMalloc (#364) память идёт из libc malloc, и
+  # обращение к полю становится UB — UBSan ловит это на первом же событии.
+  p.eventPool = cast[ptr UncheckedArray[EventQueue]](
+    alignedSharedAlloc0(sizeof(EventQueue) * maxEvent, alignof(EventQueue))
+  )
 
   let flagsSize = max(maxAudioBuffers, max(maxCtrl, maxEvent))
   p.poolFlags = cast[ptr UncheckedArray[set[PoolFlag]]](allocShared0(sizeof(set[PoolFlag]) * flagsSize))
