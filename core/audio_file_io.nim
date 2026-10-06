@@ -78,29 +78,52 @@ proc close*(encoder: var AudioEncoder) =
 proc streamFileToBuffer*(path: string, rtBuffer: var StreamingAudioBuffer) {.thread.} =
   ## Background Thread процедура.
   ## Обернута в try/except, чтобы ошибка I/O не обрушила Audio Thread хоста.
+  ##
+  ## Запись идёт через двухсегментный `getWritePtr(framesRequested)` (#357):
+  ## старый однопараметровый `getWritePtr()` не разбивал запись на границе
+  ## кольца и не смотрел на свободное место, поэтому readFrames писал до
+  ## `blockSize` фреймов за конец аллокации — «спящий» heap overflow (кламп в
+  ## commitWrite срабатывал уже ПОСЛЕ записи). Теперь readFrames получает
+  ## ровно те сегменты, что вернуло кольцо, а когда места нет — поток уступает
+  ## процессор Audio Thread.
   try:
     var decoder = openDecoder(path)
     let info = decoder.getInfo()
-    
-    let blockSize = 4096
-    let bytesPerFrame = int(info.channels) * int(info.bitsPerSample div 8)
+
+    let channels = int(info.channels)
+    let bytesPerFrame = max(1, channels * int(info.bitsPerSample div 8))
+
+    const blockSize = 4096
     var rawBuf = newSeq[uint8](blockSize * bytesPerFrame)
-    
-    var totalFramesRead: int64 = 0
-    
-    while totalFramesRead < info.numFrames:
-      let framesRead = decoder.readFrames(
-        cast[ptr UncheckedArray[uint8]](addr rawBuf[0]),
-        rtBuffer.getWritePtr(),
-        int32(blockSize)
-      )
-      
-      if framesRead == 0:
-        break
-      
-      rtBuffer.advanceWritePtr(framesRead)
-      totalFramesRead += int64(framesRead)
-      
+
+    var framesRemaining = info.numFrames
+    while framesRemaining > 0:
+      # До двух непрерывных сегментов внутри кольца; n1 + n2 никогда не
+      # выходит за аллокацию, а суммарно не превышает свободное место.
+      let (p1, p2, n1, n2) = rtBuffer.getWritePtr(int32(blockSize))
+      let capacity = n1 + n2
+      if capacity <= 0:
+        # Кольцо полно: ждём, пока Audio Thread освободит место.
+        sleep(1)
+        continue
+
+      var committed = 0'i32
+      let got1 = decoder.readFrames(
+        cast[ptr UncheckedArray[uint8]](addr rawBuf[0]), p1, n1)
+      committed += got1
+      # Второй сегмент читаем только если первый заполнен целиком (иначе
+      # это конец файла посреди сегмента — читать «через границу» нельзя).
+      if got1 == n1 and n2 > 0:
+        committed += decoder.readFrames(
+          cast[ptr UncheckedArray[uint8]](addr rawBuf[0]), p2, n2)
+
+      if committed <= 0:
+        break  # конец файла
+      rtBuffer.commitWrite(committed)
+      framesRemaining -= int64(committed)
+      if committed < capacity:
+        break  # конец файла: прочитано меньше, чем было свободного места
+
     decoder.close()
   except:
     # В фоновом потоке мы не можем пробрасывать исключения в Audio Thread.

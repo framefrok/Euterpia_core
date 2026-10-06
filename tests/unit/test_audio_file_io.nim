@@ -12,6 +12,7 @@
 
 import std/[unittest, os, math]
 import audio_file_io
+import audio_buffer
 import wav_codec
 
 proc writeWav(path: string; info: AudioFileInfo; samples: seq[float32]) =
@@ -274,4 +275,71 @@ suite "audio_file_io: враждебный заголовок (#354)":
     defer: removeFile(path)
     expect IOError:
       discard loadAudioFile(path)
+
+
+suite "audio_file_io: streamFileToBuffer на границе кольца (#357)":
+  ## Регрессия «спящего» heap overflow: однопараметровый getWritePtr() не
+  ## разбивал запись на границе кольца и не смотрел на свободное место, и
+  ## readFrames писал до blockSize (4096) фреймов за конец аллокации.
+  ## Кольцо здесь намеренно МЕНЬШЕ блока, поэтому запись пересекает границу
+  ## на каждом шаге; под ASan старая версия падала на записи.
+
+  type
+    StreamJob = object
+      path: array[256, char]
+      rtBuf: ptr StreamingAudioBuffer
+
+  proc streamJobRun(job: pointer) {.thread.} =
+    let j = cast[ptr StreamJob](job)
+    streamFileToBuffer($cast[cstring](unsafeAddr j.path[0]), j.rtBuf[])
+
+  test "файл длиннее кольца заливается целиком, без записи мимо границ":
+    let path = getTempDir() / "euterpia_afio_stream_wrap.wav"
+    let frames = 5000
+    # Моно 32-bit float: сравнение после round-trip точное, без квантования.
+    var src = newSeq[float32](frames)
+    for i in 0 ..< frames:
+      src[i] = float32(i mod 97) / 97.0f - 0.5f
+    writeWav(path, info(32, 1, true), src)
+    defer: removeFile(path)
+
+    # Кольцо 64 кадра << blockSize: запись принудительно режется границей
+    # кольца многократно (startIdx переходит через capacity).
+    var rtBuf = StreamingAudioBuffer.init(64'i64, 1'i32)
+    defer: rtBuf.destroy()
+
+    doAssert path.len < 256
+    let job = cast[ptr StreamJob](allocShared0(sizeof(StreamJob)))
+    doAssert job != nil
+    defer: deallocShared(job)
+    job.rtBuf = addr rtBuf
+    for i, ch in path:
+      job.path[i] = ch
+    job.path[path.len] = '\0'
+
+    var th: Thread[pointer]
+    createThread(th, streamJobRun, cast[pointer](job))
+
+    var got = newSeq[float32](frames)
+    var received = 0
+    var idleSpins = 0
+    var chunk: array[256, float32]
+    while received < frames and idleSpins < 5000:
+      let n = rtBuf.read(cast[ptr UncheckedArray[float32]](addr chunk[0]), 256)
+      if n > 0:
+        for k in 0 ..< int(n):
+          got[received + k] = chunk[k]
+        received += int(n)
+        idleSpins = 0
+      else:
+        sleep(1)          # кольцо пусто: ждём продюсера
+        inc idleSpins
+
+    joinThread(th)
+
+    check received == frames        # ничего не потеряно по дороге
+    var maxErr = 0.0f
+    for i in 0 ..< frames:
+      maxErr = max(maxErr, abs(got[i] - src[i]))
+    check maxErr < 1e-6f            # порядок и значения не перепутаны
 
