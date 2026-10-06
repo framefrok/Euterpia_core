@@ -15,7 +15,7 @@
 # Проверка грубая по существу (`document` vs `code`), а не по оформлению:
 # требовать таблицу с колонками значило бы запретить править документ.
 
-import std/[unittest, os, strutils, sets, re]
+import std/[unittest, os, strutils, sets]
 
 const
   DocsPath = "docs/embedding.md"
@@ -26,8 +26,47 @@ const
   CiPath = ".github/workflows/ci.yml"
 
 proc readChecked(path: string): string =
+  ## Читает файл, приведя переводы строк к `\n`.
+  ##
+  ## Нормализация — не украшение: `git` на windows-раннере выдаёт CRLF, и
+  ## проверка вида `"\n  embed:\n" in ci` падала бы не из-за джоба, а из-за
+  ## `\r`.
   check fileExists(path)
-  readFile(path)
+  readFile(path).replace("\r\n", "\n")
+
+proc identifiers(src: string): seq[string] =
+  ## Идентификаторы в тексте: `[A-Za-z_][A-Za-z0-9_]*`.
+  ##
+  ## Свой сканер, а не `std/re`: регулярки требуют libpcre, которой нет на
+  ## ubuntu-раннере, и весь unit-набор падал ещё до первой проверки.
+  var i = 0
+  while i < src.len:
+    if src[i] in {'a' .. 'z', 'A' .. 'Z', '_'}:
+      var j = i + 1
+      while j < src.len and src[j] in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '_'}:
+        inc j
+      result.add src[i ..< j]
+      i = j
+    else:
+      inc i
+
+proc nimbleMentions(doc: string): seq[string] =
+  ## Имена целей, упомянутые в тексте как `nimble <имя>`.
+  const Prefix = "nimble "
+  var i = 0
+  while true:
+    let at = doc.find(Prefix, i)
+    if at < 0:
+      break
+    let start = at + Prefix.len
+    if start < doc.len and doc[start] in {'A' .. 'Z', 'a' .. 'z'}:
+      var stop = start + 1
+      while stop < doc.len and doc[stop] in {'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_'}:
+        inc stop
+      result.add doc[start ..< stop]
+      i = stop
+    else:
+      i = start
 
 proc exportedSymbols(src: string): HashSet[string] =
   ## Символы фасада: имена процедур, объявленных в `examples/embed_lib.nim`.
@@ -49,8 +88,9 @@ proc exportedSymbols(src: string): HashSet[string] =
 proc documentedSymbols(doc: string): HashSet[string] =
   ## `eutHost*`-имена, упомянутые в документе (в том числе внутри
   ## подписи с аргументами: `` `eutHostCreate(sr, blockSize)` ``).
-  for token in doc.findAll(re"eutHost[A-Za-z0-9]+"):
-    result.incl token
+  for token in identifiers(doc):
+    if token.startsWith("eutHost") and token.len > "eutHost".len:
+      result.incl token
 
 suite "документация встраивания не отстаёт от кода (#213)":
   test "каждый экспортируемый символ фасада описан в docs/embedding.md":
@@ -90,10 +130,9 @@ suite "документация встраивания не отстаёт от 
   test "nimble-цели из документа объявлены в пакете":
     let doc = readChecked(DocsPath)
     let nimble = readChecked(NimblePath)
-    let targets = doc.findAll(re"nimble [A-Za-z][A-Za-z0-9_]*")
+    let targets = nimbleMentions(doc)
     var missing: seq[string]
-    for t in targets:
-      let name = t["nimble ".len .. ^1]
+    for name in targets:
       if not (("task " & name & ",") in nimble):
         missing.add name
     check missing.len == 0
