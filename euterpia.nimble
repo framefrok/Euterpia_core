@@ -148,7 +148,13 @@ task miniaudioSmoke, "Сборка TU miniaudio и smoke-прогон адапт
 task ubsan, "Unit-набор под UndefinedBehaviorSanitizer (#13)":
   mkDir buildDir
   buildLog "unit tests under UBSan"
-  exec "nim c -r --hints:off --nimcache:build/nc_ubsan " &
+  # -d:useMalloc (#364): Nim-аллокаторы (в т.ч. allocShared) уходят в libc,
+  # поэтому санитайзер видит ту же кучу, что и C-код ядра. Без флага
+  # allocShared-арены (кольцо, memory_pool, аудио-арены пайплайна) живут в
+  # собственной mmap-куче Nim мимо инструментирования — переполнения в них
+  # не видны. Для UBSan это не про OOB, но единый аллокатор убирает
+  # расхождение поведения debug-сборок.
+  exec "nim c -r --hints:off --nimcache:build/nc_ubsan -d:useMalloc " &
     "--passC:-fsanitize=undefined --passC:-fno-sanitize-recover=all " &
     "--passL:-fsanitize=undefined --out:build/unit_ubsan tests/unit/all_tests.nim"
 
@@ -157,9 +163,46 @@ task asan, "Unit-набор под AddressSanitizer (#13)":
   buildLog "unit tests under ASan"
   # detect_leaks=0: ядро намеренно держит shared-арены (memory_pool,
   # audio-арены пайплайна) на весь срок жизни процесса.
-  exec "ASAN_OPTIONS=detect_leaks=0 nim c -r --hints:off --nimcache:build/nc_asan " &
+  #
+  # -d:useMalloc (#364): БЕЗ него Nim держит allocShared/allocShared0 в
+  # собственной mmap-куче, и ASan их НЕ инструментирует — переполнения в
+  # `core/audio_buffer.nim` (StreamingAudioBuffer), `core/memory_pool.nim`
+  # и аудио-аренах пайплайна не ловились. Флаг направляет все Nim-аллокации
+  # через libc malloc, поэтому то же переполнение падает:
+  # `AddressSanitizer: heap-buffer-overflow in allocShared0Impl__system_...`.
+  # Проверка эффективности флага — `nimble asanProbe` и шаг CI в джобе asan.
+  exec "ASAN_OPTIONS=detect_leaks=0 nim c -r --hints:off --nimcache:build/nc_asan -d:useMalloc " &
     "--passC:-fsanitize=address --passC:-fno-omit-frame-pointer " &
     "--passL:-fsanitize=address --out:build/unit_asan tests/unit/all_tests.nim"
+
+# ---------------------------------------------------------------------------
+# Зонд ASan/allocShared (#364): доказывает, что флаг -d:useMalloc в `asan`
+# действительно ловит переполнения shared-арен. Без useMalloc зонд молчит
+# (буфер лежит в mmap-куче Nim мимо санитайзера), с ним — падает с
+# heap-buffer-overflow. Задача ждёт НЕНУЛЕВОЙ код возврата: зелёный зонд
+# означает, что ASan перестал видеть shared-выделения, и джоба asan даёт
+# ложную уверенность.
+# ---------------------------------------------------------------------------
+task asanProbe, "ASan-зонд переполнения allocShared0 ловится с -d:useMalloc (#364)":
+  mkDir buildDir
+  buildLog "asan allocShared overshoot probe"
+  exec "ASAN_OPTIONS=detect_leaks=0 nim c --hints:off --nimcache:build/nc_asan_probe -d:useMalloc " &
+    "--passC:-fsanitize=address --passC:-fno-omit-frame-pointer " &
+    "--passL:-fsanitize=address --out:build/asan_probe tests/asan_probe_allocshared.nim"
+  buildLog "прогон зонда (ожидается падение ASan)"
+  # gorgeEx в NimScript возвращает (вывод, код) вместо `exec`, который
+  # падает на ненулевом коде: зонд ОБЯЗАН упасть, это и есть критерий.
+  when defined(windows):
+    # ASan-джоб CI — только Linux; на Windows зонд просто собирается.
+    echo "skip: зонд-ассерт выполняется в Linux-джобе asan (#364)"
+  else:
+    let (probeOut, probeCode) = gorgeEx(
+      "bash -c 'ASAN_OPTIONS=detect_leaks=0 build/asan_probe 2>&1'")
+    echo probeOut
+    if probeCode == 0:
+      raise newException(ValueError,
+        "ASan не поймал переполнение allocShared0: -d:useMalloc не действует (#364)")
+    echo "ok: ASan поймал переполнение allocShared0 (код " & $probeCode & ")"
 
 # ---------------------------------------------------------------------------
 # Сквозной CLAP-тест (issue #53). Mock-плагин (tests/mock/) собирается в
