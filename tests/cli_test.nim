@@ -1343,6 +1343,90 @@ suite "CLI: история — undo/redo/history (#331)":
 
 
 # =============================================================================
+# Импорт аудио: import (#107)
+# =============================================================================
+#
+# WAV-источник тест собирает сам (`render`), чтобы не тащить бинарь-фикстуру.
+# Проверяется: ресурс+audio-клип в проекте, версия формата v2, `--copy`,
+# отказы (формат/аргументы) без создания клипа.
+
+suite "CLI: импорт аудио — import (#107)":
+  let dir = getTempDir() / "euterpia_cli_import"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  let work = dir / "cwd"
+  createDir(work)
+
+  proc makeWav(name: string) =
+    ## Детерминированный WAV-источник через сам CLI.
+    check runCliIn(work, ["init", "src.eproj", "--force", "--name", "Src"]).code == 0
+    check runCliIn(work, ["node", "add", "osc", "--file", "src.eproj"]).code == 0
+    check runCliIn(work, ["render", "src.eproj", name, "--seconds", "1"]).code == 0
+    check fileExists(work / name)
+
+  test "import кладёт audio-клип и ресурс; проект становится v2":
+    makeWav("src.wav")
+    check runCliIn(work, ["init", "song.eproj", "--force", "--name", "Song"]).code == 0
+    let r = runCliIn(work, ["import", "src.wav", "song.eproj", "--track", "0"])
+    check r.code == 0
+    check r.errput.len == 0
+    check "ресурс #1: src.wav (ссылка)" in r.output
+
+    let onDisk = parseJson(readFile(work / "song.eproj"))
+    check onDisk["version"].getInt == ProjectFormatVersion
+    check onDisk["resources"].len == 1
+    check onDisk["resources"][0]["path"].getStr == "src.wav"
+    check onDisk["resources"][0]["sampleRate"].getInt == 48000
+    check onDisk["sequencer"]["tracks"].len == 1
+    let clip = onDisk["sequencer"]["tracks"][0]["clips"][0]
+    check clip["clipType"].getInt == 1          # ctAudio
+    check clip["resourceId"].getInt == 1
+
+  test "import --copy кладёт копию рядом с проектом":
+    makeWav("take.wav")
+    check runCliIn(work, ["init", "song2.eproj", "--force"]).code == 0
+    let r = runCliIn(work, ["import", "take.wav", "song2.eproj", "--track", "0",
+                            "--copy", "--name", "Take"])
+    check r.code == 0
+    check "(копия)" in r.output
+    check fileExists(work / "take.wav")
+    let onDisk = parseJson(readFile(work / "song2.eproj"))
+    check onDisk["resources"][0]["copy"].getBool
+    check onDisk["resources"][0]["path"].getStr == "take.wav"
+
+  test "неподдерживаемый формат/битый файл — отказ без клипа":
+    check runCliIn(work, ["init", "song3.eproj", "--force"]).code == 0
+    writeFile(work / "bad.flac", "not audio")
+    let r = runCliIn(work, ["import", "bad.flac", "song3.eproj", "--track", "0"])
+    check r.code == 2
+    check parseJson(readFile(work / "song3.eproj"))["resources"].len == 0
+    check parseJson(readFile(work / "song3.eproj"))["sequencer"]["tracks"].len == 0
+
+  test "import требует --track (код 1)":
+    check runCliIn(work, ["init", "song4.eproj", "--force"]).code == 0
+    let r = runCliIn(work, ["import", "src.wav", "song4.eproj"])
+    check r.code == 1
+    check "--track" in r.errput
+
+  test "import --json: поля ресурса и клипа парсятся":
+    makeWav("j.wav")
+    check runCliIn(work, ["init", "song5.eproj", "--force"]).code == 0
+    let r = runCliIn(work, ["--json", "import", "j.wav", "song5.eproj",
+                            "--track", "0", "--at-bar", "2"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["ok"].getBool
+    check node["command"].getStr == "import"
+    check node["imported"]["sampleRate"].getInt == 48000
+    check node["resource"]["id"].getInt == 1
+    check node["clip"]["track"].getInt == 0
+
+
+
+# =============================================================================
 # Расширение файла проекта: .eproj основное, .eut историческое (#370)
 # =============================================================================
 #
