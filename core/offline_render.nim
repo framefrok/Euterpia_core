@@ -29,6 +29,7 @@
 
 import std/math
 import
+  codec_api,
   signal_types,
   transport,
   compiled_pipeline,

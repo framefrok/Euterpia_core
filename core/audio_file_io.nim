@@ -4,6 +4,7 @@
 # и быстрого полиморфизма без использования экспериментальных concept'ов.
 
 import std/[os, strutils]
+import codec_api
 import wav_codec
 import audio_buffer
 
