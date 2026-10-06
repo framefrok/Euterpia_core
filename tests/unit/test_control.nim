@@ -162,7 +162,7 @@ suite "control: параметры":
     discard doc.applyCommand(createNode("test.osc"))
     check doc.applyCommand(setParameter(1, 220.0f32, "freq")).isOk()
     check doc.proj.graph.nodes[0].parameters["freq"] == 220.0f32
-    check doc.applyCommand(setParameter(1, -3.5f32, "", 2)).isOk()
+    check doc.applyCommand(setParameter(1, -3.5f32, "", 3)).isOk()
     check doc.proj.graph.nodes[0].parameters["level"] == -3.5f32
     check doc.applyCommand(setParameter(1, 2.0f32, "", 99)).code == ecUnknownParameter
 
