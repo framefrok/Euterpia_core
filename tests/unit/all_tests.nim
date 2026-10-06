@@ -47,6 +47,7 @@ import test_project
 import test_param_registry
 import test_param_flags
 import test_memory_pool
+import test_handles
 import test_logger
 import test_undo_redo
 import test_waveform_cache

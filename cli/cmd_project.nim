@@ -30,8 +30,10 @@
 import std/[algorithm, json, os, strutils, tables, times]
 
 import project
+import handles
 import context
 import checks
+import addressing
 
 const
   DefaultProjectFile* = "project.eut"
@@ -231,6 +233,9 @@ proc projectBody*(proj: ProjectFormat; path: string): JsonNode =
   ## об этом по полю `version`, а не по тому, что «CLI забыл поле».
   result = toJson(proj)
   result["path"] = %path
+  # Идентификатор документа: по нему адреса из одного файла отличаются от
+  # адресов другого, даже если у них совпадают номера нод (issue #143).
+  result["documentId"] = %documentIdOf(path)
   result["summary"] = summarize(proj)
 
 proc writeAtomic*(path: string; proj: ProjectFormat): ProjectResult[void] =
@@ -547,10 +552,12 @@ proc runProjectShow*(ctx: var Ctx; args: seq[string]): Report =
   let loaded = loadAt(target.path)
   if not loaded.ok: return loaded.rep
   let proj = loaded.proj
+  let tbl = documentTable(target.path, proj)
 
   var lines: seq[string] = @[
     "проект: " & target.path,
     "формат: " & proj.format & " v" & $proj.version,
+    "документ: " & documentIdOf(target.path),
     "",
     "Метаданные:",
   ]
@@ -565,7 +572,8 @@ proc runProjectShow*(ctx: var Ctx; args: seq[string]): Report =
               display(node.name) & "» — audio " & $node.audioInCount & "/" &
               $node.audioOutCount & ", ctrl " & $node.ctrlInCount & "/" &
               $node.ctrlOutCount &
-              (if node.isSubgraph: ", субграф" else: "")
+              (if node.isSubgraph: ", субграф" else: "") &
+              " [" & nodeHandleText(tbl, node.id) & "]"
     lines.add paramLines(node.parameters)
   for conn in proj.graph.connections:
     lines.add "  " & $conn.srcNodeId & ":" & $conn.srcPortIdx & " → " &
@@ -587,12 +595,14 @@ proc runProjectShow*(ctx: var Ctx; args: seq[string]): Report =
   for track in proj.sequencer.tracks:
     lines.add "  [" & $track.id & "] «" & display(track.name) & "» — клипов " &
               $track.clips.len & ", vol " & $track.volume & ", pan " &
-              $track.pan & ", " & trackFlags(track)
-    for clip in track.clips:
+              $track.pan & ", " & trackFlags(track) &
+              " [" & trackHandleText(tbl, track.id) & "]"
+    for clipIndex, clip in track.clips:
       lines.add "      клип [" & $clip.id & "] «" & display(clip.name) &
                 "»: тик " & $clip.startTick & ", длина " & $clip.lengthTicks &
                 ", нот " & $clip.notes.len &
-                (if clip.loopEnabled: ", loop" else: "")
+                (if clip.loopEnabled: ", loop" else: "") &
+                " [" & clipHandleText(tbl, track.id, clipIndex) & "]"
 
   lines.add ""
   lines.add "Автоматизация: дорожек " &
