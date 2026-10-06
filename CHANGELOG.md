@@ -11,6 +11,49 @@
 ## [Unreleased]
 
 ### Добавлено
+- Query API: DTO метаданных (`queryMetadata`), автоматизации
+  (`queryAutomationLanes`) и состояний плагинов (`queryPluginStates`), а в
+  сводке — `pluginStateBytes`: клиенту больше не нужно обходить формат, чтобы
+  показать темп, дорожки автоматизации и объём состояний
+  ([#336](https://github.com/framefrok/Euterpia_core/issues/336)).
+- `queryParam` разбирает **адрес параметра** (`node:1.1/param:1`): путь в
+  чужую ноду — отказ с подсказкой «адрес параметра должен принадлежать
+  указанной ноде», путь в другую сущность — «здесь нужен параметр». Разбор
+  живёт в ядре, поэтому CLI и Editor отвечают одинаково
+  ([#336](https://github.com/framefrok/Euterpia_core/issues/336)).
+- `euterpia node list`: `--filter <текст>`, `--type <id>`, `--limit <N>` и
+  `--offset <N>` — фильтр и окно считает ядро, а отчёт добавляет поля
+  `window` (`offset`/`limit`/`total`/`shown`); проект на 1000 нод не
+  пересылается целиком ради двадцати строк
+  ([#336](https://github.com/framefrok/Euterpia_core/issues/336)).
+- Guard архитектуры: `tools/check_architecture.py` запрещает CLI обращаться к
+  коллекциям документа (`graph.nodes`, `graph.connections`,
+  `sequencer.tracks`, `sequencer.automationLanes`, `pluginStates`, `metadata`).
+  Исключения перечислены поимённо в самой проверке — только валидаторы
+  целостности (`project validate`, `graph check`) и пути записи
+  ([#336](https://github.com/framefrok/Euterpia_core/issues/336)).
+
+### Изменено
+- CLI читает модель через Query API: `node list/show`, `param list/get/set`,
+  `connect`/`disconnect` и `project show` получают DTO, а не ходят по
+  `ProjectFormat`; `summarize` убран из CLI (счётчики считает ядро),
+  `documentTable` больше не строит вторую таблицу адресов — используется
+  таблица документа, разрешение ссылок на ноду и порт идёт через
+  `queryNode`/`queryNodes` (`#336`, `#141`, MANIFEST §63).
+- Сообщения об отказах адресации («нужна нода», «нет ноды с адресом»,
+  «нужен параметр») формирует ядро: тот же текст получает любой клиент, а не
+  только CLI ([#336](https://github.com/framefrok/Euterpia_core/issues/336)).
+- `param list --json` для ноды с незарегистрированным типом печатает
+  параметры из файла (раньше список был пуст, хотя человеческий отчёт их
+  показывал) ([#336](https://github.com/framefrok/Euterpia_core/issues/336)).
+- `cli/stamp.nim` — формат отметки времени и часы в одном месте: раньше
+  `nowStamp` жил в `cmd_project`, из-за чего импорт замыкался
+  (`cmd_project → control_bridge → cmd_project`)
+  ([#336](https://github.com/framefrok/Euterpia_core/issues/336)).
+- Удалён мёртвый `cli/addressing.nim`: разбор ссылок, печать адресов и
+  таблица handle'ов перешли в ядро (Query API и `Document.handles`), копия в
+  клиенте больше не нужна
+  ([#336](https://github.com/framefrok/Euterpia_core/issues/336)).
 - `libs/cli_spec` — описание команды CLI **данными**: имя, синопсис,
   позиционные аргументы, ключи (вид, тип значения, умолчание,
   обязательность), варианты аргумента, пример вызова и поля ответа

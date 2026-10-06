@@ -130,10 +130,36 @@ type
     startTick*, duration*: int32
     pitch*, velocity*, channel*: uint8
 
+  MetadataInfo* = object
+    ## Метаданные проекта для клиента: имя, автор, транспорт и отметки.
+    ##
+    ## Отдельный DTO, а не «прочитай поле из формата»: `project show` и
+    ## `render` спрашивают темп и частоту у одного места, поэтому правило
+    ## «откуда берётся частота рендера» не разъезжается с отчётом (#336).
+    name*, author*: string
+    tempo*, sampleRate*: float32
+    tsNumerator*, tsDenominator*: int32
+    created*, modified*: string
+
+  AutomationLaneInfo* = object
+    ## Дорожка автоматизации: узел, параметр и точки.
+    nodeId*: int32
+    paramId*: uint32
+    points*: int
+
+  PluginStateInfo* = object
+    ## Сохранённое состояние плагина: узел, идентификатор и размер.
+    nodeId*: int
+    pluginId*: string
+    bytes*: int
+
   ProjectSummary* = object
     ## Счётчики содержимого: клиенту они нужны чаще, чем всё остальное.
     nodes*, connections*, tracks*, clips*, notes*: int
     automationLanes*, automationPoints*, pluginStates*: int
+    pluginStateBytes*: int
+      ## Суммарный размер сохранённых состояний: по нему видно, «тяжёлый» ли
+      ## проект из-за плагинов, не разворачивая сами состояния.
     documentId*: uint32
     document*: string
       ## Идентификатор документа в тексте (`docIdText`), чтобы клиент проверил,
@@ -210,9 +236,21 @@ proc resolveNodeIndex*(doc: Document; text: string):
   of nrByHandle:
     let resolved = doc.handles.resolveAs(parsed.handle, hkNode)
     if not resolved.ok:
+      # «Просрочен/удалён» и «не тот вид сущности» — разные причины, и подсказки
+      # у них разные. Текст берётся из ядра: тот же ответ получает Editor,
+      # поэтому клиент не пересказывает отказ своими словами (§82, #336).
+      if resolved.error == heInvalid:
+        # Адрес разобран, но слота в документе нет: «нет ноды с адресом» —
+        # точнее, чем «битый адрес», потому что подсказки у них разные.
+        return (false, -1,
+                errFrame(ecInvalidArgument,
+                         "в документе нет ноды с адресом " & text,
+                         "файл изменился — возьмите адрес из свежего node list"))
       return (false, -1,
               errFrame(resolved.error.errorCodeOf,
-                       "адрес " & text & ": " & handleErrorText(resolved.error),
+                       "адрес " & text & ": " & handleErrorText(resolved.error) &
+                         (if resolved.error == heKindMismatch:
+                            " — здесь нужна нода" else: ""),
                        AddressHint))
     for i in 0 ..< doc.proj.graph.nodes.len:
       if doc.proj.graph.nodes[i].id == int(resolved.entityId):
@@ -251,7 +289,10 @@ proc resolveNodeIndex*(doc: Document; text: string):
       if parsed.error != heOk and parsed.error != heInvalid:
         return (false, -1,
                 errFrame(parsed.error.errorCodeOf,
-                         "адрес " & text & ": " & handleErrorText(parsed.error),
+                         "адрес " & text & ": " &
+                           handleErrorText(parsed.error) &
+                           (if parsed.error == heKindMismatch:
+                              " — здесь нужна нода" else: ""),
                          AddressHint))
       return (false, -1,
               errFrame(ecInvalidArgument, "адрес не разобран: " & text,
@@ -383,18 +424,78 @@ proc queryParams*(doc: Document; reference: string):
 
 proc queryParam*(doc: Document; reference: string; paramText: string):
     tuple[ok: bool, param: ParamInfo, frame: ErrorFrame] =
-  ## Один параметр по имени или по номеру в описателе.
+  ## Один параметр по имени, номеру в описателе или адресу
+  ## (`node:1.1/param:1`).
+  ##
+  ## Адрес разбирает ЯДРО, а не клиент (#336): иначе Editor и CLI отвечали бы
+  ## на `param get 1 node:1.1/param:1` разными словами. Путь обязан вести в
+  ## указанную ноду: адрес чужой ноды — ошибка вызова, а не повод молча взять
+  ## параметр «оттуда».
   let params = doc.queryParams(reference)
   if not params.ok:
     return (false, ParamInfo(), params.frame)
+
+  var text = paramText
+  # Адрес — это `вид:слот.поколение` (признак тот же, что у ссылок на ноду):
+  # `node:1.1` в месте параметра тоже адрес, и отвечать «нет параметра node:1.1»
+  # значило бы скрыть, что указан не тот вид сущности (§82).
+  if ':' in paramText and '.' in paramText:
+    var nested: NestedRef
+    let bound = bindNestedText(doc.handles, paramText, nested)
+    if bound != heOk:
+      # Не вложенный путь — возможно, это адрес НОДЫ (или другой сущности) в
+      # месте параметра: отвечаем «нужен параметр», а не «битый адрес» — иначе
+      # клиент не отличит опечатку от «не тот вид сущности» (§82).
+      var handle: EntityHandle
+      if bindHandleText(doc.handles, paramText, handle) == heOk and
+         handle.kind != hkParam:
+        return (false, ParamInfo(),
+                errFrame(ecKindMismatch,
+                         "адрес " & paramText & ": здесь нужен параметр",
+                         AddressHint))
+      return (false, ParamInfo(),
+              errFrame(bound.errorCodeOf,
+                       "адрес " & paramText & ": " & handleErrorText(bound),
+                       AddressHint))
+    if nested.target != hkParam:
+      return (false, ParamInfo(),
+              errFrame(ecKindMismatch,
+                       "адрес " & paramText & ": " &
+                         handleErrorText(heKindMismatch) &
+                         " — здесь нужен параметр",
+                       AddressHint))
+    let resolved = doc.handles.resolveNested(nested)
+    if not resolved.ok:
+      if resolved.error == heInvalid:
+        return (false, ParamInfo(),
+                errFrame(ecNotFound,
+                         "в документе нет параметра с адресом " & paramText,
+                         AddressHint))
+      return (false, ParamInfo(),
+              errFrame(resolved.error.errorCodeOf,
+                       "адрес " & paramText & ": " &
+                         handleErrorText(resolved.error),
+                       AddressHint))
+    let owner = doc.resolveNodeIndex(reference)
+    if not owner.ok:
+      return (false, ParamInfo(), owner.frame)
+    if int(resolved.ownerId) != doc.proj.graph.nodes[owner.index].id:
+      return (false, ParamInfo(),
+              errFrame(ecInvalidArgument,
+                       "адрес " & paramText & " ведёт в ноду #" &
+                         $int(resolved.ownerId) &
+                         ", а указана другая нода",
+                       "адрес параметра должен принадлежать указанной ноде"))
+    text = $int(resolved.index)
+
   var found = -1
-  if paramText.len > 0 and paramText.allCharsInSet({'0'..'9'}):
-    let index = parseInt(paramText)
+  if text.len > 0 and text.allCharsInSet({'0'..'9'}):
+    let index = parseInt(text)
     if index >= 0 and index < params.params.len:
       found = index
   else:
     for i, p in params.params:
-      if p.name == paramText:
+      if p.name == text:
         found = i
         break
   if found < 0:
@@ -461,6 +562,9 @@ proc queryNotes*(doc: Document; trackId: int32; clipIndex: int):
 proc querySummary*(doc: Document): ProjectSummary =
   ## Счётчики содержимого плюс идентификатор документа: клиент кладёт их в
   ## отчёт, чтобы адреса из вывода было видно, к какому файлу они относятся.
+  ##
+  ## Один источник: `summarize` больше не живёт в CLI — иначе «нод: 3» в отчёте
+  ## и в схеме `--json` считались бы двумя разными проходами по модели (#336).
   result = ProjectSummary(
     nodes: doc.proj.graph.nodes.len,
     connections: doc.proj.graph.connections.len,
@@ -475,3 +579,31 @@ proc querySummary*(doc: Document): ProjectSummary =
   for lane in doc.proj.sequencer.automationLanes:
     inc result.automationLanes
     result.automationPoints += lane.points.len
+  for state in doc.proj.pluginStates:
+    result.pluginStateBytes += state.state.len
+
+proc queryMetadata*(doc: Document): MetadataInfo =
+  ## Метаданные проекта — значение, а не ссылка на поле формата: клиент печатает
+  ## то, что ему отдали, и не «додумывает» умолчания (§63).
+  let meta = doc.proj.metadata
+  MetadataInfo(
+    name: meta.name, author: meta.author,
+    tempo: meta.tempo, sampleRate: meta.sampleRate,
+    tsNumerator: meta.timeSignature.numerator,
+    tsDenominator: meta.timeSignature.denominator,
+    created: meta.created, modified: meta.modified)
+
+proc queryAutomationLanes*(doc: Document): seq[AutomationLaneInfo] =
+  ## Дорожки автоматизации в порядке файла: `project show` и `validate`
+  ## перечисляют их, не заглядывая в модель.
+  for lane in doc.proj.sequencer.automationLanes:
+    result.add AutomationLaneInfo(nodeId: lane.nodeId, paramId: lane.paramId,
+                                  points: lane.points.len)
+
+proc queryPluginStates*(doc: Document): seq[PluginStateInfo] =
+  ## Сохранённые состояния плагинов: узел, идентификатор и размер. Само
+  ## состояние (байты) наружу не отдаётся — клиенту нужен факт и объём
+  ## (§63).
+  for state in doc.proj.pluginStates:
+    result.add PluginStateInfo(nodeId: state.nodeId, pluginId: state.pluginId,
+                               bytes: state.state.len)

@@ -28,8 +28,8 @@ import control/commands
 import control/document
 
 import catalog
-import cmd_project
 import context
+import stamp
 
 proc cliNodeTypeProvider*(nodeType: string; spec: var NodeTypeSpec): bool =
   ## Описатель типа из каталога CLI. Флаги параметра переводятся в один факт

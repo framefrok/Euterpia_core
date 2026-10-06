@@ -30,10 +30,19 @@
 import std/[algorithm, json, os, strutils, tables, times]
 
 import project
+import handles
 import context
 import checks
-import addressing
 import cli_spec
+import stamp
+import control/query
+import control/document
+import control/error_frame
+import control_bridge
+
+# Формат отметки и часы живут в `cli/stamp.nim` (там же объяснение, почему не
+# здесь): команды получают их через этот модуль — он их и создаёт.
+export stamp
 
 const
   ProjectExt* = ".eproj"
@@ -64,11 +73,6 @@ const
 
   ProjectSubcommands* = @["show", "set", "validate"]
     ## Подкоманды `project`: кандидаты автодополнения второго уровня (#259).
-
-  StampFormat* = "yyyy-MM-dd'T'HH:mm:ss"
-    ## Формат `metadata.created`/`modified`: ISO 8601 без зоны (локальное
-    ## время). Ядро хранит эти поля как непрозрачные строки, но формат
-    ## лексикографически упорядочен, поэтому строки сравнимы между собой.
 
   DefaultTempo* = 120.0f
   DefaultSampleRate* = 48000.0f
@@ -290,10 +294,6 @@ proc saveError*(saved: ProjectResult[void]; path: string): Report =
 # Метаданные и машинный вид проекта
 # =============================================================================
 
-proc nowStamp*(): string =
-  ## Отметка времени для `metadata.created`/`modified`.
-  now().format(StampFormat)
-
 proc defaultName*(path: string): string =
   ## Имя проекта по умолчанию — имя файла без расширения. Это правило
   ## документировано в справке `init`, а не угадывается: `init demo.eproj`
@@ -305,56 +305,52 @@ proc display(value: string): string =
   ## Пустое поле печатается словами: «имя: » в выводе неотличимо от сбоя.
   if value.len > 0: value else: "(не задано)"
 
-proc metadataLines*(proj: ProjectFormat): seq[string] =
+proc metadataLines*(meta: MetadataInfo): seq[string] =
   ## Метаданные в человекочитаемом виде. Порядок строк фиксирован: вывод
   ## CLI должен быть сравнимым между запусками (#88).
-  result.add "имя: " & display(proj.metadata.name)
-  result.add "автор: " & display(proj.metadata.author)
-  result.add "частота дискретизации: " & $proj.metadata.sampleRate & " Гц"
-  result.add "темп: " & $proj.metadata.tempo & " BPM"
-  result.add "размер: " & $proj.metadata.timeSignature.numerator & "/" &
-    $proj.metadata.timeSignature.denominator
-  result.add "создан: " & display(proj.metadata.created)
-  result.add "изменён: " & display(proj.metadata.modified)
+  ##
+  ## Вход — DTO Query API, а не документ: строки отчёта и ответ `--json`
+  ## берут значения из одного источника (#336).
+  result.add "имя: " & display(meta.name)
+  result.add "автор: " & display(meta.author)
+  result.add "частота дискретизации: " & $meta.sampleRate & " Гц"
+  result.add "темп: " & $meta.tempo & " BPM"
+  result.add "размер: " & $meta.tsNumerator & "/" & $meta.tsDenominator
+  result.add "создан: " & display(meta.created)
+  result.add "изменён: " & display(meta.modified)
 
-proc summarize*(proj: ProjectFormat): JsonNode =
+proc summarize*(summary: ProjectSummary): JsonNode =
   ## Счётчики содержимого: агент читает их, не разворачивая граф и треки.
-  var clips = 0
-  var notes = 0
-  for track in proj.sequencer.tracks:
-    clips += track.clips.len
-    for clip in track.clips:
-      notes += clip.notes.len
-  var points = 0
-  for lane in proj.sequencer.automationLanes:
-    points += lane.points.len
-  var stateBytes = 0
-  for state in proj.pluginStates:
-    stateBytes += state.state.len
+  ## Считает ядро (`querySummary`) — CLI их только печатает: иначе отчёт и
+  ## схема `--json` считались бы двумя разными проходами по модели (#336).
   %*{
-    "nodes": proj.graph.nodes.len,
-    "connections": proj.graph.connections.len,
-    "tracks": proj.sequencer.tracks.len,
-    "clips": clips,
-    "notes": notes,
-    "automationLanes": proj.sequencer.automationLanes.len,
-    "automationPoints": points,
-    "pluginStates": proj.pluginStates.len,
-    "pluginStateBytes": stateBytes,
+    "nodes": summary.nodes,
+    "connections": summary.connections,
+    "tracks": summary.tracks,
+    "clips": summary.clips,
+    "notes": summary.notes,
+    "automationLanes": summary.automationLanes,
+    "automationPoints": summary.automationPoints,
+    "pluginStates": summary.pluginStates,
+    "pluginStateBytes": summary.pluginStateBytes,
   }
 
-proc projectBody*(proj: ProjectFormat; path: string): JsonNode =
+proc projectBody*(doc: Document; path: string): JsonNode =
   ## Машинный вид проекта: `toJson` из Core + путь и счётчики.
   ##
   ## Сериализация НЕ дублируется в CLI: если Core изменит схему файла
   ## (§58/§59), `project show --json` изменится вместе с ней — клиент узнает
   ## об этом по полю `version`, а не по тому, что «CLI забыл поле».
-  result = toJson(proj)
+  ##
+  ## Счётчики и идентификатор документа приходят из Query API (#336): поля
+  ## отчёта не считаются вторым проходом по модели.
+  let summary = querySummary(doc)
+  result = toJson(doc.proj)
   result["path"] = %path
   # Идентификатор документа: по нему адреса из одного файла отличаются от
   # адресов другого, даже если у них совпадают номера нод (issue #143).
-  result["documentId"] = %documentIdOf(path)
-  result["summary"] = summarize(proj)
+  result["documentId"] = %docIdText(summary.documentId)
+  result["summary"] = summarize(summary)
 
 proc writeAtomic*(path: string; proj: ProjectFormat): ProjectResult[void] =
   ## Атомарная запись: временный файл рядом с целью + переименование.
@@ -440,15 +436,15 @@ proc parseTimeSignature(text: string): TimeSigParse =
   TimeSigParse(ok: true, numerator: int32(numerator),
                denominator: int32(denominator))
 
-proc readField*(proj: ProjectFormat; field: string): string =
-  ## Текущее значение поля — для diff при `set`.
+proc readField*(meta: MetadataInfo; field: string): string =
+  ## Текущее значение поля — для diff при `set`. Читает DTO Query API (#336):
+  ## значение поля в отчёте и в `--json` берётся из одного источника.
   case field
-  of "name": proj.metadata.name
-  of "author": proj.metadata.author
-  of "tempo": $proj.metadata.tempo
-  of "sample-rate": $proj.metadata.sampleRate
-  of "time-signature": $proj.metadata.timeSignature.numerator & "/" &
-    $proj.metadata.timeSignature.denominator
+  of "name": meta.name
+  of "author": meta.author
+  of "tempo": $meta.tempo
+  of "sample-rate": $meta.sampleRate
+  of "time-signature": $meta.tsNumerator & "/" & $meta.tsDenominator
   else: ""
 
 proc setField*(
@@ -599,12 +595,13 @@ proc runInit*(ctx: var Ctx; args: seq[string]): Report =
     created: stamp,
     modified: stamp)
 
-  let body = projectBody(proj, options.path)
+  let doc = openDocument(options.path, proj)
+  let body = projectBody(doc, options.path)
   var lines: seq[string] = @[
     "проект: " & options.path,
     "формат: " & ProjectFormatName & " v" & $ProjectFormatVersion,
   ]
-  lines.add metadataLines(proj)
+  lines.add metadataLines(queryMetadata(doc))
   lines.add "граф: пустой (ноды добавляет `euterpia node add` — #90)"
 
   if ctx.dryRun:
@@ -633,17 +630,16 @@ proc singleFileArg(args: seq[string]; what: string):
                  "например: euterpia " & what & " " & DefaultProjectFile))
   (true, (if args.len == 1: args[0] else: DefaultProjectFile), okReport())
 
-proc paramLines(parameters: Table[string, float32]): seq[string] =
-  ## Параметры ноды печатаются по алфавиту: порядок `Table` — деталь
-  ## реализации хеш-таблицы, а вывод CLI обязан быть детерминированным (#88).
-  var pairs: seq[(string, float32)] = @[]
-  for key, value in parameters:
-    pairs.add (key, value)
-  pairs.sort(proc(a, b: (string, float32)): int = cmp(a[0], b[0]))
-  for pair in pairs:
-    result.add "      " & pair[0] & " = " & $pair[1]
+proc paramLines(params: seq[ParamInfo]): seq[string] =
+  ## Параметры ноды печатаются по алфавиту: порядок описателя типа — контракт
+  ## для правки, но в отчёте человек ищет имя, а вывод CLI обязан быть
+  ## детерминированным (#88).
+  var sorted = params
+  sorted.sort(proc(a, b: ParamInfo): int = cmp(a.name, b.name))
+  for p in sorted:
+    result.add "      " & p.name & " = " & $p.value
 
-proc trackFlags(track: TrackFormat): string =
+proc trackFlags(track: TrackInfo): string =
   var flags: seq[string] = @[]
   if track.mute: flags.add "mute"
   if track.solo: flags.add "solo"
@@ -664,78 +660,81 @@ proc runProjectShow*(ctx: var Ctx; args: seq[string]): Report =
   ## `euterpia project show [файл]`. Печатает метаданные, граф, секвенсор и
   ## состояния плагинов: ровно то, что лежит в формате (#57), и ничего из
   ## runtime-состояния — проект читается без движка.
+  ##
+  ## Читает через Query API (#336): CLI не ходит по структурам документа, а
+  ## задаёт вопросы и печатает ответы. Потому же `project show` и Editor
+  ## показывают одно и то же.
   discard ctx
   let target = singleFileArg(args, "project show")
   if not target.ok: return target.rep
   let loaded = loadAt(target.path)
   if not loaded.ok: return loaded.rep
-  let proj = loaded.proj
-  let tbl = documentTable(target.path, proj)
+  let doc = openDocument(target.path, loaded.proj)
+  let meta = queryMetadata(doc)
+  let found = doc.queryNodes()
+  if not found.frame.isOk(): return frameReport(found.frame)
+  let connections = doc.queryConnections()
+  let tracks = doc.queryTracks()
+  let summary = querySummary(doc)
 
   var lines: seq[string] = @[
     "проект: " & target.path,
-    "формат: " & proj.format & " v" & $proj.version,
-    "документ: " & documentIdOf(target.path),
+    "формат: " & doc.proj.format & " v" & $doc.proj.version,
+    "документ: " & docIdText(doc.docId),
     "",
     "Метаданные:",
   ]
-  for line in metadataLines(proj):
+  for line in metadataLines(meta):
     lines.add "  " & line
 
   lines.add ""
-  lines.add "Граф: нод " & $proj.graph.nodes.len & ", связей " &
-            $proj.graph.connections.len
-  for node in proj.graph.nodes:
+  lines.add "Граф: нод " & $summary.nodes & ", связей " & $summary.connections
+  for node in found.nodes:
+    let link = if node.handle.len > 0: node.handle else: "адрес недоступен"
     lines.add "  [" & $node.id & "] " & node.nodeType & " «" &
-              display(node.name) & "» — audio " & $node.audioInCount & "/" &
-              $node.audioOutCount & ", ctrl " & $node.ctrlInCount & "/" &
-              $node.ctrlOutCount &
+              display(node.name) & "» — audio " & $node.audioIn & "/" &
+              $node.audioOut & ", ctrl " & $node.ctrlIn & "/" &
+              $node.ctrlOut &
               (if node.isSubgraph: ", субграф" else: "") &
-              " [" & nodeHandleText(tbl, node.id) & "]"
-    lines.add paramLines(node.parameters)
-  for conn in proj.graph.connections:
+              " [" & link & "]"
+    lines.add paramLines(node.params)
+  for conn in connections:
     lines.add "  " & $conn.srcNodeId & ":" & $conn.srcPortIdx & " → " &
               $conn.dstNodeId & ":" & $conn.dstPortIdx &
               " (sig " & $conn.sigType & ")"
 
-  var clips = 0
-  var notes = 0
-  for track in proj.sequencer.tracks:
-    clips += track.clips.len
-    for clip in track.clips:
-      notes += clip.notes.len
-
   lines.add ""
-  lines.add "Секвенсор: треков " & $proj.sequencer.tracks.len & ", клипов " &
-            $clips & ", нот " & $notes
-  if proj.sequencer.tracks.len == 0:
+  lines.add "Секвенсор: треков " & $summary.tracks & ", клипов " &
+            $summary.clips & ", нот " & $summary.notes
+  if tracks.len == 0:
     lines.add "  (пусто)"
-  for track in proj.sequencer.tracks:
+  for track in tracks:
     lines.add "  [" & $track.id & "] «" & display(track.name) & "» — клипов " &
               $track.clips.len & ", vol " & $track.volume & ", pan " &
               $track.pan & ", " & trackFlags(track) &
-              " [" & trackHandleText(tbl, track.id) & "]"
-    for clipIndex, clip in track.clips:
+              " [" & track.handle & "]"
+    for clip in track.clips:
       lines.add "      клип [" & $clip.id & "] «" & display(clip.name) &
                 "»: тик " & $clip.startTick & ", длина " & $clip.lengthTicks &
-                ", нот " & $clip.notes.len &
+                ", нот " & $clip.notes &
                 (if clip.loopEnabled: ", loop" else: "") &
-                " [" & clipHandleText(tbl, track.id, clipIndex) & "]"
+                " [" & clip.handle & "]"
 
+  let lanes = doc.queryAutomationLanes()
   lines.add ""
-  lines.add "Автоматизация: дорожек " &
-            $proj.sequencer.automationLanes.len
-  for lane in proj.sequencer.automationLanes:
+  lines.add "Автоматизация: дорожек " & $lanes.len
+  for lane in lanes:
     lines.add "  узел " & $lane.nodeId & ", параметр " & $lane.paramId &
-              ", точек " & $lane.points.len
+              ", точек " & $lane.points
 
+  let states = doc.queryPluginStates()
   lines.add ""
-  lines.add "Состояния плагинов: " & $proj.pluginStates.len
-  for state in proj.pluginStates:
+  lines.add "Состояния плагинов: " & $states.len
+  for state in states:
     lines.add "  узел " & $state.nodeId & ": " & display(state.pluginId) &
-              " (" & $state.state.len & " байт)"
+              " (" & $state.bytes & " байт)"
 
-  okReport(body = projectBody(proj, target.path), lines = lines)
+  okReport(body = projectBody(doc, target.path), lines = lines)
 
 # =============================================================================
 # project set
@@ -776,16 +775,18 @@ proc runProjectSet*(ctx: var Ctx; args: seq[string]): Report =
   if not loaded.ok: return loaded.rep
   var proj = loaded.proj
 
-  let before = readField(proj, field)
+  let docBefore = openDocument(path, proj)
+  let before = readField(queryMetadata(docBefore), field)
   let applied = setField(proj, field, value)
   if not applied.ok:
     return usageError(applied.message, "поля: " & ProjectFields.join(", "))
-  let after = readField(proj, field)
+  var doc = openDocument(path, proj)
+  let after = readField(queryMetadata(doc), field)
 
   if before == after:
     # Значение уже такое: файл НЕ трогаем. Иначе идемпотентный `set`
     # переписывал бы проект и поднимал `metadata.modified` на ровном месте.
-    var body = projectBody(proj, path)
+    var body = projectBody(doc, path)
     body["change"] = %*{"field": field, "before": before, "after": after,
                         "applied": false}
     return okReport(body = body,
@@ -794,15 +795,16 @@ proc runProjectSet*(ctx: var Ctx; args: seq[string]): Report =
   # Отметка изменения ставится ДО сборки машинного ответа: `--json` обязан
   # показывать то состояние, которое записывается, а не прежнее.
   proj.metadata.modified = nowStamp()
+  doc = openDocument(path, proj)
 
-  var body = projectBody(proj, path)
+  var body = projectBody(doc, path)
   body["change"] = %*{"field": field, "before": before, "after": after,
                       "applied": true}
 
   var lines: seq[string] = @[
     "изменено: " & path,
     field & ": " & before & " → " & after,
-    "изменён: " & proj.metadata.modified,
+    "изменён: " & queryMetadata(doc).modified,
   ]
 
   if ctx.dryRun:
@@ -849,15 +851,17 @@ proc validateFormat(proj: ProjectFormat): Section =
     body = %*{"format": proj.format, "version": proj.version,
               "supported": ProjectFormatVersion})
 
-proc validateMetadata(proj: ProjectFormat): Section =
+proc validateMetadata(meta: MetadataInfo): Section =
   ## Секция «metadata». Две проверки с разной строгостью:
   ## - описательные поля (имя, автор, даты): пусто — предупреждение, потому
   ##   что проект без автора остаётся рабочим;
   ## - транспортные значения: темп 0 обнуляет `samplesPerQuarter` в ядре, а
   ##   размер с нулевым знаменателем — `beatsPerBar`, то есть это ПРОВАЛ.
+  ##
+  ## Вход — DTO Query API (#336): проверка показывает то же, что `project show`,
+  ## и не читает документ заново.
   result.id = "metadata"
   result.title = "metadata: метаданные"
-  let meta = proj.metadata
 
   var empty: seq[string] = @[]
   if meta.name.len == 0: empty.add "name"
@@ -870,7 +874,7 @@ proc validateMetadata(proj: ProjectFormat): Section =
 
   result.checks.add mkCheck("fields", "описательные поля заполнены",
     (if empty.len == 0: csOk else: csWarn),
-    lines = metadataLines(proj),
+    lines = metadataLines(meta),
     advice = (if empty.len == 0: ""
               else: "не заполнено: " & empty.join(", ") &
                      " (`euterpia init` заполняет их при создании)"),
@@ -879,16 +883,15 @@ proc validateMetadata(proj: ProjectFormat): Section =
   var problems: seq[string] = @[]
   if not (meta.tempo > 0.0): problems.add "tempo должен быть > 0"
   if not (meta.sampleRate > 0.0): problems.add "sampleRate должен быть > 0"
-  if meta.timeSignature.numerator < 1:
+  if meta.tsNumerator < 1:
     problems.add "числитель размера должен быть ≥ 1"
-  let denominator = int(meta.timeSignature.denominator)
+  let denominator = int(meta.tsDenominator)
   if denominator < 1 or (denominator and (denominator - 1)) != 0:
     problems.add "знаменатель размера должен быть степенью двойки"
   var transportLines = @[
     "темп: " & $meta.tempo & " BPM",
     "частота дискретизации: " & $meta.sampleRate & " Гц",
-    "размер: " & $meta.timeSignature.numerator & "/" &
-      $meta.timeSignature.denominator,
+    "размер: " & $meta.tsNumerator & "/" & $meta.tsDenominator,
   ]
   for problem in problems:
     transportLines.add "проблема: " & problem
@@ -899,8 +902,8 @@ proc validateMetadata(proj: ProjectFormat): Section =
               else: "исправьте значение: euterpia project set <файл> " &
                      "tempo|sample-rate|time-signature <значение>"),
     body = %*{"tempo": meta.tempo, "sampleRate": meta.sampleRate,
-              "numerator": meta.timeSignature.numerator,
-              "denominator": meta.timeSignature.denominator,
+              "numerator": meta.tsNumerator,
+              "denominator": meta.tsDenominator,
               "problems": %problems})
 
 proc nodeIndex(nodes: seq[NodeFormat]; id: int): int =
@@ -1179,10 +1182,15 @@ proc runProjectValidate*(ctx: var Ctx; args: seq[string]): Report =
       body = validateBody(target.path, broken))
 
   let proj = loaded.proj
+  # Метаданные проверяются по DTO Query API (#336), а разделы про граф,
+  # автоматизацию и плагины читают формат намеренно: `validate` — это проверка
+  # целостности ДОКУМЕНТА, и её предмет — сам файл (см. guard в
+  # `tools/check_architecture.py`).
+  let meta = queryMetadata(openDocument(target.path, proj))
   let sections = @[
     validateFile(target.path),
     validateFormat(proj),
-    validateMetadata(proj),
+    validateMetadata(meta),
     validateGraph(proj),
     validateSequencer(proj),
     validatePlugins(proj),

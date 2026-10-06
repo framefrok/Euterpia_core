@@ -29,11 +29,12 @@
 
 import std/[json, math, os, strutils, terminal]
 
-import project
 import signal_types
 import offline_render
 import context
 import config
+import control/query
+import control_bridge
 import cmd_project
 import catalog
 import builtin/scene_loader
@@ -402,11 +403,14 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
   if not loaded.ok:
     return loaded.rep
   let proj = loaded.proj
+  # Метаданные — через Query API (#336): темп и частота берутся из того же
+  # описания, что показывает `project show`, а не обходом формата.
+  let meta = queryMetadata(openDocument(scan.path, proj))
 
   # --- частота и блок: argv > проект > настройки > умолчание --------------
   var sampleRate = scan.sampleRate
   if sampleRate <= 0:
-    let fromProject = int(round(float64(proj.metadata.sampleRate)))
+    let fromProject = int(round(float64(meta.sampleRate)))
     if fromProject > 0:
       sampleRate = fromProject
     else:
@@ -429,7 +433,7 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
                      hint = "проверьте граф: euterpia graph check " & scan.path)
 
   let tempo =
-    if proj.metadata.tempo > 1.0f: float64(proj.metadata.tempo)
+    if meta.tempo > 1.0f: float64(meta.tempo)
     else: 120.0
 
   # --- длительность -------------------------------------------------------

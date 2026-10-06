@@ -11,6 +11,11 @@ CLI и Editor — **равноправные клиенты Core** (MANIFEST §6
   собственных списков: два списка разошлись бы на первом же новом действии.
 - Источник правды о командах CLI — спецификация `libs/cli_spec` (#330),
   которую печатает `euterpia help --json`.
+- Чтение модели клиент ведёт через **Query API** (`core/control/query.nim`,
+  #336): неизменяемые DTO, устойчивый порядок, один и тот же ответ у CLI и
+  Editor. Обход коллекций документа запрещён проверкой
+  `tools/check_architecture.py` (`nimble archGuard`): в ней поимённо
+  перечислены лишь валидаторы целостности и пути записи.
 - Проверка паритета — `nimble cliSmoke`, suite «паритет клиентов» в
   `tests/cli_test.nim` (issue [#148](https://github.com/framefrok/Euterpia_core/issues/148)).
 - Справочник по CLI: [cli.md](cli.md). Встраивание ядра в чужой хост:

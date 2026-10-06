@@ -24,6 +24,7 @@ import handles
 import control/error_frame
 import control/commands
 import control/document
+import control/query
 # Перечень действий нужен тесту как контракт клиентов (#148): сверка
 # «GUI-действие = команда» идёт по нему, а не по списку внутри CLI.
 import control/actions
@@ -1885,3 +1886,173 @@ suite "CLI: спецификация команд — один источник 
           checkpoint(command & "." & name & " объявлено, но не пришло; " &
                      "в ответах есть: " & seen.join(", "))
         check name in seen
+
+# =============================================================================
+# Чтение через Query API: CLI перестаёт знать внутренности модели (#336)
+# =============================================================================
+#
+# Suite проверяет ТРИ вещи, и все — снаружи, запуском бинаря:
+#   1. фильтр и окно `node list` работают и не зависят от размера проекта;
+#   2. ответ CLI совпадает с ответом ВТОРОГО клиента (control-слой + Query API)
+#      на тот же вопрос — это критерий «один и тот же вопрос из CLI и из Editor
+#      даёт одинаковый ответ» (#141);
+#   3. схемы `--json` не теряют полей: `project show` печатает те же счётчики,
+#      что считает ядро.
+#
+# Второй клиент здесь настоящий: тест открывает тот же файл через control-слой
+# (`openProject` + `initDocument`), а не сравнивает CLI сам с собой.
+
+suite "CLI: чтение через Query API (#336)":
+  let dir = getTempDir() / "euterpia_cli_query"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  let project = dir / "query.eproj"
+  check runCliIn(dir, ["init", "query.eproj", "--name", "Query"]).code == 0
+  for kind in ["osc", "gain", "gain", "gain"]:
+    check runCliIn(dir, ["node", "add", kind, project]).code == 0
+  check runCliIn(dir, ["connect", "1:out", "2:in", project]).code == 0
+  check runCliIn(dir, ["param", "set", "2", "gain", "-3.5", project]).code == 0
+
+  proc typeProvider(): NodeTypeProvider =
+    ## Описатели типов — у CLI (`node types --json`): тот же источник, которым
+    ## пользуется его провайдер, поэтому второй клиент знает те же порты и
+    ## границы параметров, а не «примерно похожие».
+    var specs: seq[NodeTypeSpec] = @[]
+    let types = parseJson(runCliIn(dir, ["--json", "node", "types"]).output)["types"]
+    for t in types:
+      var spec = NodeTypeSpec(
+        id: t["id"].getStr, name: t["name"].getStr,
+        audioIn: t["ports"]["audio"]["in"].getInt,
+        audioOut: t["ports"]["audio"]["out"].getInt,
+        ctrlIn: t["ports"]["ctrl"]["in"].getInt,
+        ctrlOut: t["ports"]["ctrl"]["out"].getInt,
+        eventIn: t["ports"]["event"]["in"].getInt,
+        eventOut: t["ports"]["event"]["out"].getInt,
+        latencyFrames: t["latencyFrames"].getInt)
+      for p in t["params"]:
+        var flags: seq[string] = @[]
+        for flag in p["flags"]:
+          flags.add flag.getStr
+        spec.params.add ParamSpec(
+          name: p["name"].getStr,
+          minValue: p["min"].getFloat.float32,
+          maxValue: p["max"].getFloat.float32,
+          defaultValue: p["default"].getFloat.float32,
+          step: p["step"].getFloat.float32,
+          integerLike: ("integer" in flags) or ("choice" in flags))
+      specs.add spec
+    let captured = specs
+    result = proc(nodeType: string; spec: var NodeTypeSpec): bool =
+      for s in captured:
+        if s.id == nodeType:
+          spec = s
+          return true
+      false
+
+  proc secondClient(): Document =
+    ## Тот же документ, но собранный тестом: чтение через Query API, а не через
+    ## CLI. Часы внедряются: иначе отметка времени зависела бы от момента запуска.
+    let loaded = loadProject(project)
+    check loaded.success
+    var doc: Document
+    initDocument(doc, loaded.value, documentIdForPath(absolutePath(project)),
+                 typeProvider(), proc(): string = "2026-01-01T00:00:00")
+    doc
+
+  test "фильтр и окно: клиент не пересылает проект целиком":
+    let all = parseJson(runCliIn(dir, ["--json", "node", "list", project]).output)
+    check all["nodes"].len == 4
+
+    let filtered = parseJson(runCliIn(dir,
+      ["--json", "node", "list", project, "--filter", "Gain"]).output)
+    check filtered["nodes"].len == 3
+    # Окна нет — фильтр «всё подходит»: `window` появляется только с limit/offset.
+    check not filtered.hasKey("window")
+
+    let window = parseJson(runCliIn(dir,
+      ["--json", "node", "list", project, "--limit", "2", "--offset", "1"]).output)
+    check window["nodes"].len == 2
+    check window["window"]["total"].getInt == 4
+    check window["window"]["shown"].getInt == 2
+    check window["window"]["offset"].getInt == 1
+
+    let byType = parseJson(runCliIn(dir,
+      ["--json", "node", "list", project, "--type", "euterpia.gain"]).output)
+    check byType["nodes"].len == 3
+
+    let bad = runCliIn(dir, ["node", "list", project, "--limit", "две"])
+    check bad.code == 1
+    check "--limit" in bad.errput
+
+  test "node list --json: те же данные, что у второго клиента":
+    let cli = parseJson(runCliIn(dir, ["--json", "node", "list", project]).output)
+    let doc = secondClient()
+    let listed = doc.queryNodes()
+    check listed.frame.isOk()
+    check cli["nodes"].len == listed.total
+    for i, node in listed.nodes:
+      check cli["nodes"][i]["id"].getInt == node.id
+      check cli["nodes"][i]["name"].getStr == node.name
+      check cli["nodes"][i]["type"].getStr == node.nodeType
+      check cli["nodes"][i]["handle"].getStr == node.handle
+      check cli["nodes"][i]["handleRef"].getStr == node.handleRef
+      check cli["nodes"][i]["connections"].getInt == node.connections
+      check cli["nodes"][i]["counts"]["audio"]["out"].getInt == node.audioOut
+
+  test "node show и param list: значения и адреса те же, что у второго клиента":
+    let doc = secondClient()
+    let node = doc.queryNode("2")
+    check node.ok
+
+    let shown = parseJson(runCliIn(dir,
+      ["--json", "node", "show", "2", project]).output)
+    check shown["id"].getInt == node.node.id
+    check shown["handle"].getStr == node.node.handle
+
+    let listed = parseJson(runCliIn(dir,
+      ["--json", "param", "list", "2", project]).output)
+    let params = doc.queryParams("2")
+    check params.ok
+    check listed["node"].getInt == node.node.id
+    check listed["params"].len == params.params.len
+    for i, p in params.params:
+      check listed["params"][i]["name"].getStr == p.name
+      check listed["params"][i]["handle"].getStr == p.handle
+      check abs(listed["params"][i]["value"].getFloat - float64(p.value)) < 0.0001
+      check listed["params"][i]["source"].getStr ==
+            (if p.fromFile: "file" else: "default")
+
+    # Правка видна обоим клиентам одинаково: CLI пишет, ядро читает — и
+    # наоборот (`param get` сверяется с Query API по тому же адресу).
+    check runCliIn(dir, ["param", "set", "2", "gain", "1.25", project]).code == 0
+    let after = parseJson(runCliIn(dir,
+      ["--json", "param", "get", "2", "gain", project]).output)
+    let viaQuery = secondClient().queryParam("2", "node:2.1/param:0")
+    check viaQuery.ok
+    check after["param"]["name"].getStr == viaQuery.param.name
+    check after["param"]["handle"].getStr == viaQuery.param.handle
+    check abs(after["param"]["value"].getFloat -
+              float64(viaQuery.param.value)) < 0.0001
+
+  test "project show: счётчики --json считает ядро, а не CLI":
+    let doc = secondClient()
+    let summary = doc.querySummary()
+    let shown = parseJson(runCliIn(dir,
+      ["--json", "project", "show", project]).output)
+    check shown["summary"]["nodes"].getInt == summary.nodes
+    check shown["summary"]["connections"].getInt == summary.connections
+    check shown["summary"]["tracks"].getInt == summary.tracks
+    check shown["summary"]["clips"].getInt == summary.clips
+    check shown["summary"]["notes"].getInt == summary.notes
+    check shown["summary"]["pluginStates"].getInt == summary.pluginStates
+    check shown["summary"]["pluginStateBytes"].getInt == summary.pluginStateBytes
+    check shown["documentId"].getStr == docIdText(summary.documentId)
+
+    # Человеческий отчёт называет тот же документ и те же адреса.
+    let human = runCliIn(dir, ["project", "show", project])
+    check human.code == 0
+    check ("документ: " & summary.document) in human.output
+    check ("[node:1.1]") in human.output
