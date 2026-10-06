@@ -27,6 +27,7 @@ import context
 import project
 import midi_export
 import cli_spec
+import cmd_project
 
 const
   MidiSpec* = CommandSpec(
@@ -109,14 +110,16 @@ proc runMidi*(ctx: var Ctx; args: seq[string]): Report =
 
   let loaded = loadProject(sc.input)
   if not loaded.success:
-    let kind = loaded.error.kind
-    let env = kind in {pekFileNotFound, pekIOError}
-    return errReport(
-      if env: exEnv else: exUsage,
-      if env: "io" else: "project",
-      "не удалось открыть проект: " & loaded.error.message,
-      "нужен файл формата euterpia-project (*.eproj; исторический *.eut " &
-        "принимается) — см. `euterpia project show`")
+    # Причина и код возврата — из таблицы `cli/exit_codes.nim` (#332): битый
+    # формат — данные (1), недоступный файл — среда (2). Класс ответа (`io` у
+    # файловых сбоев) называет клиент.
+    let ec = errorCodeFor(loaded.error.kind)
+    let message = "не удалось открыть проект: " & loaded.error.message
+    let hint = "нужен файл формата euterpia-project (*.eproj; исторический " &
+      "*.eut принимается) — см. `euterpia project show`"
+    if exitCodeFor(ec) == exEnv:
+      return envError(message, hint, ec, errorKind = "io")
+    return usageError(message, hint, ec)
 
   let proj = loaded.value
 
@@ -142,8 +145,9 @@ proc runMidi*(ctx: var Ctx; args: seq[string]): Report =
         tracks = max(tracks, r.tracks)
         notes = max(notes, r.notes)
     except CatchableError as e:
-      return errReport(exEnv, "io", "не удалось записать MIDI: " & e.msg,
-        "проверьте права и путь: " & (if splitDir.len > 0: splitDir else: outFile))
+      return envError("не удалось записать MIDI: " & e.msg,
+        "проверьте права и путь: " & (if splitDir.len > 0: splitDir else: outFile),
+        errorKind = "io")
 
   var jf = newJArray()
   for f in files:

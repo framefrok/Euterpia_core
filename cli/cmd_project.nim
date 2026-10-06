@@ -225,17 +225,24 @@ type
 # Отображение ошибок ядра на коды возврата CLI
 # =============================================================================
 
-proc codeFor*(kind: ProjectErrorKind): ExitCode =
-  ## Формат, версия и битый JSON — это ДАННЫЕ (код 1): они пришли из файла,
-  ## который указал пользователь. I/O — среда (код 2): файл верный, но
-  ## недоступен. `pekNone` сюда не попадает, но случай покрыт, чтобы `case`
-  ## остался исчерпывающим при добавлении новых видов ошибок в Core.
+proc errorCodeFor*(kind: ProjectErrorKind): ErrorCode =
+  ## Вид ошибки формата → ПРИЧИНА control-слоя (#332). Код возврата даёт
+  ## таблица (`cli/exit_codes.nim`), а не этот `case`.
+  ##
+  ## Классы прежние (проверены CLI-тестами): «файла нет» и битый файл — это
+  ## ДАННЫЕ (код 1) — пользователь указал путь, а файла там нет или он не наш;
+  ## «нет прав» — СРЕДА (код 2): файл верный, но недоступен.
   case kind
-  of pekNone: exOk
-  of pekFileNotFound, pekJsonParseError, pekInvalidFormat,
-     pekUnsupportedVersion, pekMissingField: exUsage
-  of pekIOError: exEnv
-  of pekUnknownError: exPanic
+  of pekNone: ecOk
+  of pekFileNotFound: ecNotFound
+  of pekIOError: ecEnvironment
+  of pekJsonParseError, pekInvalidFormat,
+     pekUnsupportedVersion, pekMissingField: ecInvalidArgument
+  of pekUnknownError: ecInternal
+
+proc codeFor*(kind: ProjectErrorKind): ExitCode =
+  ## Код возврата по виду ошибки формата: таблица причин (#332).
+  exitCodeFor(errorCodeFor(kind))
 
 proc kindName*(code: ExitCode): string =
   ## Стабильные имена для агента (`context.Ctx` документирует их набор).
@@ -270,19 +277,25 @@ proc projectError*(
 ): Report =
   ## Сообщение ядра НЕ переводится и не пересказывается: пересказ разошёлся
   ## бы с настоящей причиной. CLI добавляет только подсказку и код возврата.
-  let code = codeFor(kind)
-  errReport(code, kindName(code), message, hint = hint)
+  let ec = errorCodeFor(kind)
+  case exitCodeFor(ec)
+  of exOk: okReport()
+  of exUsage: usageError(message, hint, ec)
+  of exEnv: envError(message, hint, ec)
+  of exPanic: panicError(message, hint)
 
 proc loadAt*(path: string): LoadedProject =
   let loaded = loadProject(path)
   if not loaded.success:
     let code = codeFor(loaded.error.kind)
+    let ec = errorCodeFor(loaded.error.kind)
     return LoadedProject(
       ok: false,
       code: code,
       kind: loaded.error.kind,
       rep: errReport(code, kindName(code), loaded.error.message,
-                     hint = loadHint(loaded.error.kind, path)))
+                     hint = loadHint(loaded.error.kind, path),
+                     errorCode = frameCodeValue(ec)))
   LoadedProject(ok: true, proj: loaded.value)
 
 proc saveError*(saved: ProjectResult[void]; path: string): Report =
@@ -1200,9 +1213,9 @@ proc runProjectValidate*(ctx: var Ctx; args: seq[string]): Report =
   let body = validateBody(target.path, sections)
 
   if total.fail > 0:
-    return errReport(exUsage, "usage",
+    return checkFailedError(
       "проект невалиден: провалено проверок " & $total.fail,
-      hint = "подробности: euterpia project validate " & target.path & " --json",
+      "подробности: euterpia project validate " & target.path & " --json",
       lines = lines, body = body)
   okReport(body = body, lines = lines)
 

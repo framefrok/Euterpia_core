@@ -429,8 +429,8 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
   if not scene.ok:
     # Проект прочитан, но пайплайн из него не собирается: это данные, а не
     # окружение, — значит код 1, как у `graph check` (#90).
-    return errReport(exUsage, "usage", scene.error,
-                     hint = "проверьте граф: euterpia graph check " & scan.path)
+    return usageError(scene.error,
+                      hint = "проверьте граф: euterpia graph check " & scan.path)
 
   let tempo =
     if meta.tempo > 1.0f: float64(meta.tempo)
@@ -558,11 +558,10 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
                rendered.error.startsWith("ошибка записи") or
                rendered.error.startsWith("не удалось закрыть")
     if isIO:
-      return errReport(exEnv, "env", rendered.error,
-                       hint = "проверьте каталог и права: " & scan.outPath)
-    return errReport(exPanic, "panic", "внутренняя ошибка рендера: " &
-                     rendered.error,
-                     hint = "это баг: приложите вывод `euterpia --version` и команду")
+      return envError(rendered.error,
+                      "проверьте каталог и права: " & scan.outPath)
+    return panicError("внутренняя ошибка рендера: " & rendered.error,
+                      "это баг: приложите вывод `euterpia --version` и команду")
 
   body["rendered"] = %true
   body["dryRun"] = %false

@@ -81,26 +81,14 @@ proc stampClock*(): string =
   ## Отметка изменения документа в формате проекта (§58).
   nowStamp()
 
-proc exitCodeFor*(code: ErrorCode): ExitCode =
-  ## Код возврата CLI по коду control-слоя. Классы ошибок прежние
-  ## (`usage`/`env`/`panic`), а причина приходит отдельным полем `errorCode`.
-  case code
-  of ecOk:
-    exOk
-  of ecNoDescriptor:
-    # Хост не дал описатели типов — это проблема окружения, а не данные.
-    exEnv
-  of ecInternal:
-    exPanic
-  else:
-    exUsage
-
 proc frameReport*(frame: ErrorFrame): Report =
   ## Кадр ошибки control-слоя в отчёте CLI: текст и подсказка — из ядра, класс
   ## и код возврата — по таблице выше. Клиент своего текста не выдумывает,
   ## поэтому CLI и Editor говорят об одном отказе одинаково (#148).
   if frame.isOk():
     return okReport()
+  # Код возврата — из таблицы `cli/exit_codes.nim` (#332): она одна знает,
+  # что «нет описателя» — ошибка среды, а «порт занят» — данных.
   errReport(exitCodeFor(frame.code), $frame.code, frame.message, frame.hint,
             errorCode = frameCodeValue(frame.code))
 

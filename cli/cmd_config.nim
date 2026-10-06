@@ -133,8 +133,8 @@ proc saveReport(cfg: var Config): tuple[ok: bool; rep: Report] =
   let saved = cfg.saveConfig()
   if saved.ok:
     return (true, okReport())
-  (false, errReport(exEnv, "env", saved.message,
-                    "проверьте права на файл и каталог: " & cfg.path))
+  (false, envError(saved.message,
+                   "проверьте права на файл и каталог: " & cfg.path))
 
 proc runConfigSet*(ctx: var Ctx; args: seq[string]): Report =
   ## `config set <ключ> <значение>`.

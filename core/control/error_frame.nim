@@ -57,6 +57,15 @@ type
       ## Клиент говорит на другой версии control-API (§58: версии не смешиваются).
     ecInternal
       ## Внутренняя ошибка (баг). Пользователь в ней не виноват.
+    ecEnvironment
+      ## Окружение не позволяет выполнить операцию: нет файла, каталога, прав
+      ## или устройства. Данные при этом верны — это НЕ ошибка использования,
+      ## и код возврата у неё другой (MANIFEST §21, issue #332).
+    ecCheckFailed
+      ## Проверка не пройдена: проект невалиден, граф не компилируется, аудио
+      ## содержит дефекты не ниже порога. Это не «ошибка использования»: вызов
+      ## был верным, а вердикт — отрицательным; код возврата 1 делает проверку
+      ## пригодной для CI (#332).
 
   ErrorFrame* = object
     ## Кадр результата операции. Значение, а не исключение: control-path
@@ -106,3 +115,5 @@ proc `$`*(code: ErrorCode): string =
   of ecKindMismatch: "kind_mismatch"
   of ecApiVersionMismatch: "api_version_mismatch"
   of ecInternal: "internal"
+  of ecEnvironment: "environment"
+  of ecCheckFailed: "check_failed"

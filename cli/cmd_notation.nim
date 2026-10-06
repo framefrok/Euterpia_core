@@ -402,8 +402,8 @@ proc readScore(path: string; scan: NotationScan;
     text = readFile(path)
   except CatchableError as e:
     return ScoreRead(ok: false,
-      rep: errReport(exEnv, "env", "не удалось прочитать файл партитуры: " &
-                     e.msg, hint = "проверьте права: " & path))
+      rep: envError("не удалось прочитать файл партитуры: " & e.msg,
+                    "проверьте права: " & path, errorKind = "io"))
 
   parsed = parseNotation(text, int32(scan.startTick), int32(scan.timeSigNum),
                          int32(scan.timeSigDen), int32(scan.velocity))
@@ -463,10 +463,10 @@ proc runNotationCheck(scan: NotationScan): Report =
     # только подсказку по формату.
     body["error"] = %*{"line": parsed.error.line, "column": parsed.error.column,
                        "message": parsed.error.message}
-    return errReport(exUsage, "usage",
+    return usageError(
       "строка " & $parsed.error.line & ", колонка " & $parsed.error.column &
       ": " & parsed.error.message,
-      hint = NotationHint, lines = lines, body = body)
+      NotationHint, ecInvalidArgument, lines = lines, body = body)
 
   var report = lines
   report.add warningLines(parsed.warnings)
@@ -529,10 +529,10 @@ proc runNotationImport(ctx: var Ctx; scan: NotationScan): Report =
     "файл: " & scan.path,
   ]
   if not parsed.ok:
-    return errReport(exUsage, "usage",
+    return usageError(
       "строка " & $parsed.error.line & ", колонка " & $parsed.error.column &
       ": " & parsed.error.message,
-      hint = NotationHint, lines = head,
+      NotationHint, ecInvalidArgument, lines = head,
       body = %*{"path": scan.path,
                 "error": %*{"line": parsed.error.line,
                             "column": parsed.error.column,

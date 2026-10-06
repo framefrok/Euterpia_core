@@ -17,10 +17,19 @@ import std/json
 import logger
 import euterpia_version
 import config
+import exit_codes
+import control/error_frame
 
 # Версия пакета реэкспортируется: её печатают `--version`, справка и
 # `doctor`, и каждому модулю CLI не нужно помнить об отдельном импорте.
 export euterpia_version
+# Коды возврата и таблица «причина → код» живут в `cli/exit_codes.nim`
+# (issue #332): команды пишут `exOk`/`exUsage`/`exEnv`/`exPanic` как и раньше,
+# а перевод причины в код — в одном месте, данными. Сами причины (`ErrorCode`)
+# реэкспортируются: команда, отказывающая по конкретной причине, называет её
+# (`usageError(..., code = ecNotFound)`) и не должна помнить об импорте ядра.
+export exit_codes
+export error_frame
 
 const
   CliSchema* = 1
@@ -31,18 +40,6 @@ const
 type
   OutputMode* = enum
     omHuman, omJson
-
-  ExitCode* = enum
-    exOk = 0,
-      ## Успех.
-    exUsage = 1,
-      ## Ошибка данных или использования: неизвестная команда/ключ,
-      ## лишний аргумент, невалидное значение.
-    exEnv = 2,
-      ## Ошибка среды: нет библиотеки/устройства/прав. Данные верны,
-      ## окружение не позволяет выполнить команду.
-    exPanic = 3
-      ## Внутренняя ошибка CLI (баг). Пользователь в ней не виноват.
 
   Ctx* = object
     ## Контекст одного запуска CLI. Живёт на control-path, копируется
@@ -154,8 +151,53 @@ proc errReport*(
   Report(ok: false, code: code, errorKind: errorKind, error: error,
          hint: hint, lines: lines, body: body, errorCode: errorCode)
 
-proc usageError*(msg: string; hint: string = "список команд: euterpia --help"): Report =
-  errReport(exUsage, "usage", msg, hint)
+proc usageError*(
+  msg: string;
+  hint: string = "список команд: euterpia --help";
+  code: ErrorCode = ecInvalidArgument;
+  lines: seq[string] = @[];
+  body: JsonNode = nil
+): Report =
+  ## Ошибка использования: класс `usage`, причина — из таблицы (#332). Причина
+  ## не может быть «никакой»: агент отличает «ноды нет» от «порт занят» по
+  ## `errorCode`, а не по тексту сообщения.
+  errReport(exitCodeFor(code), "usage", msg, hint, lines, body,
+            errorCode = frameCodeValue(code))
+
+proc envError*(
+  msg: string;
+  hint: string = "";
+  code: ErrorCode = ecEnvironment;
+  errorKind: string = "env";
+  lines: seq[string] = @[];
+  body: JsonNode = nil
+): Report =
+  ## Ошибка среды: данные верны, окружение не позволяет выполнить команду
+  ## (нет файла, каталога, прав, устройства). Класс (`error.kind`) остаётся
+  ## за командой — `io` у файловых сбоев, `env` у настроек, — а причина и код
+  ## возврата берутся из таблицы (#332).
+  errReport(exitCodeFor(code), errorKind, msg, hint, lines, body,
+            errorCode = frameCodeValue(code))
+
+proc panicError*(msg: string; hint: string = "";
+                 errorKind: string = "panic"): Report =
+  ## Внутренняя ошибка CLI (баг): класс `panic`, код возврата 3.
+  errReport(exitCodeFor(ecInternal), errorKind, msg, hint,
+            errorCode = frameCodeValue(ecInternal))
+
+proc checkFailedError*(
+  msg: string;
+  hint: string = "";
+  lines: seq[string] = @[];
+  body: JsonNode = nil;
+  errorKind: string = "usage"
+): Report =
+  ## Проверка не пройдена (`validate`, `graph check`, `analyze --fail-on`):
+  ## вызов верный, вердикт отрицательный. Класс по умолчанию `usage` — так же
+  ## отвечали прежние версии CLI, — а причина `ecCheckFailed` отличает вердикт
+  ## от «аргумент неверен» (#332).
+  errReport(exitCodeFor(ecCheckFailed), errorKind, msg, hint, lines, body,
+            errorCode = frameCodeValue(ecCheckFailed))
 
 proc envelope*(ctx: Ctx; rep: Report): JsonNode =
   ## Машинный ответ: версионированный конверт + плоская нагрузка.
