@@ -3,7 +3,8 @@
 import
   std/atomics,
   node_interface,
-  signal_types
+  signal_types,
+  aligned_mem
 
 var gPipelineVersionCounter*: Atomic[uint64]
 
@@ -131,7 +132,9 @@ proc destroyPipeline*(p: ptr CompiledPipeline) {.raises: [].} =
   if p.audioBufferPool != nil: deallocShared(p.audioBufferPool)
   if p.audioArena != nil: deallocShared(p.audioArena)
   if p.ctrlPool != nil: deallocShared(p.ctrlPool)
-  if p.eventPool != nil: deallocShared(p.eventPool)
+  # eventPool выровнен сильнее MemAlign, поэтому освобождается парной функцией
+  # (issue #364): deallocShared вернул бы аллокатору не тот указатель.
+  if p.eventPool != nil: alignedSharedDealloc(p.eventPool)
   if p.poolFlags != nil: deallocShared(p.poolFlags)
 
   # Защита от UAF при отладке

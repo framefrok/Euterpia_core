@@ -124,6 +124,18 @@
 - Убраны мёртвые объявления, шумевшие в каждой сборке:
   неиспользуемый `EutInstVoice` и локальные переменные в `biquad` и
   `compressor` ([#316](https://github.com/framefrok/Euterpia_core/issues/316)).
+- Арены ядра выровнены по строке кэша при **любом** аллокаторе: `EventQueue`
+  просит 64 байта (`{.align: 64.}` на поле `events`), а `allocShared0` обещает
+  только `MemAlign`. Пока память выдавал аллокатор Nim'а целыми страницами,
+  выравнивание получалось само; с `-d:useMalloc` она идёт из libc `malloc` с
+  выравниванием 16 байт, и обращение к первому событию секвенсора стало UB
+  (UBSan: `member access within misaligned address … which requires 64 byte
+  alignment`). Выравнивание переехало в общую пару `core/aligned_mem`
+  (`alignedSharedAlloc0`/`alignedSharedDealloc`) — на неё же переведены пулы
+  вместо частной копии кода, — а арена событий компилятора выделяется и
+  освобождается ею; тесты проверяют выравнивание адреса, а не удачу
+  аллокатора ([#364](https://github.com/framefrok/Euterpia_core/issues/364),
+  [#367](https://github.com/framefrok/Euterpia_core/pull/367)).
 
 ## [0.3.1] — Организация и документация (v0.3.1)
 
