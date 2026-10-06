@@ -24,6 +24,9 @@ import handles
 import control/error_frame
 import control/commands
 import control/document
+# Перечень действий нужен тесту как контракт клиентов (#148): сверка
+# «GUI-действие = команда» идёт по нему, а не по списку внутри CLI.
+import control/actions
 
 const
   DefaultCliPath =
@@ -1362,3 +1365,176 @@ suite "CLI: control-слой — те же команды, тот же доку�
     check frame.code == ecOutOfRange
     check frameCodeValue(frame.code) == cliBody["errorCode"].getInt
     check $frame.code == cliBody["error"]["kind"].getStr
+
+# =============================================================================
+# Паритет клиентов: «действие интерфейса = команда» (#148, MANIFEST §60-§65)
+#
+# CLI и Editor — равноправные клиенты (§60), поэтому поверхность действий одна
+# и лежит в Core (`core/control/actions.nim`), а не в клиенте. Этот suite —
+# машинная проверка правил из `docs/clients.md`:
+#
+#   * готовое действие (issue == 0) имеет команду CLI из реестра CLI и, если
+#     меняет документ, реализованную команду control-слоя;
+#   * незакрытый разрыв назван номером issue, а не молчанием;
+#   * каждая видимая команда CLI либо покрыта действием, либо объяснена;
+#   * каждая реализованная команда документа доступна из интерфейса;
+#   * страница `docs/clients.md` знает каждое действие и каждую CLI-only
+#     команду (документ — часть контракта, а не пересказ).
+#
+# Сверка идёт с ОПУБЛИКОВАННОЙ поверхностью CLI (`help --json`), а не с его
+# внутренними таблицами: иначе общая ошибка в двух списках сошлась бы сама с
+# собой и выглядела бы как паритет.
+# =============================================================================
+
+const
+  ClientDocsPath = "docs/clients.md"
+    ## Относительно корня репозитория: тесты запускаются из него.
+  EnginePath = "core/audio_engine.nim"
+    ## Исходник, в котором объявлены команды времени исполнения.
+
+proc readChecked(path: string): string =
+  ## Читает файл, который обязан существовать: отсутствие — это отказ
+  ## проверки, а не исключение раньше собственно сверок.
+  check fileExists(path)
+  if not fileExists(path):
+    return ""
+  readFile(path)
+
+proc sourceDeclaresProc(src, procName: string): bool =
+  ## Объявлена ли процедура движка (`proc postPlay*(`). Проверка нужна
+  ## ровно для одного: `runtime`-действие не должно ссылаться на несуществующую
+  ## команду — тогда пары нет ни в CLI, ни в ядре, а в перечне стоит готовность.
+  ("proc " & procName & "*(") in src
+
+proc tableActionIds(doc: string): seq[string] =
+  ## Идентификаторы действий, перечисленные в таблицах страницы. Признак
+  ## идентификатора — точка в имени (`transport.play`): у имён CLI-команд в
+  ## таблицах её нет. Разбор грубый по существу, чтобы правка оформления
+  ## страницы не роняла тест.
+  for line in doc.splitLines:
+    let s = line.strip
+    if not s.startsWith("| `"):
+      continue
+    # Открывающая кавычка — на позиции 2 («| `»), закрывающая ищется после.
+    let closeAt = s.find('`', 3)
+    if closeAt < 0:
+      continue
+    let token = s[3 ..< closeAt]
+    if '.' in token and token notin result:
+      result.add token
+
+proc hasActionFor(actions: seq[ClientAction];
+                  kind: ControlCommandKind): bool =
+  ## Есть ли действие, ведущее к этой команде документа.
+  for action in actions:
+    if action.hasControl and action.control == kind:
+      return true
+  false
+
+suite "CLI: паритет клиентов — действие интерфейса = команда (#148)":
+  let cliNames = machineCommandNames()
+  let clientList = clientActions()
+  var cliOnlyNames: seq[string] = @[]
+  for item in cliOnlyCommands():
+    cliOnlyNames.add item.name
+  let coveredCli = cliCommands(clientList)
+
+  test "перечень действий: id уникальны, подписи непусты":
+    check clientList.len > 0
+    var seen: seq[string] = @[]
+    for action in clientList:
+      check action.id.len > 0
+      check action.title.len > 0
+      check action.id notin seen
+      seen.add action.id
+    # Команда документа есть только у действий, меняющих документ (§65):
+    # иначе «показать» или «настроить окружение» уехало бы в историю.
+    for action in clientList:
+      if action.hasControl:
+        check action.scope == csEdit
+
+  test "готовое действие (issue == 0) поставляется целиком":
+    let ready = readyActions(clientList)
+    check ready.len > 0
+    for action in ready:
+      # Правило 5: действию окна команда ядра не нужна, поэтому готовым (без
+      # issue) оно быть не может — «нет команды» должно быть названо.
+      check action.scope != csWindow
+      check action.cli.len > 0
+      if action.hasControl:
+        check isImplemented(action.control)
+        check action.command == commandName(action.control)
+
+  test "незакрытый разрыв назван номером issue":
+    let pending = pendingActions(clientList)
+    check pending.len > 0
+    for action in pending:
+      check action.issue > 0
+    # Разрыв транспорта и секвенсора обязан быть в перечне: если эти номера
+    # исчезнут, значит либо пары закрыты (и действия стали готовыми), либо
+    # действия выпали — и то и другое тест увидит.
+    var issues: seq[int] = @[]
+    for action in pending:
+      if action.issue notin issues:
+        issues.add action.issue
+    for expected in [87, 92, 108, 148, 257]:
+      check expected in issues
+
+  test "имя CLI-команды действия существует в реестре CLI":
+    for action in clientList:
+      if action.cli.len == 0:
+        continue
+      check action.cli in cliNames
+
+  test "runtime-действие ссылается на объявленную процедуру движка":
+    let src = readChecked(EnginePath)
+    var runtimeCount = 0
+    for action in clientList:
+      if action.scope != csRuntime:
+        continue
+      runtimeCount.inc
+      check action.command.len > 0
+      check sourceDeclaresProc(src, action.command)
+      # Транспорт командой документа не является: «нажал Play» не делает
+      # проект грязным (§10, §65) — поэтому у runtime-действия команды
+      # control-слоя быть не должно.
+      check not action.hasControl
+    check runtimeCount > 0
+
+  test "каждая реализованная команда документа доступна из интерфейса":
+    # Исключение одно: откат удаления ноды. Он приходит из истории (#109), а
+    # не из палитры, и действием клиента не является.
+    const InternalKinds = [ccRestoreNodeState]
+    for kind in ControlCommandKind.low .. ControlCommandKind.high:
+      if not isImplemented(kind) or kind in InternalKinds:
+        continue
+      check hasActionFor(clientList, kind)
+
+  test "каждая видимая команда CLI покрыта действием или объяснена":
+    for name in cliNames:
+      check (name in coveredCli) or (name in cliOnlyNames)
+
+  test "команды только для CLI: существуют, объяснены и не покрыты":
+    for item in cliOnlyCommands():
+      check item.name in cliNames
+      check item.reason.len > 0
+      check item.name notin coveredCli
+    check cliOnlyCommands().len > 0
+
+  test "страница docs/clients.md знает каждое действие и каждую CLI-only команду":
+    let doc = readChecked(ClientDocsPath)
+    for action in clientList:
+      check ("`" & action.id & "`") in doc
+    for name in cliOnlyNames:
+      check ("`" & name & "`") in doc
+    # Обратная сторона: страница перечисляет ровно те действия, что есть в
+    # перечне, — документ не описывает выдуманный интерфейс и не теряет строку.
+    let docIds = tableActionIds(doc)
+    check docIds.len == clientList.len
+    for id in docIds:
+      check findAction(clientList, id) >= 0
+    for kind in ControlCommandKind.low .. ControlCommandKind.high:
+      if not isImplemented(kind) or kind in [ccRestoreNodeState]:
+        continue
+      check ("`" & commandName(kind) & "`") in doc
+
