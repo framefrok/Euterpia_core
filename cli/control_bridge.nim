@@ -58,7 +58,10 @@ proc cliNodeTypeProvider*(nodeType: string; spec: var NodeTypeSpec): bool =
       name: p.name,
       minValue: p.minValue, maxValue: p.maxValue,
       defaultValue: p.defaultValue, step: p.step,
-      integerLike: p.paramIsInteger()
+      integerLike: p.paramIsInteger(),
+      automatable: p.paramIsAutomatable(),
+      modulatable: p.paramIsModulatable(),
+      hidden: p.paramIsHidden()
     )
   true
 

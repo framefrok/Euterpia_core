@@ -47,6 +47,12 @@ type
       ## Команда объявлена в контракте, но ещё не реализована.
     ecNotInvertible
       ## Операцию нельзя отменить (история её не примет).
+    ecStaleHandle
+      ## Адрес устарел: слот переиспользован или сущность удалена (#143).
+    ecForeignDocument
+      ## Адрес принадлежит другому документу.
+    ecKindMismatch
+      ## Адрес указывает на другой вид сущности (нода вместо параметра).
     ecApiVersionMismatch
       ## Клиент говорит на другой версии control-API (§58: версии не смешиваются).
     ecInternal
@@ -95,5 +101,8 @@ proc `$`*(code: ErrorCode): string =
   of ecNoDescriptor: "no_descriptor"
   of ecUnsupportedCommand: "unsupported_command"
   of ecNotInvertible: "not_invertible"
+  of ecStaleHandle: "stale_handle"
+  of ecForeignDocument: "foreign_document"
+  of ecKindMismatch: "kind_mismatch"
   of ecApiVersionMismatch: "api_version_mismatch"
   of ecInternal: "internal"

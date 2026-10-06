@@ -31,16 +31,20 @@ proc fakeProvider*(nodeType: string; spec: var NodeTypeSpec): bool =
     spec = NodeTypeSpec(id: "test.gain", name: "Gain", audioIn: 1, audioOut: 1)
     spec.params = @[
       ParamSpec(name: "gain", minValue: 0.0f32, maxValue: 2.0f32,
-                defaultValue: 1.0f32, step: 0.01f32)
+                defaultValue: 1.0f32, step: 0.01f32,
+                automatable: true, modulatable: true)
     ]
     true
   of "test.osc":
     spec = NodeTypeSpec(id: "test.osc", name: "Oscillator", audioOut: 1)
     spec.params = @[
       ParamSpec(name: "waveform", minValue: 0.0f32, maxValue: 3.0f32,
-                defaultValue: 0.0f32, step: 1.0f32, integerLike: true),
+                defaultValue: 0.0f32, step: 1.0f32, integerLike: true,
+                automatable: true),
+      ParamSpec(name: "hiddenOne", minValue: 0.0f32, maxValue: 1.0f32,
+                defaultValue: 0.0f32, step: 0.1f32, hidden: true),
       ParamSpec(name: "freq", minValue: 0.01f32, maxValue: 20000.0f32,
-                defaultValue: 440.0f32, step: 1.0f32),
+                defaultValue: 440.0f32, step: 1.0f32, modulatable: true),
       ParamSpec(name: "level", minValue: -80.0f32, maxValue: 6.0f32,
                 defaultValue: -6.0f32, step: 0.1f32),
     ]

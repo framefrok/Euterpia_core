@@ -78,6 +78,15 @@ proc hasFlag*(p: ParamInfo; flag: NodeParamFlag): bool {.inline.} =
 proc paramIsInteger*(p: ParamInfo): bool {.inline.} =
   p.hasFlag(npfInteger) or p.hasFlag(npfChoice)
 
+proc paramIsAutomatable*(p: ParamInfo): bool {.inline.} =
+  p.hasFlag(npfAutomatable)
+
+proc paramIsModulatable*(p: ParamInfo): bool {.inline.} =
+  p.hasFlag(npfModulatable)
+
+proc paramIsHidden*(p: ParamInfo): bool {.inline.} =
+  p.hasFlag(npfHidden)
+
 proc paramInfo*(p: NodeParamDesc): ParamInfo =
   ParamInfo(
     id: p.id,

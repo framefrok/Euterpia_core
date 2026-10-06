@@ -32,7 +32,9 @@ type
     ## `NodeParamFlag` (§54), но обязан знать, что параметр не дробный.
     name*: string
     minValue*, maxValue*, defaultValue*, step*: float32
-    integerLike*: bool
+    integerLike*, automatable*, modulatable*, hidden*: bool
+      ## Свойства параметра фактами, а не флагами реестра: Core не знает
+      ## `NodeParamFlag` (§54) — перевод делает хозяин описаний.
 
   NodeTypeSpec* = object
     ## Описатель типа ноды для control-слоя. Хозяин переводит в него
@@ -99,7 +101,7 @@ proc stampModified*(doc: var Document) =
 # Проверки (всё ДО изменения документа)
 # =============================================================================
 
-proc typeSpec(doc: Document; nodeType: string;
+proc typeSpec*(doc: Document; nodeType: string;
               spec: var NodeTypeSpec): ErrorFrame =
   ## Описатель типа от хозяина. Отказ здесь — либо «Core не знает типов»,
   ## либо «хозяин не знает этого типа»: разные коды, потому что лечатся они

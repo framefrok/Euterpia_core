@@ -50,6 +50,7 @@ import test_memory_pool
 import test_handles
 import test_control
 import test_control_history
+import test_query
 import test_logger
 import test_undo_redo
 import test_waveform_cache
