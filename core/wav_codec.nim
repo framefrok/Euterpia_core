@@ -16,7 +16,6 @@ const
   MAX_RIFF_SIZE = 4_294_967_295'i64  # 4GB - 1
 
 type
-
   WavReader* = object
     stream: FileStream
     info*: AudioFileInfo
