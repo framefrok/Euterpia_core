@@ -378,6 +378,38 @@ jobs:
           # `nimble archGuard`.
           python3 tools/check_architecture.py
 
+      # Критерий приёмки #213 «Core не зависит от GUI» (§6) в исполняемом
+      # виде. Ядро, импортирующее точку входа редактора, перестаёт
+      # собираться как библиотека в чужом процессе и встраивание (пример
+      # embed_render/embed_lib) становится невозможным.
+      #
+      # Проверяются ОБЕ стороны: чистое дерево проходит, а искусственное
+      # `import editor` в core/ — падает. Без второй половины правило
+      # могло бы «зеленеть» всегда (например, из-за опечатки в имени
+      # правила) и никто бы этого не заметил.
+      - name: Core, Nodes и Commons не знают о GUI (§6, #213)
+        run: |
+          python3 tools/check_architecture.py
+          probe=core/tmp_gui_guard_probe.nim
+          trap 'rm -f "$probe"' EXIT
+          printf 'import editor\n' > "$probe"
+          set +e
+          python3 tools/check_architecture.py > guard_probe.log 2>&1
+          code=$?
+          set -e
+          if [ "$code" = "0" ]; then
+            echo "::error::guard не поймал искусственный import editor в core/ (§6, #213)"
+            exit 1
+          fi
+          grep -q "core ─X→ gui" guard_probe.log || {
+            echo "::error::guard упал, но не по правилу GUI: см. guard_probe.log"
+            cat guard_probe.log
+            exit 1
+          }
+          rm -f "$probe"
+          python3 tools/check_architecture.py
+          echo "ok: зависимости от GUI нет, guard её ловит (§6, #213)"
+
   # ---------------------------------------------------------------------------
   # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool / ring_buffer.
   #
@@ -506,6 +538,40 @@ jobs:
 
       - name: nimble clapMock
         run: nimble clapMock
+
+  # ---------------------------------------------------------------------------
+  # Встраивание ядра (#213): тот же код, что обещает docs/embedding.md,
+  # собирается и прогоняется двумя хостами.
+  #
+  #   * `nimble embedExample` — Nim-хост без CLI и Editor: граф из нод,
+  #     блоки в audio-callback, офлайн-рендер в WAV с проверкой заголовка;
+  #   * `nimble embedLib` — C-ABI-фасад собирается как shared-библиотека
+  #     (`--app:lib`) и грузится из Python через ctypes.
+  #
+  # Второй шаг — суть критерия «ядро встраивается»: библиотеку читает ЧУЖОЙ
+  # рантайм, поэтому протечка GUI, зависимость от аргументов CLI или
+  # невыгружаемые символы Nim видны сразу, а не в отчёте пользователя.
+  #
+  # Только Linux: ABI разделяемых библиотек и упаковка символьной таблицы
+  # отличаются на Windows/macOS (та же причина, что у джоба clap).
+  # ---------------------------------------------------------------------------
+  embed:
+    name: embedding example (nim host + c abi)
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
+        with:
+          nim-version: '2.2.12'
+
+      - name: nimble embedExample
+        run: nimble embedExample
+
+      - name: nimble embedLib
+        run: nimble embedLib
 
   # ---------------------------------------------------------------------------
   # Поставка CLI (#113, #229): релизный бинарь на трёх ОС + smoke.

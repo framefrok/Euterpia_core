@@ -136,6 +136,15 @@
   освобождается ею; тесты проверяют выравнивание адреса, а не удачу
   аллокатора ([#364](https://github.com/framefrok/Euterpia_core/issues/364),
   [#367](https://github.com/framefrok/Euterpia_core/pull/367)).
+- Тест документации встраивания не тянет libpcre и не зависит от переводов
+  строк: `std/re` падал на ubuntu-раннере ещё до первой проверки
+  (`could not load: libpcre.so`), а сравнение с `"\n  embed:\n"` не переживало
+  CRLF из windows-checkout, то есть проверялся перевод строки, а не джоб CI.
+  Документ читается нормализованным, идентификаторы и имена nimble-целей
+  разбирает свой сканер; проверено мутациями — выдуманный `eutHostPhantom()`,
+  переименованный `eutHostPlay` и несуществующая цель валят свой набор
+  ([#213](https://github.com/framefrok/Euterpia_core/issues/213),
+  [#368](https://github.com/framefrok/Euterpia_core/pull/368)).
 
 ## [0.3.1] — Организация и документация (v0.3.1)
 
