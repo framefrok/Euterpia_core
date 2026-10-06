@@ -66,24 +66,34 @@ euterpia --version
 - `ok` — инвариант `ok == (exitCode == 0)`. Агенту достаточно одного поля.
 - `command` — имя команды, к которой относится ответ.
 - `exitCode` — тот же код, что вернул процесс (не «результат в JSON»).
-- При ошибке добавляется объект `error`:
+- При ошибке добавляются `errorCode` и объект `error`:
 
 ```json
 {
   "schema": 1,
   "ok": false,
-  "command": "nonsense",
+  "command": "param",
   "exitCode": 1,
+  "errorCode": 4,
   "error": {
-    "kind": "usage",
-    "message": "неизвестная команда: nonsense",
-    "hint": "список команд: euterpia --help"
+    "kind": "out_of_range",
+    "message": "gain = 99.0 вне диапазона 0.0…2.0",
+    "hint": "диапазон объявлен типом ноды: euterpia.gain"
   }
 }
 ```
 
-`error.kind` — стабильное значение для агента: `usage` (данные/использование),
-`env` (среда), `panic` (баг CLI).
+`error.kind` — **код причины** из control-слоя (`ErrorCode`, issue #139): `usage`
+-объект больше не описывает класс ошибки, а называет конкретную причину
+(`not_found`, `already_exists`, `out_of_range`, `unknown_node_type`,
+`unknown_parameter`, `duplicate_connection`, `port_kind_mismatch`,
+`no_descriptor`, `unsupported_command`, `api_version_mismatch`, …). Для ошибок
+самой CLI (неизвестная команда, битый аргумент) код остаётся классом:
+`usage`, `env`, `panic`.
+
+`errorCode` — тот же код числом: агент различает причины, не разбирая текст.
+Классы ошибок при этом не потеряны: по `errorCode` CLI возвращает прежний код
+процесса (данные → 1, среда → 2, баг → 3).
 
 ## Коды возврата
 
