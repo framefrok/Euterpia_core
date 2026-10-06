@@ -9,7 +9,8 @@ CLI и Editor — **равноправные клиенты Core** (MANIFEST §6
 - Источник правды о перечне действий — `core/control/actions.nim`.
   Палитра окна, горячие клавиши и запись сессии строятся из него, а не из
   собственных списков: два списка разошлись бы на первом же новом действии.
-- Источник правды о командах CLI — `cli/registry.nim` (`euterpia help --json`).
+- Источник правды о командах CLI — спецификация `libs/cli_spec` (#330),
+  которую печатает `euterpia help --json`.
 - Проверка паритета — `nimble cliSmoke`, suite «паритет клиентов» в
   `tests/cli_test.nim` (issue [#148](https://github.com/framefrok/Euterpia_core/issues/148)).
 - Справочник по CLI: [cli.md](cli.md). Встраивание ядра в чужой хост:

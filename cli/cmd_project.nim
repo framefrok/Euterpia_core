@@ -33,6 +33,7 @@ import project
 import context
 import checks
 import addressing
+import cli_spec
 
 const
   ProjectExt* = ".eproj"
@@ -63,12 +64,6 @@ const
 
   ProjectSubcommands* = @["show", "set", "validate"]
     ## Подкоманды `project`: кандидаты автодополнения второго уровня (#259).
-
-  InitFlags* = @[
-    "--name", "--author", "--sr", "--sample-rate",
-    "--tempo", "--ts", "--time-signature", "--force",
-  ]
-    ## Ключи `init` — для справки и автодополнения.
 
   StampFormat* = "yyyy-MM-dd'T'HH:mm:ss"
     ## Формат `metadata.created`/`modified`: ISO 8601 без зоны (локальное
@@ -110,6 +105,91 @@ proc projectSuffixesHint*(): string =
   for ext in ProjectSuffixes:
     parts.add "*" & ext
   parts.join(" или ")
+
+# =============================================================================
+# Спецификации команд (#330)
+# =============================================================================
+#
+# Описание живёт данными и стоит ЗДЕСЬ, рядом с разбором аргументов: ключ,
+# которого нет в спецификации, не попадёт ни в справку, ни в автодополнение,
+# а ключ, объявленный только в справке, не будет принят разбором — расхождение
+# видно по `cli_spec.validateSpecs` (тест «CLI: спецификация команд»).
+
+const
+  InitSpec* = CommandSpec(
+    name: "init",
+    summary: "создать проект: метаданные и пустой граф",
+    synopsis: "init [файл] [ключи]",
+    args: @[
+      arg("файл", "проект: " & projectSuffixesHint() &
+        "; по умолчанию " & DefaultProjectFile),
+    ],
+    options: @[
+      opt("--name", "имя проекта; без ключа имя берётся из имени файла",
+          value = "строка"),
+      opt("--author", "автор проекта", value = "строка"),
+      opt("--sr", "частота дискретизации проекта", value = "Гц",
+          default = $int(DefaultSampleRate), aliases = @["--sample-rate"]),
+      opt("--tempo", "темп проекта", value = "число BPM",
+          default = $int(DefaultTempo)),
+      opt("--ts", "размер такта", value = "числитель/знаменатель",
+          default = $DefaultTimeSigNumerator & "/" & $DefaultTimeSigDenominator,
+          aliases = @["--time-signature"]),
+      switch("--force", "перезаписать существующий файл"),
+    ],
+    example: "euterpia init demo.eproj --name Demo --tempo 140",
+    fields: @[
+      field("path", "куда записан проект"),
+      field("documentId", "идентификатор документа: адреса одного файла отличимы от другого (#143)"),
+      field("format", "имя формата файла — по нему ядро и узнаёт проект (§58)"),
+      field("version", "версия формата"),
+      field("metadata", "имя, автор, темп, частота дискретизации, размер"),
+      field("graph", "ноды и связи (после `init` пустые)"),
+      field("sequencer", "треки, клипы и автоматизация"),
+      field("pluginStates", "состояния плагинов"),
+      field("summary", "счётчики: ноды, связи, треки, клипы"),
+    ],
+    notes: @[
+      "граф создаётся пустым: ноды добавляет `euterpia node add` (#90)",
+      "существующий файл не затирается: перезапись требует --force",
+      "расширение — подпись файла, а не формат: историческое `.eut` принимается наравне с `" &
+        ProjectExt & "`, а тип файла ядро определяет по содержимому (§19/§58)",
+    ])
+
+  InitFlags* = InitSpec.optionKeys
+    ## Ключи `init` — из спецификации (`InitSpec`), а не отдельным списком:
+    ## подсказка об ошибке, справка и автодополнение читают одно описание.
+
+  ProjectSpec* = CommandSpec(
+    name: "project",
+    summary: "показать, изменить или проверить файл проекта",
+    synopsis: "project <show|set|validate>",
+    subcommands: ProjectSubcommands,
+    args: @[
+      arg("файл", "проект: " & projectSuffixesHint() &
+        "; по умолчанию " & DefaultProjectFile),
+      arg("поле значение", "только `project set`: " & ProjectFields.join(", ")),
+    ],
+    example: "euterpia project show demo.eproj",
+    fields: @[
+      field("path", "путь прочитанного проекта"),
+      field("documentId", "идентификатор документа (#143)"),
+      field("metadata", "имя, автор, темп, частота, размер"),
+      field("graph", "ноды и связи"),
+      field("sequencer", "треки, клипы и автоматизация"),
+      field("pluginStates", "состояния плагинов"),
+      field("summary", "счётчики: ноды, связи, треки, клипы"),
+      field("change", "что изменил `project set`: поле, до и после"),
+      field("sections", "результат `project validate`: секции и проверки"),
+    ],
+    notes: @[
+      "project show [файл] — метаданные, граф, треки/клипы, автоматизация, состояния плагинов",
+      "project set [файл] <поле> <значение> — поля: " & ProjectFields.join(", "),
+      "project set пишет атомарно (tmp + rename) и обновляет metadata.modified",
+      "project validate [файл] — отчёт о формате и целостности: провал проверки даёт код 1",
+      "без файла команды работают с `" & DefaultProjectFile &
+        "` — как в примере MANIFEST §19",
+    ])
 
 type
   LoadedProject* = object

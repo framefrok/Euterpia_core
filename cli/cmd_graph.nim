@@ -36,14 +36,153 @@ import control/error_frame
 import control/commands
 import control/document
 import sdk/graph_check
+import cli_spec
 
 const
-  GraphKeys* = @["--file", "--name", "--id"]
-    ## Ключи команд графа — для справки и автодополнения (#259).
+  GraphOptions* = @[
+    opt("--file", "проект: " & projectSuffixesHint() & "; по умолчанию " &
+        DefaultProjectFile, value = "проект.eproj"),
+    opt("--name", "имя ноды (`node add`)", value = "строка"),
+    opt("--id", "явный id ноды (`node add`); занятый id — ошибка", value = "число"),
+  ]
+    ## Ключи команд графа (`node`, `connect`, `disconnect`, `param`, `graph`) —
+    ## разбор у них общий, значит и описание общее: три копии разъехались бы.
+  GraphKeys* = keysOf(GraphOptions)
 
   NodeSubcommands* = @["list", "types", "add", "rm", "show"]
   ParamSubcommands* = @["list", "get", "set"]
   GraphSubcommands* = @["check"]
+
+# =============================================================================
+# Спецификации команд (#330)
+# =============================================================================
+
+const
+  NodeSpec* = CommandSpec(
+    name: "node",
+    summary: "ноды графа: список, каталог типов, добавление, удаление, показ",
+    synopsis: "node <list|types|add|rm|show> [аргументы] [--file проект.eproj]",
+    subcommands: NodeSubcommands,
+    options: GraphOptions,
+    args: @[
+      arg("нода", "id, имя или адрес `node:3.1` (`show`, `rm`)"),
+      arg("тип", "полный id (`euterpia.osc`), короткий (`osc`) или имя (`Oscillator`) — `node add`"),
+    ],
+    example: "euterpia node add osc --name osc project.eproj",
+    fields: @[
+      field("path", "прочитанный проект"),
+      field("nodes", "ноды: id, тип, имя, порты, параметры"),
+      field("connections", "связи графа"),
+      field("types", "каталог типов (`node types`): id, имя, порты, задержка, параметры"),
+      field("count", "сколько типов в каталоге (`node types`)"),
+      field("summary", "счётчики: ноды, связи, треки, клипы"),
+      field("change", "что изменила команда: добавленная или удалённая нода"),
+    ],
+    notes: @[
+      "тип ноды — полный id (`euterpia.osc`), короткий (`osc`) или имя (`Oscillator`)",
+      "порты, задержка и умолчания параметров берутся из типа: файл получает то, что умеет нода",
+      "id назначается как максимум + 1; --id задаёт явно (занятый id — ошибка)",
+      "node rm удаляет и связи, автоматизацию и состояния плагинов этой ноды",
+      "файл проекта: --file или аргумент с расширением проекта (.eproj; " &
+        "историческое .eut принимается; по умолчанию " &
+        DefaultProjectFile & ")",
+      "`node types` печатает каталог: id, порты, параметры — и человеческим текстом, и в --json",
+    ])
+
+  ConnectSpec* = CommandSpec(
+    name: "connect",
+    summary: "соединить выход одной ноды со входом другой",
+    synopsis: "connect <источник> <приёмник> [--file проект.eproj]",
+    options: GraphOptions,
+    args: @[
+      arg("источник", "нода и порт выхода: `oscillator:out`, `node:3.1`"),
+      arg("приёмник", "нода и порт входа: `filter:in`, `node:4.1/audio:0`"),
+    ],
+    example: "euterpia connect oscillator:out filter:in project.eproj",
+    fields: @[
+      field("path", "прочитанный проект"),
+      field("connection", "добавленная связь: ноды, порты, вид сигнала"),
+      field("change", "что изменила команда: добавленная связь"),
+      field("summary", "счётчики: ноды, связи, треки, клипы"),
+      field("graph", "граф после правки"),
+    ],
+    notes: @[
+      "порт: `нода:out` | `нода:in` | `нода:audio:1` | `нода:ctrl:0` | `нода:event:0`",
+      "пример MANIFEST §19: euterpia connect oscillator:out filter:in",
+      "виды портов обязаны совпадать; самосоединение разрешено — компиляцию проверяет `graph check`",
+    ])
+
+  DisconnectSpec* = CommandSpec(
+    name: "disconnect",
+    summary: "снять связь между нодами",
+    synopsis: "disconnect <источник>[:порт] <приёмник>[:порт] [--file проект.eproj]",
+    options: GraphOptions,
+    args: @[
+      arg("источник", "нода; с портом — только указанная связь"),
+      arg("приёмник", "нода; с портом — только указанная связь"),
+    ],
+    example: "euterpia disconnect oscillator filter project.eproj",
+    fields: @[
+      field("path", "прочитанный проект"),
+      field("removed", "сколько связей снято"),
+      field("summary", "счётчики: ноды, связи, треки, клипы"),
+      field("graph", "граф после правки"),
+    ],
+    notes: @[
+      "без портов снимаются все связи между парой нод",
+      "с портами — только указанная связь",
+    ])
+
+  ParamSpec* = CommandSpec(
+    name: "param",
+    summary: "параметры ноды: список, чтение, запись",
+    synopsis: "param <list|get|set> [аргументы] [--file проект.eproj]",
+    subcommands: ParamSubcommands,
+    options: GraphOptions,
+    args: @[
+      arg("нода", "id, имя или адрес `node:3.1`"),
+      arg("параметр", "имя (`cutoff`) или числовой id"),
+      arg("значение", "новое значение (`param set`)"),
+    ],
+    example: "euterpia param set filter cutoff 1200 project.eproj",
+    fields: @[
+      field("path", "прочитанный проект"),
+      field("node", "id ноды, у которой читали или писали параметры"),
+      field("params", "параметры ноды: имя, id, значение, диапазон, флаги"),
+      field("param", "один параметр (`param get`): значение и умолчание типа"),
+      field("change", "что изменил `param set`: параметр, до и после"),
+      field("summary", "счётчики: ноды, связи, треки, клипы"),
+    ],
+    notes: @[
+      "пример MANIFEST §19: euterpia param set filter cutoff 1200",
+      "значение проверяется по диапазону типа: вне диапазона — отказ, а не запись",
+      "параметр можно назвать именем (`freq`) или числовым id (стабильная ссылка)",
+      "`param get` показывает и значение из файла, и умолчание типа",
+      "дробные и отрицательные значения принимаются у дробных параметров диапазона: " &
+        "флаги — битовая маска, и целочисленность проверяется по флагам типа (#292)",
+    ])
+
+  GraphSpec* = CommandSpec(
+    name: "graph",
+    summary: "проверка графа: типы, порты, связи и компиляция",
+    synopsis: "graph check [--file проект.eproj]",
+    subcommands: GraphSubcommands,
+    options: GraphOptions,
+    example: "euterpia graph check project.eproj",
+    fields: @[
+      field("path", "проверенный проект"),
+      field("sections", "секции проверок: структура, связи, компиляция"),
+      field("summary", "сводка ok/warn/fail — она же определяет код возврата"),
+      field("nodes", "сколько нод проверено"),
+      field("connections", "сколько связей проверено"),
+      field("compile", "результат компиляции графа: вердикт, причина, шаги"),
+    ],
+    notes: @[
+      "проверяет структуру (типы, порты, связи, значения параметров) и компилирует граф",
+      "компиляция идёт через Core: CLI не собирает пайплайн сам (§20)",
+      "провал проверки — код 1; предупреждения (пустой граф, самосоединение) код не меняют",
+      "отчёт — те же секции и `summary`, что у `project validate` и `doctor` (#96)",
+    ])
 
 # =============================================================================
 # Разбор аргументов

@@ -14,6 +14,7 @@
 
 import std/[strutils, json]
 import context
+import cli_spec
 
 const
   Shells* = @["bash", "zsh", "fish"]
@@ -22,6 +23,26 @@ const
 
   CompletionProtocol* = "__complete"
     ## Служебная команда-источник кандидатов.
+
+  CompletionSpec* = CommandSpec(
+    name: "completion",
+    summary: "скрипт автодополнения оболочки",
+    synopsis: "completion <bash|zsh|fish>",
+    subcommands: Shells,
+    args: @[
+      arg("оболочка", "для какой оболочки печатать скрипт"),
+    ],
+    example: "euterpia completion bash",
+    fields: @[
+      field("shell", "оболочка, для которой напечатан скрипт"),
+      field("script", "текст скрипта: кандидатов он спрашивает у самого CLI"),
+    ],
+    notes: @[
+      "скрипт не содержит списка команд: кандидатов он берёт у служебной `" &
+        CompletionProtocol & "`, поэтому новая команда появляется в дополнении сразу",
+      "шаблоны — константы: повторный запуск даёт байт-в-байт тот же текст",
+      "установка (bash): `euterpia completion bash > ~/.local/share/bash-completion/completions/euterpia`",
+    ])
 
   BashScript* = """# euterpia: автодополнение для bash.
 # Установка (файл должен попасть в каталог bash-completion):

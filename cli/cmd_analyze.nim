@@ -22,11 +22,9 @@ import context
 import audio_inspect
 import spectrum
 import wav_codec
+import cli_spec
 
 const
-  AnalyzeKeys* = @["--snippets", "--heatmap", "--fail-on", "--fft", "--max-defects"]
-    ## Ключи `analyze` — для справки и автодополнения (#259).
-
   WavSuffix = ".wav"
   DefaultFailOn = "error"
     ## Умолчание: падать только на очевидных дефектах. warn-режим включают
@@ -37,6 +35,44 @@ const
   SnippetPadSeconds = 0.05
     ## Половина окна сниппета вокруг дефекта.
   MaxSnippets = 20
+
+  AnalyzeSpec* = CommandSpec(
+    name: "analyze",
+    summary: "инспектор аудио: дефекты WAV с локализацией",
+    synopsis: "analyze <файл.wav> [ключи]",
+    args: @[
+      arg("файл.wav", "что слушать: записанный рендер или запись сессии"),
+    ],
+    options: @[
+      opt("--snippets", "каталог коротких WAV вокруг дефектов", value = "каталог"),
+      opt("--heatmap", "спектрограмма файла в PGM", value = "файл.pgm"),
+      opt("--fail-on", "порог для CI: при дефектах не ниже уровня код возврата 1",
+          value = "info|warn|error", default = DefaultFailOn),
+      opt("--fft", "размер кадра БПФ", value = "256..65536", default = "2048"),
+      opt("--max-defects", "сколько дефектов печатать текстом (в --json — все)",
+          value = "число", default = $DefaultMaxDefects),
+    ],
+    example: "euterpia analyze song.wav --fail-on warn",
+    fields: @[
+      field("file", "разобранный файл"),
+      field("metrics", "измерения: пик, RMS, DC offset, уровень шума"),
+      field("defects", "найденные дефекты с локализацией: время, кадр, уровень"),
+      field("summary", "сводка по уровням дефектов"),
+      field("error", "причина отказа (не WAV, нет файла)"),
+      field("errorCode", "код причины отказа — по нему выбирается код возврата (#332)"),
+    ],
+    notes: @[
+      "читает WAV и печатает отчёт с локализацией: клиппинг, DC, щелчки, " &
+        "провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость",
+      "вердикт «нравится» остаётся за слушателем: инструмент не судит музыку, " &
+        "а указывает конкретные места и причины",
+      "--fail-on info|warn|error — порог для CI: код 1 при дефектах не ниже уровня",
+      "--snippets <каталог> пишет короткие WAV вокруг дефектов, --heatmap <файл.pgm> — спектрограмму",
+      "тот же Core-API (`core/audio_inspect`) позже использует Editor (#178)",
+    ])
+
+  AnalyzeKeys* = AnalyzeSpec.optionKeys
+    ## Ключи `analyze` — из спецификации (#259, #330).
 
 type
   FailOn = enum

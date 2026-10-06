@@ -124,6 +124,17 @@ task cliSmoke, "CLI smoke: точка входа, doctor, completion, проек
   buildLog "cli smoke test"
   exec "nim c -r --hints:off --out:" & cliTestBin & " tests/cli_test.nim"
 
+task cliDocs, "Пересобрать раздел справочника docs/cli.md из описания команд (#330)":
+  ## Раздел между маркерами `cli-spec:begin`/`cli-spec:end` принадлежит
+  ## спецификации (`libs/cli_spec`), а не руке: правится описание команды,
+  ## раздел пересобирается этой задачей, а CI (`nimble cliSmoke`) сверяет
+  ## раздел в репозитории со свежим выводом байт-в-байт.
+  mkDir buildDir
+  buildLog "cli build"
+  exec "nim c --hints:off --out:" & cliBin & " cli.nim"
+  buildLog "cli docs"
+  exec cliBin & " __reference --write docs/cli.md"
+
 # ---------------------------------------------------------------------------
 # miniaudio (#31). Здесь РЕАЛЬНО собирается и линкуется TU miniaudio
 # (adapters/miniaudio/miniaudio_impl.c) — это единственная проверка, что

@@ -37,18 +37,14 @@ import config
 import cmd_project
 import catalog
 import builtin/scene_loader
+import cli_spec
 import compose/progress
 
+# =============================================================================
+# Спецификация команды (#330)
+# =============================================================================
+
 const
-  RenderKeys* = @["--file", "--out", "--seconds", "--tail", "--master",
-                  "--sample-rate", "--block", "--bits",
-                  "--progress", "--no-progress"]
-    ## Ключи `render` — для справки и автодополнения (#259). `--progress` и
-    ## `--no-progress` флаги, а не пары «ключ-значение» (#310).
-
-  WavSuffix = ".wav"
-    ## Признак «позиционный аргумент — файл вывода».
-
   DefaultTailSeconds* = 2.0
     ## Хвост по умолчанию, секунды.
   MaxRenderSeconds = 36_000.0
@@ -58,6 +54,77 @@ const
     ## Тот же потолок, что у ключа `sampleRate` в настройках (#258).
   DefaultBits = 16
   DefaultBlockSize = 512
+
+  RenderSpec* = CommandSpec(
+    name: "render",
+    summary: "офлайн-рендер проекта в WAV без аудиоустройства",
+    synopsis: "render [проект.eproj] [выход.wav] [ключи]",
+    args: @[
+      arg("проект.eproj", "что рендерить; историческое `.eut` принимается"),
+      arg("выход.wav", "куда писать; без аргумента — рядом с проектом"),
+    ],
+    options: @[
+      opt("--file", "проект, если он не задан позиционно", value = "проект.eproj"),
+      opt("--out", "файл вывода, если он не задан позиционно", value = "файл.wav"),
+      opt("--seconds", "длительность рендера; без ключа — конец последней ноты плюс --tail",
+          value = "секунды"),
+      opt("--tail", "добавка после последней ноты, секунды", value = "секунды",
+          default = $int(DefaultTailSeconds)),
+      opt("--master", "id ноды, подключённой к мастеру; без ключа мастер определяется по графу",
+          value = "id ноды"),
+      opt("--sample-rate", "частота дискретизации; без ключа — из проекта, затем настройки",
+          value = "Гц"),
+      opt("--block", "размер блока обработки", value = "кадры",
+          default = $DefaultBlockSize),
+      opt("--bits", "глубина дискретизации WAV", value = "16 или 24",
+          default = $DefaultBits),
+      switch("--progress", "показывать прогресс в stderr (по умолчанию — только если stderr это терминал)"),
+      switch("--no-progress", "не показывать прогресс"),
+    ],
+    example: "euterpia render project.eproj song.wav --seconds 30",
+    fields: @[
+      field("path", "отрендеренный проект"),
+      field("out", "записанный WAV (или план при `--dry-run`)"),
+      field("format", "формат вывода: `wav`"),
+      field("formatDescription", "расшифровка формата"),
+      field("channels", "число каналов (стерео)"),
+      field("sampleRate", "частота дискретизации рендера"),
+      field("blockSize", "размер блока обработки"),
+      field("bitsPerSample", "глубина дискретизации"),
+      field("seconds", "итоговая длительность"),
+      field("scoreSeconds", "длительность партитуры без хвоста"),
+      field("tailSeconds", "добавленный хвост"),
+      field("tempo", "темп, по которому считались тики"),
+      field("songEndTick", "конец песни в тиках"),
+      field("frames", "кадров на канал"),
+      field("rendered", "отрендерено кадров"),
+      field("dryRun", "план без записи"),
+      field("masterNodeId", "нода, выбранная мастером"),
+      field("noteNodes", "ноды с нотными событиями"),
+      field("automationLanes", "дорожки автоматизации, попавшие в рендер"),
+      field("issues", "замечания рендера (не ошибки)"),
+      field("peak", "пиковый уровень записанного WAV"),
+      field("rms", "среднеквадратичный уровень"),
+      field("silent", "запись тишины — предупреждение, а не ошибка"),
+    ],
+    notes: @[
+      "пример MANIFEST §19: euterpia render project.eproj",
+      "вывод — WAV (PCM 16 или 24 бита, стерео); MP3/OGG требуют кодировщика и в ядре отсутствуют",
+      "проект без нотных событий требует --seconds: длину пустой партитуры CLI не выдумывает",
+      "частота и блок: argv > метаданные проекта > настройки > умолчание",
+      "--dry-run печатает план рендера и не пишет файл",
+      "индикатор прогресса идёт в stderr: проценты, прошлое, осталось и скорость (×REALTIME)",
+      "по умолчанию он включается, только если stderr — терминал: в CI и пайпах вывод остаётся байт-в-байт тем же",
+      "--progress / --no-progress решают явно; -q отключает",
+      "тихая или оборванная запись — предупреждение, а не ошибка: код 2 только у сбоя записи",
+    ])
+
+  RenderKeys* = RenderSpec.optionKeys
+    ## Ключи `render` — из спецификации: справка, автодополнение и текст
+    ## ошибки читают одно описание (#259, #330).
+
+  WavSuffix = ".wav"
+    ## Признак «позиционный аргумент — файл вывода».
 
 type
   NumArg = object
