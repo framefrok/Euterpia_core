@@ -166,6 +166,7 @@ task ubsan, "Unit-набор под UndefinedBehaviorSanitizer (#13)":
   # не видны. Для UBSan это не про OOB, но единый аллокатор убирает
   # расхождение поведения debug-сборок.
   exec "nim c -r --hints:off --nimcache:build/nc_ubsan -d:useMalloc " &
+    "-d:sanitizer " &
     "--passC:-fsanitize=undefined --passC:-fno-sanitize-recover=all " &
     "--passL:-fsanitize=undefined --out:build/unit_ubsan tests/unit/all_tests.nim"
 
@@ -182,7 +183,8 @@ task asan, "Unit-набор под AddressSanitizer (#13)":
   # через libc malloc, поэтому то же переполнение падает:
   # `AddressSanitizer: heap-buffer-overflow in allocShared0Impl__system_...`.
   # Проверка эффективности флага — `nimble asanProbe` и шаг CI в джобе asan.
-  exec "ASAN_OPTIONS=detect_leaks=0 nim c -r --hints:off --nimcache:build/nc_asan -d:useMalloc " &
+  exec "ASAN_OPTIONS=detect_leaks=0 nim c -r --hints:off --nimcache:build/nc_asan " &
+    "-d:useMalloc -d:sanitizer " &
     "--passC:-fsanitize=address --passC:-fno-omit-frame-pointer " &
     "--passL:-fsanitize=address --out:build/unit_asan tests/unit/all_tests.nim"
 
