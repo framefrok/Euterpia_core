@@ -288,7 +288,18 @@ proc writeFrames*(writer: var WavWriter, buffer: ptr UncheckedArray[float32], fr
   var tempBuffer = newSeq[uint8](totalSamples * bytesPerSample)
   
   for s in 0 ..< totalSamples:
-    let sample = max(-1.0f, min(1.0f, buffer[s]))
+    # NaN/Inf guard (#358): сравнения с NaN дают false, поэтому наивные
+    # max/min пропускают NaN в конвертацию float→int (неопределённое
+    # поведение), а +Inf даёт переполнение. Формула та же, что в
+    # `audio_recorder.writeWavFrames` — два писателя ядра не должны
+    # расходиться (унификация хелпера — #356).
+    var sample = buffer[s]
+    if sample != sample:          # NaN
+      sample = 0.0f
+    if sample > 1.0f:
+      sample = 1.0f
+    elif sample < -1.0f:
+      sample = -1.0f
     
     if writer.info.bitsPerSample == 16:
       let intVal = int16(sample * 32767.0f)

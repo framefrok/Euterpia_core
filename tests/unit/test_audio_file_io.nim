@@ -213,6 +213,45 @@ suite "audio_file_io: файлы длиннее сырого буфера (#355)
       maxErr = max(maxErr, abs(got[i] - src[i]))
     check maxErr < 1e-3f
 
+suite "audio_file_io: NaN/Inf в сигнале (#358)":
+  ## Регрессия: наивные max/min пропускают NaN (сравнения с NaN дают false)
+  ## в конвертацию float→int — в файл попадало недетерминированное значение.
+  ## Recorder такие сигналы обнулял, wav_codec — нет: писатели ядра
+  ## расходились. Guard обязан дать один и тот же результат в обоих путях.
+
+  proc checkGuarded(bits: int16; isFloat: bool; tol: float32) =
+    let path = getTempDir() / "euterpia_afio_nan.wav"
+    var src = newSeq[float32](8)
+    src[0] = NaN                 # → 0.0
+    src[1] = NegInf              # → -1.0
+    src[2] = Inf                 # → +1.0
+    src[3] = 0.5f                # → без изменений
+    src[4] = -2.0f * NaN         # NaN, но не литерал: тоже → 0.0
+    src[5] = 1e30f               # за пределом → +1.0
+    src[6] = -1e30f              # за пределом → -1.0
+    src[7] = 0.0f
+    writeWav(path, info(bits, 1, isFloat), src)
+    defer: removeFile(path)
+
+    let (got, _) = loadAudioFile(path)
+    check got.len == 8
+    for i, v in got:
+      check v == v              # ни одного NaN в прочитанных данных
+    check got[0] == 0.0f
+    check abs(got[1] - (-1.0f)) < tol
+    check abs(got[2] - 1.0f) < tol
+    check abs(got[3] - 0.5f) < tol
+    check got[4] == 0.0f
+    check abs(got[5] - 1.0f) < tol
+    check abs(got[6] - (-1.0f)) < tol
+    check got[7] == 0.0f
+
+  test "32-bit float: NaN → 0, Inf → ±1, остальное не тронуто":
+    checkGuarded(32, true, 1e-6f)
+
+  test "16-bit PCM: тот же guard, что и в audio_recorder":
+    checkGuarded(16, false, 1e-3f)
+
 suite "audio_file_io: враждебный заголовок (#354)":
   ## Битый WAV обязан дать IOError (CLI ловит CatchableError и возвращает
   ## код 2), а НЕ Defect — тот не наследует CatchableError и ронял процесс.
