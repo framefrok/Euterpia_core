@@ -417,7 +417,12 @@ typedef struct {
 } EutInstVoice;
 
 #define EUT_INST_ORGAN_PARTIALS 8
-#define EUT_INST_DRUM_METAL     6
+/* Тарелка — не аккорд из шести нот, а плотный ингармонический блеск: чем
+   больше частичных, тем меньше слышна «высота» и тем больше «шипения». */
+#define EUT_INST_DRUM_METAL     8
+/* Моды корпуса («кожа»): у живого барабана их несколько, и затухают они
+   по-разному — основной тон тянется, верхние моды гаснут быстро. */
+#define EUT_INST_DRUM_MODES     3
 
 /* --- орган ----------------------------------------------------------------- */
 
@@ -546,6 +551,10 @@ void eut_guitar_process(EutGuitar *g, float *outL, float *outR, int stride,
 
 /* --- барабаны -------------------------------------------------------------- */
 
+/* Удар собирается из слоёв с независимыми временами затухания: транзиент
+   удара, моды корпуса, подструнник (шум) и металлическая группа тарелок.
+   Клэп — серия быстрых хлопков, а не один всплеск. */
+
 enum {
   EUT_DRUM_KICK = 0,
   EUT_DRUM_SNARE,
@@ -566,13 +575,42 @@ typedef struct {
   EutInstVoice v;
   int   piece;
   float pitch, pitchTarget, pitchCoef;   /* огибающая высоты */
-  float tonePh[2], toneDph[2];
-  float metalPh[EUT_INST_DRUM_METAL], metalDph[EUT_INST_DRUM_METAL];
-  float noiseLp, noiseHp;
-  float noiseLpCoef, noiseHpCoef;  /* полоса шума: свой для каждого куска */
-  float mixNoise, mixMetal;        /* доли шума и металла в миксе */
+
+  /* Слои удара. Живой удар — это несколько процессов с РАЗНЫМ временем:
+     палочка/ударник (доли мс), пластик, подструнник, корпус тарелки.
+     Раньше все они множились на одну огибающую, и удар звучал одинаково
+     на любой силе — «тумблером». */
+  float clickAmp, clickCoef;   /* транзиент удара: палочка/ударник, 1–6 мс */
+  float bodyAmp,  bodyCoef;    /* корпус и пластик */
+  float wireAmp,  wireCoef;    /* подструнник/шумовая часть: быстрее корпуса */
+  float chokeCoef;             /* приглушение рукой: гасит все слои сразу */
+
+  /* Моды корпуса: свои фаза, уровень и спад у каждой. */
+  float modePh[EUT_INST_DRUM_MODES];
+  float modeAmp[EUT_INST_DRUM_MODES];
+  float modeCoef[EUT_INST_DRUM_MODES];
+
+  /* Металлическая группа: у каждой частичной свой спад — «пинг» гаснет
+     раньше «шипения», поэтому тарелка раскрывается во времени. */
+  float metalPh[EUT_INST_DRUM_METAL];
+  float metalEnv[EUT_INST_DRUM_METAL];
+  float metalEnvCoef[EUT_INST_DRUM_METAL];
+
+  /* Шум двухполюсным полосовым фильтром: однополюсный давал «тссс» без
+     «проволоки» подструнника и без «воздуха» тарелки. */
+  float noiseLp, noiseLp2, noiseHp, noiseHp2;
+  float noiseLpCoef, noiseHpCoef;
+  float clickLp, clickLp2, clickHp, clickHp2;
+  float clickLpCoef, clickHpCoef;
+
+  float mixNoise, mixMetal, mixClick;  /* доли шума, металла и транзиента */
   float drive;
   float gain;
+
+  /* Клэп — не один хлопок, а три-четыре быстрых подряд и только потом
+     хвост (ладони при хлопке не сходятся синхронно). */
+  int   bursts;
+  float burstTimer, burstGap;
 } EutDrumVoice;
 
 typedef struct {
@@ -586,6 +624,10 @@ typedef struct {
   float drive;
   float pan;
   float level;
+  /* Пост-ФНЧ: мягкое ограничение даёт гармоники выше Найквиста, и без среза
+     они возвращаются «цифровым песком». Двухполюсный, отдельно по каналам. */
+  float postLpL, postLpL2, postLpR, postLpR2;
+  float postCoef;
   int   seqCounter;
   int   active;
 } EutDrums;

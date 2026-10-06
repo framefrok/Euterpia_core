@@ -102,6 +102,18 @@ static inline void inst_pan_gains(float pan, float *gl, float *gr)
   *gr = (float)sqrt(p);
 }
 
+/* Коэффициент однополюсного ФНЧ по частоте среза.
+   Приближение 2π·fc/sr (оно стоит в старых местах) уходит выше единицы
+   уже на fc ≈ sr/6 и молча упирается в clamp — то есть «срез 14 кГц» на
+   деле работал как 7 кГц. Точная форма 1 − exp(−2π·fc/sr) верна вплоть до
+   Найквиста, поэтому полосу шума ударных можно задавать честно. */
+static inline float inst_lp_coef(float hz, float sampleRate)
+{
+  if (hz <= 0.0f || sampleRate <= 0.0f) return 0.0f;
+  if (hz > 0.49f * sampleRate) hz = 0.49f * sampleRate;
+  return 1.0f - (float)exp(-EUT_INST_TWO_PI * (double)hz / (double)sampleRate);
+}
+
 /* Огибающая голоса: линейная атака, спад к sustain, отпускание.
    Возвращает 0, когда голос можно освободить. */
 static inline int inst_voice_alive(EutInstVoice *v)
@@ -818,48 +830,82 @@ void eut_guitar_process(EutGuitar *g, float *outL, float *outR, int stride,
 /* ===========================================================================
  * Барабаны
  *
- * Установка собирается из трёх примитивов:
- *   - тон (1–2 синуса с огибающей высоты): бочка, томы, тело малого;
- *   - шум в полосе: «щётки» малого, воздух клэпа;
- *   - металлическая группа 6 квадратов на несоизмеримых частотах с
- *     высокочастотным фильтром: тарелки и хэты.
+ * Удар собирается из слоёв, у каждого из которых своё время:
+ *   - транзиент (щелчок ударника/палочки): 1–6 мс шумовой всплеск;
+ *   - моды корпуса (3 ингармонические частоты): «кожа» барабана, каждая мода
+ *     со своим спадом;
+ *   - подструнник (шум двухполюсным полосовым фильтром): быстрее корпуса;
+ *   - металлическая группа (8 ингармонических частичных со своими спадами):
+ *     тарелки и хэты, «пинг» гаснет раньше «шипения».
+ *
+ * Раньше все три примитива (2 синуса + шум + металл) множились на ОДНУ
+ * огибающую, поэтому удар звучал одинаково на любой силе и не имел развития
+ * во времени. Теперь сила удара ведёт не только уровень, но и яркость
+ * (срез шума) и баланс слоёв: сильный удар ярче и собраннее, слабый — глуше
+ * и «кожанее».
  *
  * Карта нот — GM-совместимая: нота вне карты молчит (см.
  * eut_drums_piece_for_note). Так партия, написанная для внешнего
  * инструмента, не превращается в случайный набор кусков.
  *
- * Микроразброс по нотам (высота ±1.5%, время затухания ±4%) засеян ГПСЧ
- * от ноты и счётчика событий: живые повторы остаются воспроизводимыми.
+ * Микроразброс по нотам (высота ±1.5%, время затухания ±4%, уровень ±4%,
+ * срез шума ±5%) засеян ГПСЧ от ноты и счётчика событий: живые повторы
+ * остаются воспроизводимыми (один проект — один рендер).
  * ========================================================================= */
 
 typedef struct {
   float freq;       /* основная частота тона */
   float pitchDrop;  /* во сколько раз выше стартовая высота */
   float pitchTime;  /* время спада высоты, с */
-  float ampTime;    /* время затухания огибающей, с */
-  float noise;      /* доля шума */
-  float toneFreq;   /* срез полосы шума, Гц */
+  float bodyTime;   /* спад корпуса («кожи»), с */
+  float wireTime;   /* спад подструнника (шума), с */
+  float metalTime;  /* спад металлической группы, с */
+  float clickTime;  /* спад транзиента удара, с */
+  float noise;      /* доля шумовой части */
+  float toneFreq;   /* верхняя граница полосы шума, Гц */
   float metal;      /* доля металлической группы */
+  float clickMix;   /* доля транзиента */
   float level;      /* масштаб уровня детали (баланс бочка/малый/тарелки) */
   float drive;
   float gain;
   float pan;        /* место в стереокартине */
+  int   clapBursts; /* клэп: сколько хлопков подряд (0 — обычный кусок) */
 } DrumSpec;
 
 static const DrumSpec DRUM_SPECS[EUT_DRUM_PIECE_COUNT] = {
-  /* KICK      */ {  72.0f, 2.10f, 0.032f, 0.22f, 0.06f,  1800.0f, 0.00f, 0.80f, 0.08f, 1.00f,  0.00f },
-  /* SNARE     */ { 190.0f, 1.30f, 0.030f, 0.15f, 0.68f,  5200.0f, 0.12f, 0.70f, 0.10f, 0.80f, -0.05f },
-  /* RIM       */ { 420.0f, 1.20f, 0.012f, 0.05f, 0.50f,  8000.0f, 0.35f, 0.60f, 0.10f, 0.55f,  0.15f },
-  /* CLAP      */ { 340.0f, 1.10f, 0.020f, 0.22f, 0.96f,  7000.0f, 0.00f, 0.70f, 0.10f, 0.65f, -0.20f },
-  /* TOM_LOW   */ {  92.0f, 1.50f, 0.040f, 0.40f, 0.16f,  2600.0f, 0.00f, 0.80f, 0.10f, 0.85f, -0.35f },
-  /* TOM_MID   */ { 138.0f, 1.50f, 0.040f, 0.34f, 0.16f,  3000.0f, 0.00f, 0.80f, 0.10f, 0.85f, -0.15f },
-  /* TOM_HIGH  */ { 196.0f, 1.50f, 0.040f, 0.28f, 0.16f,  3400.0f, 0.00f, 0.80f, 0.10f, 0.85f,  0.10f },
-  /* HAT_CLOSED*/ { 540.0f, 1.00f, 0.000f, 0.055f, 1.00f, 14000.0f, 0.90f, 0.36f, 0.05f, 0.45f,  0.30f },
-  /* HAT_PEDAL */ { 500.0f, 1.00f, 0.000f, 0.085f, 1.00f, 11000.0f, 0.90f, 0.32f, 0.05f, 0.40f,  0.30f },
-  /* HAT_OPEN  */ { 540.0f, 1.00f, 0.000f, 0.34f, 1.00f,  13000.0f, 0.90f, 0.38f, 0.05f, 0.45f,  0.32f },
-  /* CRASH     */ { 620.0f, 1.00f, 0.000f, 1.10f, 1.00f,  9000.0f, 0.95f, 0.55f, 0.04f, 0.42f, -0.40f },
-  /* RIDE      */ { 820.0f, 1.00f, 0.000f, 0.80f, 0.70f, 13000.0f, 0.85f, 0.40f, 0.04f, 0.38f,  0.40f }
+  /* freq  drop  pitchT  bodyT  wireT  metalT  clickT  noise  toneF  metal  click  level  drive  gain   pan   bursts */
+  /* KICK       */ {  72.0f, 2.30f, 0.028f, 0.30f, 0.050f, 0.00f, 0.006f, 0.10f,  2600.0f, 0.00f, 0.55f, 0.80f, 0.10f, 1.00f,  0.00f, 0 },
+  /* SNARE      */ { 190.0f, 1.25f, 0.018f, 0.22f, 0.140f, 0.05f, 0.0035f, 0.58f, 4400.0f, 0.08f, 0.45f, 0.72f, 0.10f, 0.80f, -0.05f, 0 },
+  /* RIM        */ { 420.0f, 1.20f, 0.010f, 0.035f, 0.030f, 0.02f, 0.002f, 0.45f,  9000.0f, 0.30f, 0.50f, 0.60f, 0.10f, 0.55f,  0.15f, 0 },
+  /* CLAP       */ { 340.0f, 1.10f, 0.020f, 0.010f, 0.004f, 0.00f, 0.0025f, 1.00f, 6500.0f, 0.00f, 0.00f, 0.70f, 0.10f, 0.65f, -0.20f, 3 },
+  /* TOM_LOW    */ {  92.0f, 1.55f, 0.035f, 0.45f, 0.060f, 0.00f, 0.005f, 0.14f,  2800.0f, 0.00f, 0.35f, 0.80f, 0.10f, 0.85f, -0.35f, 0 },
+  /* TOM_MID    */ { 138.0f, 1.55f, 0.035f, 0.38f, 0.060f, 0.00f, 0.005f, 0.14f,  3000.0f, 0.00f, 0.35f, 0.80f, 0.10f, 0.85f, -0.15f, 0 },
+  /* TOM_HIGH   */ { 196.0f, 1.55f, 0.035f, 0.32f, 0.060f, 0.00f, 0.005f, 0.14f,  3400.0f, 0.00f, 0.35f, 0.80f, 0.10f, 0.85f,  0.10f, 0 },
+  /* HAT_CLOSED */ { 540.0f, 1.00f, 0.000f, 0.020f, 0.045f, 0.07f, 0.0015f, 1.00f, 18000.0f, 0.90f, 0.60f, 0.40f, 0.05f, 0.55f,  0.30f, 0 },
+  /* HAT_PEDAL  */ { 500.0f, 1.00f, 0.000f, 0.020f, 0.040f, 0.05f, 0.0015f, 1.00f, 15000.0f, 0.90f, 0.25f, 0.36f, 0.05f, 0.48f,  0.30f, 0 },
+  /* HAT_OPEN   */ { 540.0f, 1.00f, 0.000f, 0.020f, 0.120f, 0.38f, 0.0015f, 1.00f, 18000.0f, 0.90f, 0.55f, 0.42f, 0.05f, 0.50f,  0.32f, 0 },
+  /* CRASH      */ { 620.0f, 1.00f, 0.000f, 0.020f, 0.300f, 1.30f, 0.002f, 1.00f, 15000.0f, 0.95f, 0.50f, 0.55f, 0.04f, 0.45f, -0.40f, 0 },
+  /* RIDE       */ { 820.0f, 1.00f, 0.000f, 0.020f, 0.120f, 0.85f, 0.002f, 1.00f, 16000.0f, 0.85f, 0.65f, 0.42f, 0.04f, 0.40f,  0.40f, 0 }
 };
+
+/* Ингармонические отношения мод корпуса: 1.66 и 2.41 дают «кожаный» призвук
+   без ясной высоты. Спад у верхних мод короче — так ведёт себя пластик. */
+static const float DRUM_MODE_RATIO[EUT_INST_DRUM_MODES] = { 1.00f, 1.66f, 2.41f };
+static const float DRUM_MODE_WEIGHT[EUT_INST_DRUM_MODES] = { 1.00f, 0.62f, 0.36f };
+static const float DRUM_MODE_DECAY[EUT_INST_DRUM_MODES] = { 1.00f, 0.62f, 0.42f };
+
+/* Отношения частичных металлической группы: разрежены вверх, чтобы сумма не
+   давала слышимой высоты (тарелка — звон, а не аккорд). */
+static const float DRUM_METAL_RATIO[EUT_INST_DRUM_METAL] =
+  { 2.00f, 2.83f, 3.76f, 5.10f, 6.80f, 9.10f, 11.9f, 15.4f };
+/* Вес частичной: низ «пинга» громче, верх — тише («шипение»). */
+static const float DRUM_METAL_WEIGHT[EUT_INST_DRUM_METAL] =
+  { 1.00f, 0.74f, 0.58f, 0.46f, 0.38f, 0.32f, 0.27f, 0.23f };
+/* Спад частичной относительно metalTime: «пинг» гаснет раньше «шипения».
+   Множитель растёт с номером — нижние частичные (прежде всего у ride)
+   дают удар-«пинг», верхние тянут «шипение» хвоста. */
+static const float DRUM_METAL_DECAY[EUT_INST_DRUM_METAL] =
+  { 0.30f, 0.42f, 0.58f, 0.75f, 0.95f, 1.15f, 1.35f, 1.55f };
 
 int eut_drums_piece_for_note(int note)
 {
@@ -888,6 +934,9 @@ void eut_drums_init(EutDrums *g, EutDrumVoice *voices, int voiceCount, float sam
   g->voices = voices;
   g->voiceCount = (voiceCount > 0) ? voiceCount : 1;
   g->sampleRate = sampleRate;
+  /* Пост-ФНЧ ~0.46·sr: срезает гармоники мягкого ограничения, уходящие
+     выше Найквиста, но не трогает «воздух» тарелок. */
+  g->postCoef = inst_lp_coef(0.46f * sampleRate, sampleRate);
   eut_drums_set(g, 1.0f, 1.0f, 1.0f, 0.6f, 0.2f, 0.0f, 0.85f);
   eut_drums_reset(g);
 }
@@ -898,6 +947,11 @@ void eut_drums_reset(EutDrums *g)
   memset(g->voices, 0, (size_t)g->voiceCount * sizeof(EutDrumVoice));
   g->seqCounter = 0;
   g->active = 0;
+  /* Пост-ФНЧ тоже обнуляем: иначе после стопа (reset зовут на остановке
+     транспорта) состояние фильтра остаётся от громкого последнего удара и
+     вылезает щелчком в первой ноте нового проигрывания. */
+  g->postLpL = g->postLpL2 = 0.0f;
+  g->postLpR = g->postLpR2 = 0.0f;
 }
 
 void eut_drums_set(EutDrums *g, float tune, float decay, float snappy,
@@ -923,8 +977,17 @@ void eut_drums_note_on(EutDrums *g, int note, float velocity)
 
   const float vel = inst_clamp(velocity, 0.0f, 1.0f);
 
+  /* Сила удара ведёт не только уровень, но и характер: сильный удар ярче
+     (шире полоса шума и транзиента), собраннее (коротче корпус) и звонче;
+     слабый — глуше и «кожанее». Раньше спектр от силы не зависел вообще,
+     и любой удар звучал как один и тот же «тумблер». */
+  const float vBright = 0.58f + 0.72f * vel;   /* множитель среза шума */
+  const float vBody   = 1.05f - 0.22f * vel;   /* сильный удар короче по телу */
+  const float vTrans  = 0.30f + 1.10f * vel;   /* транзиент растёт с силой */
+
   /* Закрытый хэт гасит открытый и предыдущий закрытый: у настоящей
-     установки между тарелками одна пара, и они глушат друг друга. */
+     установки между тарелками одна пара, и они глушат друг друга.
+     Гасим все слои сразу (chokeCoef), а не только общую огибающую. */
   if (piece == EUT_DRUM_HAT_CLOSED || piece == EUT_DRUM_HAT_PEDAL) {
     for (int i = 0; i < g->voiceCount; ++i) {
       EutDrumVoice *o = &g->voices[i];
@@ -932,7 +995,7 @@ void eut_drums_note_on(EutDrums *g, int note, float velocity)
       if (o->piece == EUT_DRUM_HAT_OPEN || o->piece == EUT_DRUM_HAT_CLOSED ||
           o->piece == EUT_DRUM_HAT_PEDAL) {
         o->v.held = 0;
-        o->v.relCoef = inst_coef(0.006f, sr);
+        o->chokeCoef = inst_coef(0.006f, sr);
       }
     }
   }
@@ -949,46 +1012,95 @@ void eut_drums_note_on(EutDrums *g, int note, float velocity)
   if (v->v.rng == 0u) v->v.rng = 0x5A5A5A5u;
 
   /* Микроразброс: живые повторы не звучат копией, но остаются
-     воспроизводимыми (сид детерминирован). */
+     воспроизводимыми (сид детерминирован). Слух ловит уже ±0.3 дБ и ±1%
+     времени, поэтому разброс шире, чем был: заодно меняется и срез шума. */
   const float jitterPitch = 1.0f + inst_noise(&v->v.rng) * 0.015f;
   const float jitterDecay = 1.0f + inst_noise(&v->v.rng) * 0.04f;
+  const float jitterLevel = 1.0f + inst_noise(&v->v.rng) * 0.05f;
+  const float jitterTone  = 1.0f + inst_noise(&v->v.rng) * 0.05f;
+  const float decScale = g->decay * jitterDecay;
 
-  const float ampTime = inst_clamp(sp->ampTime * g->decay * jitterDecay, 0.008f, 8.0f);
-  /* Удар ударных держится не пальцем: held = 0, затухание идёт по
-     отпусканию. Так одна и та же огибающая обслуживает и «чок» хэта.
-     Атака — не нулевая: она даёт короткий фейд, иначе старт с полной
-     амплитудой превращался в щелчок (поймано инспектором аудио). */
+  /* Общая огибающая голоса отвечает только за фейд атаки и приглушение
+     рукой: спад несут слои, поэтому её release не затухает (relCoef = 1).
+     Атака — не нулевая: разрыв функции слышен как щелчок (инспектор #290),
+     а живой удар и так имеет фронт в доли миллисекунды.
+     Голос освобождает drums_voice_alive, когда замолчал последний слой. */
+  float ampTime = sp->bodyTime;
+  if (sp->wireTime  > ampTime) ampTime = sp->wireTime;
+  if (sp->metalTime > ampTime) ampTime = sp->metalTime;
+  ampTime = inst_clamp(ampTime * decScale, 0.004f, 8.0f);
   inst_voice_setup(&v->v, note, vel, 0.0008f, 0.0f, ampTime, ampTime, sr);
   v->v.held = 0;
+  v->v.relCoef = 1.0f;
   v->v.seq = g->seqCounter;
+  v->chokeCoef = 1.0f;
+
+  /* Слои: у каждого своё время затухания — в этом и «проработка» удара. */
+  v->clickCoef = inst_coef(sp->clickTime * decScale, sr);
+  v->bodyCoef  = inst_coef(sp->bodyTime  * decScale * vBody, sr);
+  v->wireCoef  = inst_coef(sp->wireTime  * decScale, sr);
+  /* Огибающие слоёв стартуют с единицы: баланс между слоями задают
+     микс-веса ниже, поэтому двойного учёта уровня здесь нет. */
+  v->clickAmp = 1.0f;
+  v->bodyAmp  = 1.0f;
+  v->wireAmp  = 1.0f;
 
   const float f0 = sp->freq * g->tune * jitterPitch;
   v->pitch = f0 * sp->pitchDrop;
   v->pitchTarget = f0;
   v->pitchCoef = inst_coef(sp->pitchTime, sr);
-  v->tonePh[0] = 0.0f;
-  v->tonePh[1] = 0.25f;
-  v->toneDph[0] = 0.0f;
-  v->toneDph[1] = 0.0f;
-  for (int k = 0; k < EUT_INST_DRUM_METAL; ++k) {
-    v->metalPh[k] = (inst_noise(&v->v.rng) * 0.5f + 0.5f);
-    v->metalDph[k] = 0.0f;
-  }
-  v->noiseLp = 0.0f;
-  v->noiseHp = 0.0f;
-  /* Полоса шума: сверху — toneFreq с поправкой на параметр tone, снизу —
-     высокочастотный срез, чтобы шум не гудел. */
-  const float lpHz = sp->toneFreq * (0.45f + 0.85f * g->tone);
-  v->noiseLpCoef = inst_clamp(EUT_INST_TWO_PI * lpHz / sr, 0.02f, 0.99f);
-  v->noiseHpCoef = inst_clamp(EUT_INST_TWO_PI * 320.0f / sr, 0.005f, 0.5f);
 
-  /* Доли микса: у ударов с «пружиной» (малый, клэп) их подмешивает snappy. */
-  float noiseMix = sp->noise * (0.55f + 0.45f * vel);
+  /* Моды корпуса: у каждой свой уровень и свой спад (верхние моды гаснут
+     раньше основного тона — так ведёт себя пластик). */
+  for (int k = 0; k < EUT_INST_DRUM_MODES; ++k) {
+    v->modePh[k]  = 0.0f;
+    v->modeAmp[k] = DRUM_MODE_WEIGHT[k];
+    v->modeCoef[k] = inst_coef(sp->bodyTime * decScale * vBody * DRUM_MODE_DECAY[k], sr);
+  }
+
+  /* Металлическая группа: у каждой частичной свой спад, поэтому тарелка
+     раскрывается во времени («пинг» → «шипение»), а не звенит одним тоном. */
+  for (int k = 0; k < EUT_INST_DRUM_METAL; ++k) {
+    v->metalPh[k]      = (inst_noise(&v->v.rng) * 0.5f + 0.5f);
+    v->metalEnv[k]     = DRUM_METAL_WEIGHT[k];
+    v->metalEnvCoef[k] = inst_coef(sp->metalTime * decScale * DRUM_METAL_DECAY[k], sr);
+  }
+
+  v->noiseLp = v->noiseLp2 = v->noiseHp = v->noiseHp2 = 0.0f;
+  v->clickLp = v->clickLp2 = v->clickHp = v->clickHp2 = 0.0f;
+  /* Полоса шума: сверху — toneFreq (её ведут параметр tone и сила удара),
+     снизу — свой срез, чтобы шум не гудел. Оба — двухполюсные: спад круче
+     даёт «проволоку» подструнника и «воздух» тарелки вместо «тссс». */
+  const float lpHz = sp->toneFreq * (0.45f + 0.85f * g->tone) * vBright * jitterTone;
+  const float hpHz = inst_clamp(sp->toneFreq * 0.11f, 320.0f, 1600.0f);
+  v->noiseLpCoef = inst_lp_coef(lpHz, sr);
+  v->noiseHpCoef = inst_lp_coef(hpHz, sr);
+  /* Транзиент удара — своя, более широкая полоса: щелчок палочки/ударника.
+     Он должен быть заметно ярче тела, иначе удар не «читается» как удар:
+     широкий крек гаснет за считанные миллисекунды и оставляет тёмный
+     подструнник и корпус (это и есть раскрытие во времени). */
+  v->clickLpCoef = inst_lp_coef(inst_clamp(sp->toneFreq * 2.6f, 3500.0f, 0.45f * sr), sr);
+  v->clickHpCoef = inst_lp_coef(inst_clamp(sp->toneFreq * 0.30f, 900.0f, 3000.0f), sr);
+
+  /* Клэп: первый хлопок уже прозвучал — остальные догоняют через burstGap,
+     последний оставляет хвост (обрабатывается в eut_drums_process).
+     Пауза между хлопками длиннее их собственного спада: иначе хлопки
+     сливаются в один «шлепок», и клэп перестаёт отличаться от малого. */
+  v->bursts = (sp->clapBursts > 0) ? (sp->clapBursts - 1) : 0;
+  v->burstGap = inst_clamp(0.012f * decScale, 0.005f, 0.035f);
+  v->burstTimer = v->burstGap;
+
+  /* Доли микса: у ударов с «пружиной» (малый, клэп) их ведёт snappy. */
+  float noiseMix = sp->noise * (0.45f + 0.55f * vel);
   if (piece == EUT_DRUM_SNARE || piece == EUT_DRUM_CLAP || piece == EUT_DRUM_RIM) {
     noiseMix *= (0.4f + 0.6f * g->snappy);
   }
+  /* Баланс слоёв: «кожа» (1 − металл), подструнник, транзиент и металл.
+     Общий разброс уровня (jitterLevel) применяется один раз — в усилении
+     голоса ниже, чтобы не двоить его в каждом слое. */
   v->mixNoise = inst_clamp(noiseMix, 0.0f, 2.0f);
   v->mixMetal = sp->metal;
+  v->mixClick = sp->clickMix * vTrans;
 
   /* Предусиление с компенсацией: мягкое ограничение оставляет уровень
      примерно тем же, что и до него, поэтому drive не «прыгает» громкостью. */
@@ -1000,8 +1112,8 @@ void eut_drums_note_on(EutDrums *g, int note, float velocity)
   float pl = 0.0f;
   float pr = 0.0f;
   inst_pan_gains(inst_clamp(g->pan + sp->pan, -1.0f, 1.0f), &pl, &pr);
-  v->v.gainL = pl * toneMix * 0.5f;
-  v->v.gainR = pr * toneMix * 0.5f;
+  v->v.gainL = pl * toneMix * jitterLevel * 0.5f;
+  v->v.gainR = pr * toneMix * jitterLevel * 0.5f;
   /* Мгновенной атаки (ampInc = 1) быть не должно: amp прыгал с 0 до 1 за
      один сэмпл, и это слышалось как щелчок на каждом ударе. Атака из
      setup (доли миллисекунды) уже достаточно быстрая для удара, но
@@ -1020,7 +1132,7 @@ void eut_drums_note_off(EutDrums *g, int note)
     if (v->piece == EUT_DRUM_HAT_OPEN || v->piece == EUT_DRUM_CRASH ||
         v->piece == EUT_DRUM_RIDE) {
       v->v.held = 0;
-      v->v.relCoef = inst_coef(0.030f, g->sampleRate);
+      v->chokeCoef = inst_coef(0.030f, g->sampleRate);
     }
   }
 }
@@ -1032,11 +1144,54 @@ void eut_drums_all_off(EutDrums *g)
     EutDrumVoice *v = &g->voices[i];
     if (v->v.active) {
       v->v.held = 0;
-      v->v.relCoef = inst_coef(0.020f, g->sampleRate);
+      v->chokeCoef = inst_coef(0.020f, g->sampleRate);
     }
   }
 }
 
+
+/* Шаг голоса ударных. Слоистые огибающие живут сами, а общая огибающая
+   отвечает только за фейд атаки и приглушение рукой (chokeCoef). Поэтому
+   голос освобождается, когда замолчал последний слой, а не когда опустилась
+   общая огибающая. Возвращает 1, пока голос звучит. */
+static inline int drums_voice_alive(EutDrumVoice *v)
+{
+  EutInstVoice *b = &v->v;
+  if (!b->active) return 0;
+
+  /* Фейд атаки: разрыв функции слышен как щелчок (#293), а живой удар и так
+     имеет фронт в доли миллисекунды. */
+  if (b->ampInc > 0.0f) {
+    b->amp += b->ampInc;
+    if (b->amp >= 1.0f) { b->amp = 1.0f; b->ampInc = 0.0f; }
+  }
+
+  /* Приглушение рукой гасит ВСЕ слои: иначе после «чока» хэта продолжала
+     звенеть металлическая группа. */
+  const float choke = v->chokeCoef;
+  v->clickAmp *= v->clickCoef * choke;
+  v->bodyAmp  *= v->bodyCoef  * choke;
+  v->wireAmp  *= v->wireCoef  * choke;
+
+  float loudest = v->clickAmp;
+  if (v->bodyAmp > loudest) loudest = v->bodyAmp;
+  if (v->wireAmp > loudest) loudest = v->wireAmp;
+
+  for (int k = 0; k < EUT_INST_DRUM_MODES; ++k) {
+    v->modeAmp[k] *= v->modeCoef[k] * choke;
+  }
+  for (int k = 0; k < EUT_INST_DRUM_METAL; ++k) {
+    v->metalEnv[k] *= v->metalEnvCoef[k] * choke;
+    if (v->metalEnv[k] > loudest) loudest = v->metalEnv[k];
+  }
+
+  if (loudest < 0.00002f) {
+    b->amp = 0.0f;
+    b->active = 0;
+    return 0;
+  }
+  return 1;
+}
 
 EUT_TARGET_CLONES
 void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n)
@@ -1044,12 +1199,13 @@ void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n)
   if (g == NULL || g->voices == NULL || n <= 0) return;
   if (g->active == 0) return;
   const float invSr = 1.0f / g->sampleRate;
-  /* Несоизмеримые отношения металлической группы: так сумма шести
-     квадратов не даёт слышимой высоты — получается тарелка, а не аккорд. */
-  /* Ингармонические отношения: тарелка — это звон без ясной высоты, а не
-     аккорд. Отношения разрежены вверх — вместе с шумом это даёт «шипение». */
-  static const float METAL_RATIO[EUT_INST_DRUM_METAL] =
-    { 2.00f, 2.83f, 3.76f, 5.10f, 6.80f, 9.10f };
+  /* Нормировки слоёв: двухполюсные полосовые фильтры шума дают заметно
+     меньшую амплитуду, чем прежние однополюсные, поэтому шум и транзиент
+     масштабируются обратно; металл нормируется по сумме весов частичных,
+     иначе сумма восьми синусов уходила в мягкое ограничение. */
+  const float wireScale  = 1.8f;
+  const float clickScale = 5.0f;
+  const float metalScale = 0.25f;
 
   for (int i = 0; i < n; ++i) {
     float sumL = 0.0f;
@@ -1057,59 +1213,102 @@ void eut_drums_process(EutDrums *g, float *outL, float *outR, int stride, int n)
     int alive = 0;
     for (int vi = 0; vi < g->voiceCount; ++vi) {
       EutDrumVoice *v = &g->voices[vi];
-      if (!inst_voice_alive(&v->v)) continue;
+      if (!drums_voice_alive(v)) continue;
       ++alive;
 
-      /* Огибающая высоты: бочка «падает» с 2.6× до основной частоты. */
+      /* Клэп: хлопки догоняют друг друга, и только потом идёт общий хвост.
+         Ладони сходятся не синхронно — без этой серии клэп неотличим от
+         малого. Последний хлопок оставляет длинный «комнатный» хвост. */
+      if (v->bursts > 0) {
+        v->burstTimer -= invSr;
+        if (v->burstTimer <= 0.0f) {
+          v->burstTimer += v->burstGap;
+          --v->bursts;
+          /* Каждый следующий хлопок чуть тише первого. */
+          v->wireAmp = 0.88f + 0.12f * (float)v->bursts;
+          if (v->bursts == 0) {
+            v->wireCoef = inst_coef(0.120f * g->decay, g->sampleRate);
+          }
+        }
+      }
+
+      /* Огибающая высоты: бочка «падает» с 2.3× до основной частоты. */
       v->pitch = v->pitchTarget + (v->pitch - v->pitchTarget) * v->pitchCoef;
 
-      float tone = 0.0f;
-      v->tonePh[0] += v->pitch * invSr;
-      if (v->tonePh[0] >= 1.0f) v->tonePh[0] -= 1.0f;
-      tone += inst_sin(v->tonePh[0]);
-      /* Вторая составляющая у малого и томов: 1.44 — нецелое отношение,
-         оно и даёт «кожаный» призвук вместо чистого тона. */
-      v->tonePh[1] += v->pitch * 1.44f * invSr;
-      if (v->tonePh[1] >= 1.0f) v->tonePh[1] -= 1.0f;
-      tone += inst_sin(v->tonePh[1]) * 0.7f;
-
-      float noise = 0.0f;
-      if (v->mixNoise > 0.0f) {
-        const float nz = inst_noise(&v->v.rng);
-        v->noiseHp += (nz - v->noiseHp) * v->noiseHpCoef;
-        const float hi = nz - v->noiseHp;
-        v->noiseLp += (hi - v->noiseLp) * v->noiseLpCoef;
-        noise = v->noiseLp * 2.4f;
+      /* Корпус: три ингармонические моды, у каждой свой уровень и спад. */
+      float body = 0.0f;
+      for (int k = 0; k < EUT_INST_DRUM_MODES; ++k) {
+        if (v->modeAmp[k] <= 0.0f) continue;
+        v->modePh[k] += v->pitch * DRUM_MODE_RATIO[k] * invSr;
+        if (v->modePh[k] >= 1.0f) v->modePh[k] -= 1.0f;
+        body += inst_sin(v->modePh[k]) * v->modeAmp[k];
       }
 
+      /* Транзиент удара: короткий шумовой всплеск своей полосы. Это то, что
+         слышно как «щелчок ударника» и что делает удар плотным. */
+      float click = 0.0f;
+      if (v->clickAmp > 0.0f) {
+        const float x = inst_noise(&v->v.rng);
+        v->clickHp  += (x - v->clickHp) * v->clickHpCoef;
+        const float h1 = x - v->clickHp;
+        v->clickHp2 += (h1 - v->clickHp2) * v->clickHpCoef;
+        const float h2 = h1 - v->clickHp2;
+        v->clickLp  += (h2 - v->clickLp) * v->clickLpCoef;
+        v->clickLp2 += (v->clickLp - v->clickLp2) * v->clickLpCoef;
+        click = v->clickLp2 * clickScale;
+      }
+
+      /* Подструнник: шум двухполюсным полосовым фильтром — узкая полоса
+         вместо прежнего «тссс» даёт «проволоку» малого и воздух тарелок. */
+      float wire = 0.0f;
+      if (v->wireAmp > 0.0f) {
+        const float x = inst_noise(&v->v.rng);
+        v->noiseHp  += (x - v->noiseHp) * v->noiseHpCoef;
+        const float h1 = x - v->noiseHp;
+        v->noiseHp2 += (h1 - v->noiseHp2) * v->noiseHpCoef;
+        const float h2 = h1 - v->noiseHp2;
+        v->noiseLp  += (h2 - v->noiseLp) * v->noiseLpCoef;
+        v->noiseLp2 += (v->noiseLp - v->noiseLp2) * v->noiseLpCoef;
+        wire = v->noiseLp2 * wireScale;
+      }
+
+      /* Металл: у каждой частичной свой спад, поэтому тарелка раскрывается
+         во времени — «пинг» гаснет раньше «шипения» хвоста. */
       float metal = 0.0f;
       if (v->mixMetal > 0.0f) {
-        /* Ингармонические ЧАСТИЧНЫЕ вместо меандра: сумма квадратов давала
-           густой низко-серединистый «жужжащий» призвук (особенно ride),
-           который тянулся и накладывался при игре восьмыми. Синусы такой
-           грязи не дают, а «шипение» тарелки добавляет шумовая часть. */
         float partials = 0.0f;
         for (int k = 0; k < EUT_INST_DRUM_METAL; ++k) {
-          const float dt = v->pitch * METAL_RATIO[k] * invSr;
-          v->metalPh[k] += dt;
+          v->metalPh[k] += v->pitch * DRUM_METAL_RATIO[k] * invSr;
           if (v->metalPh[k] >= 1.0f) v->metalPh[k] -= 1.0f;
-          partials += inst_sin(v->metalPh[k]) * (1.0f - 0.12f * (float)k);
+          partials += inst_sin(v->metalPh[k]) * v->metalEnv[k];
         }
-        metal = partials * (1.0f / EUT_INST_DRUM_METAL);
+        metal = partials * metalScale;
       }
 
-      /* Тональная часть даётся только «кожаным» деталям: у тарелок
-         mixMetal близок к 1, и синус под ними звучал пищащим «биип». */
-      const float tonalMix = 1.0f - v->mixMetal;
-      float s = tone * tonalMix + noise * v->mixNoise + metal * v->mixMetal;
+      /* «Кожа» даётся только кожаным деталям: у тарелок mixMetal близок к 1,
+         и моды под ними звучали пищащим «биип». Общая огибающая тела
+         (bodyAmp) работает вместе с per-mode (modeAmp): первая задаёт спад
+         кожи, вторая — что верхние моды гаснут раньше основных. */
+      const float bodyBal = 1.0f - v->mixMetal;
+      float s = body * bodyBal * v->bodyAmp
+              + wire * v->wireAmp * v->mixNoise
+              + metal * v->mixMetal
+              + click * v->clickAmp * v->mixClick;
       s = inst_soft_clip(s * v->drive) * v->gain;
       const float a = v->v.amp;
       sumL += s * a * v->v.gainL;
       sumR += s * a * v->v.gainR;
     }
     g->active = alive;
-    if (outL != NULL) outL[i * stride] += sumL;
-    if (outR != NULL) outR[i * stride] += sumR;
+
+    /* Пост-ФНЧ: мягкое ограничение выше дало гармоники выше Найквиста;
+       двухполюсный срез возвращает их на место, не трогая тело удара. */
+    g->postLpL  += (sumL - g->postLpL) * g->postCoef;
+    g->postLpL2 += (g->postLpL - g->postLpL2) * g->postCoef;
+    g->postLpR  += (sumR - g->postLpR) * g->postCoef;
+    g->postLpR2 += (g->postLpR - g->postLpR2) * g->postCoef;
+    if (outL != NULL) outL[i * stride] += g->postLpL2;
+    if (outR != NULL) outR[i * stride] += g->postLpR2;
   }
 }
 
