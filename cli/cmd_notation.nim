@@ -605,6 +605,7 @@ proc runNotationImport(ctx: var Ctx; scan: NotationScan): Report =
       lengthTicks: lengthTicks,
       loopEnabled: false,
       audioBufferId: -1,
+      resourceId: -1,
       color: 0xFF6B6B'u32
     )
     createdClip = true

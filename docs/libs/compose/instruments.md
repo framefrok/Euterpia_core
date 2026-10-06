@@ -293,6 +293,7 @@ inst.setParam("level", -6.0f32)   # по имени (стабильно)
 | `euterpia.gain` | `gain` | -80..12 | 0 |
 | `euterpia.pan` | `pan` | -1..1 | 0 |
 | `euterpia.input` | `gain` | -80..12 | 0 |
+| `euterpia.clip` | `gain` | -80..12 | 0 |
 
 ## Справочник нот (MIDI)
 
@@ -319,6 +320,7 @@ inst.setParam("level", -6.0f32)   # по имени (стабильно)
 | `euterpia.gain`, `euterpia.pan`, `euterpia.mix` | микширование |
 | `euterpia.compressor`, `euterpia.delay` | динамика и эффекты |
 | `euterpia.input` | входной тракт |
+| `euterpia.clip` | плеер аудиоклипов (сэмплы ресурса → звук) |
 
 Полный актуальный каталог всегда доступен командой:
 

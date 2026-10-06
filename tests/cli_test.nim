@@ -1424,6 +1424,33 @@ suite "CLI: импорт аудио — import (#107)":
     check node["resource"]["id"].getInt == 1
     check node["clip"]["track"].getInt == 0
 
+  test "render воспроизводит импортированный audio-клип (sample-accurate)":
+    # Источник — звучащий проект (ноты + пиано): голый генератор молчит.
+    check runCliIn(work, ["init", "src.eproj", "--force", "--name", "Src"]).code == 0
+    check runCliIn(work, ["node", "add", "notes", "--file", "src.eproj", "--name", "seq"]).code == 0
+    check runCliIn(work, ["node", "add", "piano", "--file", "src.eproj", "--name", "keys"]).code == 0
+    check runCliIn(work, ["connect", "seq:event:0", "keys:event:0", "--file", "src.eproj"]).code == 0
+    writeFile(work / "m.notes", "c4/4 d e f | g/2 r/2\n")
+    check runCliIn(work, ["notation", "import", "m.notes", "--file", "src.eproj",
+                          "--track", "0", "--name", "Lead"]).code == 0
+    check runCliIn(work, ["render", "src.eproj", "src2.wav", "--seconds", "2"]).code == 0
+
+    # Проект с нодой-плеером: импорт источника + рендер.
+    check runCliIn(work, ["init", "clip.eproj", "--force", "--name", "Clip"]).code == 0
+    check runCliIn(work, ["node", "add", "clip", "--file", "clip.eproj", "--name", "cl"]).code == 0
+    check runCliIn(work, ["import", "src2.wav", "clip.eproj", "--track", "0"]).code == 0
+    let rendered = runCliIn(work, ["render", "clip.eproj", "clip.wav", "--seconds", "2"])
+    check rendered.code == 0
+
+    let srcPeak = parseJson(runCliIn(work,
+      ["--json", "analyze", "src2.wav"]).output)["metrics"]["peak"].getFloat
+    let outPeak = parseJson(runCliIn(work,
+      ["--json", "analyze", "clip.wav"]).output)["metrics"]["peak"].getFloat
+    check srcPeak > 0.001               # источник звучит
+    # Воспроизведение в пределах квантования 16-бит: пик совпадает почти точно.
+    let delta = if srcPeak > outPeak: srcPeak - outPeak else: outPeak - srcPeak
+    check delta < 0.002
+
 
 
 # =============================================================================

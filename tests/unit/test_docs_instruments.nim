@@ -64,10 +64,10 @@ suite "документация нод не отстаёт от реестра (
           missing.add id & "." & pname
     check missing.len == 0
 
-  test "в реестре 28 типов: 10 DSP, 17 инструментов, notes":
+  test "в реестре 29 типов: 10 DSP, 17 инструментов, notes, clip":
     var reg = initNodeRegistry()
     discard registerBuiltinNodes(reg)
-    check reg.count() == 28
+    check reg.count() == 29
 
   test "README называет все инструменты, а не шесть":
     # Ровно та ошибка, ради которой тест и написан: в строке «Статус»
