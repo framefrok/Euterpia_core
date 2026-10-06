@@ -216,6 +216,9 @@ suite "project: ошибки":
     check p.metadata.timeSignature.numerator == 4
     check p.metadata.timeSignature.denominator == 4
     check p.pluginStates.len == 0
+    # v1 → v2: секции `resources` в старом файле нет, но она не обязательна —
+    # миграция не нужна, поле просто пустое (issue #107).
+    check p.resources.len == 0
 
   test "отсутствующий timeSignature внутри metadata -> 4/4 по умолчанию":
     # Именно этот fallback опирается на safeInt(..., "numerator", 4).
@@ -230,6 +233,39 @@ suite "project: ошибки":
     check r.value.metadata.tempo == 100.0f
     check r.value.metadata.timeSignature.numerator == 4
     check r.value.metadata.timeSignature.denominator == 4
+
+  test "аудиоресурсы и audio-клип переживают round-trip (v2, #107)":
+    var p = ProjectFormat(format: ProjectFormatName, version: ProjectFormatVersion)
+    p.resources.add AudioResourceFormat(
+      id: 1, path: "kick.wav", sampleRate: 48000, channels: 2,
+      numFrames: 96000, bitsPerSample: 24, isFloat: false, copy: true)
+    # Трек с audio-клипом, ссылающимся на ресурс #1.
+    var track = TrackFormat(id: 1, name: "Drums", trackType: 1, volume: 1.0f)
+    track.clips.add ClipFormat(
+      id: 1, clipType: 1, name: "kick", startTick: 0, lengthTicks: 3840,
+      resourceId: 1, offsetFrames: 0, color: 0xFFu32)
+    p.sequencer.tracks.add track
+
+    let path = getTempDir() / "euterpia_resources.json"
+    defer: removeFile(path)
+    check saveProject(p, path).success
+    let r = loadProject(path)
+    check r.success
+    check r.value.version == ProjectFormatVersion
+    check r.value.resources.len == 1
+    let res = r.value.resources[0]
+    check res.id == 1
+    check res.path == "kick.wav"
+    check res.sampleRate == 48000
+    check res.channels == 2
+    check res.numFrames == 96000
+    check res.bitsPerSample == 24
+    check res.copy
+    check r.value.sequencer.tracks.len == 1
+    let clip = r.value.sequencer.tracks[0].clips[0]
+    check clip.resourceId == 1
+    check clip.offsetFrames == 0
+    check clip.clipType == 1
 
   test "запись в недоступный каталог -> pekIOError":
     let r = saveProject(makeProject(), "/nonexistent_dir_9f3/euterpia/x.json")

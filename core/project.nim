@@ -49,7 +49,13 @@ proc err*[T](kind: ProjectErrorKind, msg: string): ProjectResult[T] {.inline.} =
 # ============================================================================
 const
   ProjectFormatName* = "euterpia-project"
-  ProjectFormatVersion* = 1
+  ProjectFormatVersion* = 2
+    ## Текущая версия формата. v2 добавил секцию `resources` — аудио-ресурсы
+    ## (импорт аудио, issue #107): файлы, на которые ссылаются аудиоклипы.
+  ProjectFormatMinVersion* = 1
+    ## Минимальная читаемая версия. v1 (проекты без аудио-ресурсов) читается
+    ## без потери данных: `resources` пуст — миграция не требуется (§58/§59:
+    ## версии не смешиваются, но старый файл открывается, а не отвергается).
 
 type
   TimeSignatureFormat* = object
@@ -100,6 +106,23 @@ type
     velocity*: uint8
     channel*: uint8
 
+  AudioResourceFormat* = object
+    ## Аудио-ресурс проекта (issue #107): ссылка на аудиофайл и его метаданные.
+    ##
+    ## Сам файл (сэмплы) в проекте НЕ хранится: миллионы float в JSON — это
+    ## раздувание и потеря совместимости с внешними редакторами. Формат
+    ## фиксирует ССЫЛОЧНУЮ модель (§58); `copy` отмечает, что файл скопирован
+    ## в каталог проекта (`--copy`) и переживёт перемещение оригинала.
+    id*: int32
+    path*: string
+      ## Путь к файлу: абсолютный или относительный к файлу проекта.
+    sampleRate*: int32
+    channels*: int32
+    numFrames*: int64
+    bitsPerSample*: int32
+    isFloat*: bool
+    copy*: bool
+
   ClipFormat* = object
     id*: int32
     clipType*: int
@@ -109,6 +132,11 @@ type
     loopEnabled*: bool
     notes*: seq[NoteFormat]
     audioBufferId*: int32
+    resourceId*: int32
+      ## Ссылка на `AudioResourceFormat` (audio-клип, issue #107);
+      ## -1 — клип не ссылается на аудиоресурс.
+    offsetFrames*: int64
+      ## Смещение в сэмплах от начала ресурса (audio-клип).
     color*: uint32
 
   TrackFormat* = object
@@ -155,6 +183,9 @@ type
     graph*: GraphFormat
     sequencer*: SequencerFormat
     pluginStates*: seq[PluginStateFormat]
+    resources*: seq[AudioResourceFormat]
+      ## Аудио-ресурсы (issue #107). Ссылочная модель: здесь только пути и
+      ## метаданные, сэмплы хост загружает при открытии/render.
 
 # ============================================================================
 # JSON SERIALIZATION (Exception Safe)
@@ -251,6 +282,8 @@ proc toJson*(p: ProjectFormat): JsonNode =
       clipJson["lengthTicks"] = %clip.lengthTicks
       clipJson["loopEnabled"] = %clip.loopEnabled
       clipJson["audioBufferId"] = %clip.audioBufferId
+      clipJson["resourceId"] = %clip.resourceId
+      clipJson["offsetFrames"] = %clip.offsetFrames
       clipJson["color"] = %int(clip.color)
       
       var notesJson = newJArray()
@@ -291,6 +324,18 @@ proc toJson*(p: ProjectFormat): JsonNode =
     stJson["state"] = bytesJson
     statesJson.add(stJson)
   root["pluginStates"] = statesJson
+
+  # Аудио-ресурсы (issue #107): ссылки на файлы + метаданные. Секция читается
+  # форматом v2; в v1 её нет — тогда `resources` пуст (миграция не нужна).
+  var resourcesJson = newJArray()
+  for res in p.resources:
+    resourcesJson.add(%*{
+      "id": res.id, "path": res.path, "sampleRate": res.sampleRate,
+      "channels": res.channels, "numFrames": res.numFrames,
+      "bitsPerSample": res.bitsPerSample, "isFloat": res.isFloat,
+      "copy": res.copy
+    })
+  root["resources"] = resourcesJson
 
   return root
 
@@ -398,8 +443,10 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
     return err[ProjectFormat](pekInvalidFormat, "Invalid project format. Expected: " & ProjectFormatName)
     
   let ver = safeInt(root, "version")
-  if ver != ProjectFormatVersion:
-    return err[ProjectFormat](pekUnsupportedVersion, "Unsupported project version: " & $ver)
+  if ver < ProjectFormatMinVersion or ver > ProjectFormatVersion:
+    return err[ProjectFormat](pekUnsupportedVersion,
+      "Unsupported project version: " & $ver & " (supported " &
+      $ProjectFormatMinVersion & ".." & $ProjectFormatVersion & ")")
 
   var res: ProjectFormat
   res.format = fmt
@@ -474,6 +521,8 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
               lengthTicks: int32(safeInt(c, "lengthTicks")),
               loopEnabled: safeBool(c, "loopEnabled"),
               audioBufferId: int32(safeInt(c, "audioBufferId", -1)),
+              resourceId: int32(safeInt(c, "resourceId", -1)),
+              offsetFrames: int64(safeInt(c, "offsetFrames", 0)),
               color: uint32(safeInt(c, "color"))
             )
             let notesNode = c{"notes"}
@@ -521,6 +570,20 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
           if b != nil and b.kind == JInt:
             ps.state.add(byte(int(b.num) and 0xFF))
       res.pluginStates.add(ps)
+
+  let resourcesNode = root{"resources"}
+  if resourcesNode != nil and resourcesNode.kind == JArray:
+    for r in resourcesNode:
+      if not isJObject(r): continue
+      res.resources.add(AudioResourceFormat(
+        id: int32(safeInt(r, "id")),
+        path: safeStr(r, "path"),
+        sampleRate: int32(safeInt(r, "sampleRate")),
+        channels: int32(safeInt(r, "channels")),
+        numFrames: int64(safeInt(r, "numFrames")),
+        bitsPerSample: int32(safeInt(r, "bitsPerSample")),
+        isFloat: safeBool(r, "isFloat"),
+        copy: safeBool(r, "copy")))
 
   return ok[ProjectFormat](res)
 

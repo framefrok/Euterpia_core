@@ -173,6 +173,7 @@ proc clientActions*(): seq[ClientAction] =
     ioAction("file.render", "Отрендерить в WAV", "render"),
     ioAction("file.midiExport", "Экспорт в MIDI", "midi"),
     ioAction("file.notationImport", "Импорт партитуры", "notation"),
+    ioAction("file.audioImport", "Импорт аудио", "import"),
     ioAction("file.audioInspect", "Инспектор аудио", "analyze"),
     ioAction("file.stemsExport", "Экспорт стемов и батч-рендер", "",
              issue = 108),

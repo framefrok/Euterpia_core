@@ -274,6 +274,9 @@ DOCUMENT_ACCESS_ALLOWED: dict[str, dict[str, str]] = {
     "cli/cmd_notation.nim": {
         "runNotationImport": "создание дорожки и клипа: путь записи (`notation import`)",
     },
+    "cli/cmd_import.nim": {
+        "runImport": "создание аудиоресурса и audio-клипа: путь записи (`import`, #107)",
+    },
 }
 
 

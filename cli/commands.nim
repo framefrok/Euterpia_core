@@ -22,6 +22,7 @@ import cmd_config
 import cmd_doctor
 import cmd_graph
 import cmd_notation
+import cmd_import
 import cmd_project
 import cmd_render
 import cmd_analyze
@@ -282,6 +283,7 @@ proc setupRegistry*() =
     CommandDef(spec: HistorySpec, run: runHistory),
     CommandDef(spec: RenderSpec, run: runRender),
     CommandDef(spec: NotationSpec, run: runNotation),
+    CommandDef(spec: ImportSpec, run: runImport),
     CommandDef(spec: AnalyzeSpec, run: runAnalyze),
     CommandDef(spec: CompletionSpec, run: runCompletion),
     CommandDef(spec: DoctorSpec, run: runDoctor),

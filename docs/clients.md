@@ -105,6 +105,7 @@ Input → Command → Core → State update → Render
 | `file.render` | рендер в WAV | `io` | — | `render` | целиком |
 | `file.midiExport` | экспорт в MIDI | `io` | — | `midi` | целиком |
 | `file.notationImport` | импорт партитуры | `io` | — | `notation` | целиком |
+| `file.audioImport` | импорт аудио | `io` | — | `import` | целиком |
 | `file.audioInspect` | инспектор аудио | `io` | — | `analyze` | целиком |
 | `file.stemsExport` | стемы и батч-рендер | `io` | — | — | #108 |
 | `view.project` | проект: метаданные и треки | `view` | — | `project` | целиком |
