@@ -17,10 +17,38 @@ import std/[json, os, strutils]
 
 import context
 import config
+import cli_spec
 
 const
   ConfigSubcommands* = @["list", "get", "set", "unset", "path"]
     ## Подкоманды `config` — кандидаты автодополнения второго уровня (#259).
+
+  ConfigSpec* = CommandSpec(
+    name: "config",
+    summary: "настройки окружения: умолчания для команд",
+    synopsis: "config <list|get|set|unset|path>",
+    subcommands: ConfigSubcommands,
+    args: @[
+      arg("ключ", "имя настройки: " & keyNames().join(", ")),
+      arg("значение", "новое значение (`config set`)"),
+    ],
+    example: "euterpia config get sampleRate",
+    fields: @[
+      field("path", "где лежит файл настроек"),
+      field("exists", "файл настроек существует"),
+      field("entries", "все настройки со значениями и источниками (`config list`)"),
+      field("key", "запрошенная настройка (`config get`)"),
+      field("value", "действующее значение"),
+      field("source", "откуда значение: argv, env, file, default или none"),
+      field("changed", "что изменил `config set`/`unset`"),
+    ],
+    notes: @[
+      "приоритет значения: argv > env (EUTERPIA_*) > файл настроек > умолчание CLI",
+      "где файл: `config path`; переопределение пути — EUTERPIA_CONFIG",
+      "ключи: " & keyNames().join(", "),
+      "`config get` печатает источник каждого значения: argv, env, file, default или none",
+      "битый или неверный конфиг — предупреждение в stderr, команда работает на источнике ниже",
+    ])
 
 proc argvOverrides*(ctx: Ctx): seq[ConfigValue] =
   ## Ключи ТЕКУЩЕГО запуска, которые перекрывают настройки: `--json`/`--human`

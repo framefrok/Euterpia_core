@@ -1656,3 +1656,232 @@ suite "CLI: паритет клиентов — действие интерфе�
         continue
       check ("`" & commandName(kind) & "`") in doc
 
+
+# =============================================================================
+# Спецификация команд: один источник для справки, --json, дополнения и docs
+# (#330)
+# =============================================================================
+#
+# Смысл suite: описание команды живёт ДАННЫМИ (`libs/cli_spec`), а справка,
+# машинная схема, кандидаты автодополнения и раздел `docs/cli.md` — его
+# представления. Проверяется не «текст похож», а совпадение источников:
+# испорченная спецификация или правка справки руками роняют тест.
+#
+# Всё проверяется запуском бинаря: тест чёрный, а `cli/` и `libs/` не входят
+# в путь сборки тестов — значит «сверить с кодом» можно только через CLI.
+
+suite "CLI: спецификация команд — один источник (#330)":
+  let specDir = getTempDir() / "euterpia_cli_spec"
+  if dirExists(specDir):
+    removeDir(specDir)
+  createDir(specDir)
+  defer: removeDir(specDir)
+
+  proc commandsJson(): JsonNode =
+    parseJson(runCli(["help", "--json"]).output)["commands"]
+
+  proc commandJson(name: string): JsonNode =
+    for item in commandsJson():
+      if item["name"].getStr == name:
+        return item
+    check false
+
+  proc declaredKeys(name: string): seq[string] =
+    ## Ключи команды так, как их объявила спецификация (машинная справка).
+    for flag in commandJson(name)["flags"]:
+      result.add flag.getStr
+
+  proc globalKeys(): seq[string] =
+    for item in parseJson(runCli(["help", "--json"]).output)["globalFlags"]:
+      for part in item["flag"].getStr.split(','):
+        let key = part.strip()
+        if key.len > 0:
+          result.add key
+
+  test "машинная проверка описаний не находит замечаний":
+    let node = parseJson(runCli(["help", "--json"]).output)
+    check node.hasKey("specProblems")
+    # Пустой список означает, что у каждой команды есть синопсис, пример,
+    # ключи с типами значений и умолчаниями и поля ответа. Непустой список
+    # печатается целиком: по нему видно, что именно не описано.
+    check node["specProblems"].len == 0
+
+  test "каждая команда описана: синопсис, пример, ключи с типами и умолчаниями":
+    for item in commandsJson():
+      let name = item["name"].getStr
+      check item["summary"].getStr.len > 0
+      check item["usage"].getStr.startsWith(name)
+      check item["example"].getStr.startsWith("euterpia " & name)
+      var flags: seq[string] = @[]
+      var optionKeys: seq[string] = @[]
+      for flag in item["flags"]:
+        flags.add flag.getStr
+      for option in item["options"]:
+        check option["summary"].getStr.len > 0
+        optionKeys.add option["flag"].getStr
+        for alias in option["aliases"]:
+          optionKeys.add alias.getStr
+        if option["kind"].getStr == "value":
+          check option["value"].getStr.len > 0
+        else:
+          check option["kind"].getStr == "switch"
+          check option["value"].getStr.len == 0
+          check option["default"].getStr.len == 0
+          check not option["required"].getBool
+      # `flags` (строки) и `options` (данные) — одно и то же множество:
+      # автодополнение и схема не могут рассказывать разное.
+      check flags == optionKeys
+
+  test "каждый объявленный ключ принимается разбором команды":
+    # Ключ из спецификации, которого не знает разбор, — это справка, которая
+    # врёт: человек вводит документированный ключ и получает отказ. Проверка
+    # чёрная: запускаем команду с ОДНИМ ключом и смотрим, что отказ (если он
+    # есть) пришёл по другой причине.
+    for item in commandsJson():
+      let name = item["name"].getStr
+      for key in declaredKeys(name):
+        let r = runCliIn(specDir, @[name, key])
+        check "неизвестный ключ" notin r.errput
+        check "неизвестный ключ" notin r.output
+        check "непонятный аргумент" notin r.errput
+
+  test "автодополнение предлагает ровно объявленные ключи":
+    let globals = globalKeys()
+    for item in commandsJson():
+      let name = item["name"].getStr
+      let candidates = nonEmptyLines(
+        runCliIn(specDir, @["__complete", "--", name, ""]).output)
+      for key in declaredKeys(name):
+        check key in candidates
+      for sub in item["subcommands"]:
+        check sub.getStr in candidates
+      for candidate in candidates:
+        if candidate.startsWith("-"):
+          check (candidate in declaredKeys(name)) or (candidate in globals)
+        elif not item["commandArgs"].getBool:
+          # Единственные кандидаты без дефиса — варианты аргумента; у `help`
+          # это имена команд, поэтому для него проверка не формулируется.
+          var subs: seq[string] = @[]
+          for sub in item["subcommands"]:
+            subs.add sub.getStr
+          check candidate in subs
+
+  test "справка команды и её машинная схема — одно описание":
+    for item in commandsJson():
+      let name = item["name"].getStr
+      let human = runCli(@[name, "--help"])
+      check human.code == 0
+      let machine = parseJson(runCli(["--json", "help", name]).output)
+      check machine["helpFor"].getStr == name
+      check machine["summary"].getStr == item["summary"].getStr
+      check machine["usage"].getStr == "euterpia " & item["usage"].getStr
+      # В человеческой справке названы и ключи, и пример: справка показывает
+      # употребление, а не только синтаксис.
+      for option in item["options"]:
+        check option["flag"].getStr in human.output
+      if item["example"].getStr.len > 0:
+        check item["example"].getStr in human.output
+      if item["options"].len > 0:
+        check "Ключи команды" in human.output
+
+  test "раздел docs/cli.md генерируется из спецификации байт-в-байт":
+    const docPath = "docs/cli.md"
+    check fileExists(docPath)
+    let committed = readFile(docPath)
+    # Пересобираем раздел тем же кодом, что и `nimble cliDocs` (служебная
+    # `__reference --write`), и сравниваем ВЕСЬ документ: расходится любая
+    # строка — расходится генерация, и это ошибка сборки, а не мелочь.
+    let tmp = specDir / "cli.md"
+    writeFile(tmp, committed)
+    check runCli(["__reference", "--write", tmp]).code == 0
+    check readFile(tmp) == committed
+
+    # Свежий раздел непустой (проверка на «документ совпал с пустотой»).
+    let fresh = runCli(["__reference"])
+    check fresh.code == 0
+    for name in machineCommandNames():
+      check ("### `" & name & "`") in fresh.output
+      check ("### `" & name & "`") in committed
+
+  test "__reference не портит документ без маркеров":
+    let tmp = specDir / "no-markers.md"
+    writeFile(tmp, "# без маркеров\n")
+    let r = runCli(["__reference", "--write", tmp])
+    check r.code == 1
+    check readFile(tmp) == "# без маркеров\n"
+    check "маркер" in r.errput
+
+  test "объявленные поля --json приходят в ответе команды":
+    ## Таблица «команда → вызовы»: каждое объявленное поле обязано быть в
+    ## ответе хотя бы одного запуска. Так схема не может разойтись с выводом:
+    ## поле, переименованное в коде, тест увидит, а документация — нет.
+    proc keysOf(args: seq[string]): seq[string] =
+      let r = runCliIn(specDir, @["--json"] & args)
+      # Код НЕ проверяем: отказ (например, `analyze` несуществующего файла)
+      # тоже часть контракта — у отказа свои поля (`error`, `errorCode`).
+      let node = parseJson(r.output)
+      for key in node.keys:
+        result.add key
+
+    # Фикстуры: проект с двумя нодами и связью, нотная нода, партитура, WAV.
+    check runCliIn(specDir, ["init", "spec.eproj", "--force"]).code == 0
+    check runCliIn(specDir, ["node", "add", "osc", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["node", "add", "gain", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["connect", "1:out", "2:in", "spec.eproj"]).code == 0
+    # Ноты звучат только через нотную ноду: партитура без `euterpia.notes` в
+    # графе — честный отказ рендера, а не тишина.
+    check runCliIn(specDir, ["node", "add", "notes", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["connect", "3:event:0", "1:event:0",
+                             "spec.eproj"]).code == 0
+    writeFile(specDir / "spec.notes", "c4/4 d e f\n")
+    check runCliIn(specDir, ["notation", "import", "spec.notes", "--file",
+                             "spec.eproj"]).code == 0
+    let rendered = runCliIn(specDir, ["render", "spec.eproj", "spec.wav",
+                                      "--seconds", "1"])
+    check rendered.code == 0
+
+    let calls: seq[(string, seq[seq[string]])] = @[
+      ("init", @[@["init", "fresh.eproj", "--force"]]),
+      ("project", @[@["project", "show", "spec.eproj"],
+                    @["project", "set", "spec.eproj", "tempo", "100"],
+                    @["project", "validate", "spec.eproj"]]),
+      ("midi", @[@["midi", "spec.eproj", "--out", "spec.mid"]]),
+      ("node", @[@["node", "list", "spec.eproj"], @["node", "types"],
+                 @["node", "show", "1", "spec.eproj"],
+                 @["node", "add", "gain", "spec.eproj"],
+                 @["node", "rm", "4", "spec.eproj"]]),
+      ("connect", @[@["connect", "2:out", "2:in", "spec.eproj"]]),
+      ("disconnect", @[@["disconnect", "2", "2", "spec.eproj"]]),
+      ("param", @[@["param", "list", "1", "spec.eproj"],
+                  @["param", "get", "1", "freq", "spec.eproj"],
+                  @["param", "set", "1", "freq", "330", "spec.eproj"]]),
+      ("graph", @[@["graph", "check", "spec.eproj"]]),
+      ("render", @[@["render", "spec.eproj", "spec2.wav", "--seconds", "1"],
+                   @["render", "spec.eproj", "--seconds", "1", "--dry-run"]]),
+      ("notation", @[@["notation", "check", "spec.notes"],
+                     @["notation", "import", "spec.notes", "--file",
+                       "spec.eproj", "--name", "Second"]]),
+      ("analyze", @[@["analyze", "spec.wav"],
+                    @["analyze", "нет-такого.wav"]]),
+      ("completion", @[@["completion", "bash"]]),
+      ("doctor", @[@["doctor"]]),
+      ("config", @[@["config", "list"], @["config", "path"],
+                   @["config", "get", "sampleRate"],
+                   @["config", "set", "sampleRate", "44100"],
+                   @["config", "unset", "sampleRate"]]),
+      ("help", @[@["help"], @["help", "render"]]),
+      ("version", @[@["version"]]),
+    ]
+
+    for (command, invocations) in calls:
+      var seen: seq[string] = @[]
+      for args in invocations:
+        for key in keysOf(args):
+          if key notin seen:
+            seen.add key
+      for declared in commandJson(command)["fields"]:
+        let name = declared["name"].getStr
+        if name notin seen:
+          checkpoint(command & "." & name & " объявлено, но не пришло; " &
+                     "в ответах есть: " & seen.join(", "))
+        check name in seen

@@ -37,6 +37,23 @@ import audio_backend_miniaudio
 import context
 import checks
 import probe
+import cli_spec
+
+const
+  DoctorSpec* = CommandSpec(
+    name: "doctor",
+    summary: "самодиагностика окружения: устройства, плагины, права",
+    synopsis: "doctor",
+    example: "euterpia doctor",
+    fields: @[
+      field("sections", "секции диагностики: build, audio, midi, plugins, fs, csrc"),
+      field("summary", "сводка ok/warn/fail — она же определяет код возврата"),
+    ],
+    notes: @[
+      "секции: build, audio, midi, plugins, fs, csrc; аудиоустройство при этом не открывается",
+      "код 0, если провалов нет; 2 — если есть: среда, а не данные пользователя",
+      "сводка `ok/warn/fail` совпадает с кодом возврата — и в тексте, и в --json",
+    ])
 
 # =============================================================================
 # SIMD-дисплей C-ядер

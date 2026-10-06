@@ -38,12 +38,9 @@ import project
 import sequencer
 import context
 import cmd_project
+import cli_spec
 
 const
-  NotationKeys* = @["--file", "--track", "--clip", "--name", "--start-tick",
-                    "--time-sig", "--velocity", "--length", "--loop"]
-    ## Ключи `notation` — для справки и автодополнения (#259).
-
   NotationSubcommands* = @["check", "import"]
     ## Подкоманды `notation`: кандидаты автодополнения второго уровня.
 
@@ -64,6 +61,65 @@ const
     ## Потолок нот в клипе — тот же, что в формате проекта (Core).
   NotationHint* = "нотация: `c4/4 d e f g`, аккорд `(c4 e4 g4)/2`, пауза `r/8`, " &
     "velocity `:V`, такт `|`, комментарий `#`"
+
+  NotationSpec* = CommandSpec(
+    name: "notation",
+    summary: "текстовая нотация: проверка файла и импорт в проект",
+    synopsis: "notation <check|import> <файл.notes> [ключи]",
+    subcommands: NotationSubcommands,
+    args: @[
+      arg("файл.notes", "партитура: ноты, аккорды и паузы текстом"),
+    ],
+    options: @[
+      opt("--file", "проект для `import`; без ключа — " & DefaultProjectFile,
+          value = "проект.eproj"),
+      opt("--track", "индекс дорожки с нуля; дорожка создаётся при необходимости",
+          value = "число", default = "0"),
+      opt("--clip", "индекс клипа дорожки с нуля", value = "число"),
+      opt("--name", "имя клипа; без ключа — имя файла партитуры", value = "строка"),
+      opt("--start-tick", "сдвиг партитуры от начала клипа", value = "тики",
+          default = "0"),
+      opt("--time-sig", "размер для проверки тактов", value = "числитель/знаменатель"),
+      opt("--velocity", "velocity нот без `:V`", value = "1..127",
+          default = $DefaultVelocity),
+      opt("--length", "длина клипа в тиках; без ключа — по партитуре, вверх до такта",
+          value = "тики"),
+      opt("--loop", "повтор рисунка клипа внутри его длины", value = "true или false",
+          default = "false"),
+    ],
+    example: "euterpia notation check score.notes",
+    fields: @[
+      field("path", "проверенная или импортированная партитура"),
+      field("notes", "сколько нот разобрано (или импортировано)"),
+      field("endTick", "конец партитуры в тиках"),
+      field("barTicks", "длина такта в тиках — по ней проверяются неполные такты"),
+      field("timeSignature", "размер, по которому шла проверка"),
+      field("velocity", "velocity, которым записаны ноты без `:V`"),
+      field("warnings", "предупреждения разбора (неполный такт, пустой файл)"),
+      field("project", "проект, в который прошёл импорт"),
+      field("track", "индекс дорожки"),
+      field("trackName", "имя дорожки"),
+      field("createdTrack", "дорожка была создана импортом"),
+      field("clip", "индекс клипа"),
+      field("clipName", "имя клипа"),
+      field("createdClip", "клип был создан импортом"),
+      field("lengthTicks", "длина клипа"),
+      field("loop", "клип зациклен"),
+      field("written", "проект записан на диск (при `--dry-run` — false)"),
+    ],
+    notes: @[
+      "notation check — разбор с указанием «строка:колонка»; ошибка разбора даёт код 1",
+      "notation import — партитура становится клипом дорожки проекта; дорожка и клип создаются при необходимости",
+      "файл задаёт клип целиком: повторный импорт той же партитуры даёт тот же проект",
+      "длина клипа округляется вверх до целого такта размера проекта; --length задаёт её явно",
+      "проект у `import` задаётся ключом --file: позиционно команда принимает только партитуру",
+      "ключи check: " & CheckKeys.join(", "),
+      "нотация: " & NotationHint,
+    ])
+
+  NotationKeys* = NotationSpec.optionKeys
+    ## Ключи `notation` — из спецификации: разбор, справка и автодополнение
+    ## читают одно описание (#259, #330).
 
 type
   NotArg = object
