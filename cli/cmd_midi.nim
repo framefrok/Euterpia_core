@@ -1,6 +1,6 @@
 # cli/cmd_midi.nim
 #
-# `euterpia midi <проект.eut>` — проект как Standard MIDI File (issue: экспорт).
+# `euterpia midi <проект.eproj>` — проект как Standard MIDI File (issue: экспорт).
 #
 # Зачем команда: наш проект — это граф и дорожки, а не «миди-секвенция». Чтобы
 # отдать музыку в чужой DAW/нотатор, нужен SMF. Команда делает ровно это и
@@ -67,8 +67,8 @@ proc scanArgs(args: seq[string]): MidiScan =
 
   if result.input.len == 0:
     return MidiScan(ok: false,
-      rep: usageError("нужен файл проекта: euterpia midi <проект.eut>",
-                      "пример: euterpia midi ensemble.eut --out ensemble.mid"))
+      rep: usageError("нужен файл проекта: euterpia midi <проект.eproj>",
+                      "пример: euterpia midi ensemble.eproj --out ensemble.mid"))
   result.ok = true
 
 # ==============================================================================
@@ -88,7 +88,8 @@ proc runMidi*(ctx: var Ctx; args: seq[string]): Report =
       if env: exEnv else: exUsage,
       if env: "io" else: "project",
       "не удалось открыть проект: " & loaded.error.message,
-      "нужен .eut формата euterpia-project (см. `euterpia project info`)")
+      "нужен файл формата euterpia-project (*.eproj; исторический *.eut " &
+        "принимается) — см. `euterpia project show`")
 
   let proj = loaded.value
 

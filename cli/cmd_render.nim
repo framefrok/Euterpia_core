@@ -1,7 +1,7 @@
 # cli/cmd_render.nim
 #
 # `euterpia render` — офлайн-рендер проекта в файл (issue #91, пример
-# MANIFEST §19: `euterpia render project.eut`).
+# MANIFEST §19: `euterpia render project.eproj`).
 #
 # Границы (§20): CLI не компилирует граф и не крутит блоки. Он читает проект
 # (Core), собирает сцену (`builtin/scene_loader` — там знание о нодах и о
@@ -46,9 +46,6 @@ const
     ## Ключи `render` — для справки и автодополнения (#259). `--progress` и
     ## `--no-progress` флаги, а не пары «ключ-значение» (#310).
 
-  ProjectSuffix = ".eut"
-    ## Признак «позиционный аргумент — путь к проекту» (то же правило, что
-    ## у команд графа: расширение из примера MANIFEST §19).
   WavSuffix = ".wav"
     ## Признак «позиционный аргумент — файл вывода».
 
@@ -235,8 +232,10 @@ proc scanArgs(args: seq[string]): RenderScan =
     else:
       # Позиционные аргументы опознаются по расширению — тем же правилом,
       # что у команд графа: «какой из них что» угадывать запрещено (§82).
+      # Расширения проекта читает `isProjectPath` (общий список), а не копия
+      # строки здесь: `.eproj` и историческое `.eut` понимают все команды.
       let lower = token.toLowerAscii()
-      if lower.endsWith(ProjectSuffix):
+      if isProjectPath(token):
         if haveFile or fileFromPositional:
           result.rep = usageError("путь к проекту указан дважды: " &
                                   result.path & " и " & token,
@@ -254,7 +253,7 @@ proc scanArgs(args: seq[string]): RenderScan =
         result.haveOut = true
       else:
         result.rep = usageError("непонятный аргумент: " & token,
-          "ожидается проект (*" & ProjectSuffix & ") и/или файл вывода (*" &
+          "ожидается проект (" & projectSuffixesHint() & ") и/или файл вывода (*" &
           WavSuffix & "); ключи: " & RenderKeys.join(", "))
         return
     inc i
@@ -327,7 +326,7 @@ proc formatText(sampleRate, bits: int): string =
 # =============================================================================
 
 proc runRender*(ctx: var Ctx; args: seq[string]): Report =
-  ## `euterpia render <проект.eut> [выход.wav] [ключи]`.
+  ## `euterpia render <проект.eproj> [выход.wav] [ключи]`.
   let scan = scanArgs(args)
   if not scan.ok:
     return scan.rep

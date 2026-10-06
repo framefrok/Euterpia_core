@@ -13,6 +13,27 @@ CLI обязан быть `machine-readable` и `composable` (MANIFEST §19-§21
 - Проверить машинную справку: `euterpia help --json`.
 - Исходная задача: [#96](https://github.com/framefrok/Euterpia_core/issues/96).
 
+## Файл проекта и его расширение
+
+Файл проекта — `.eproj`: это расширение по умолчанию (`euterpia init` создаёт
+`project.eproj`), и его понимают команды при разборе позиционного аргумента
+(`euterpia render demo.eproj`).
+
+Историческое `.eut` принимается наравне: расширение — **подпись файла, а не
+часть формата**. Тип файла ядро определяет по содержимому (`format` =
+`euterpia-project`, `core/project.nim`), поэтому `mv demo.eut demo.eproj` ничего
+не ломает и миграции не требует (MANIFEST §19/§58/§59). Список расширений один
+на все команды и живёт в `cli/cmd_project.nim` (`ProjectSuffixes`), поэтому
+команды не могут разойтись в том, какой аргумент считается файлом проекта.
+
+Позиционный аргумент с другим расширением файлом проекта не считается:
+`euterpia node list notes.json` — ошибка использования, а не попытка открыть
+`notes.json` как проект.
+
+Примеры-пьесы `compositions/*` намеренно **остаются** с `.eut`: так историческое
+расширение остаётся проверенным живым примером (`compositions/*/build_via_cli.sh`
+передаёт `ensemble_cli.eut` в CLI), а не только обещанием в документации.
+
 ## Грамматика вызова
 
 ```text
@@ -130,8 +151,9 @@ euterpia --version
 euterpia init [файл] [ключи]
 ```
 
-Создаёт `.eut` с метаданными и **пустым** графом. Файл по умолчанию —
-`project.eut`; существующий не затирается без `--force`.
+Создаёт `.eproj` с метаданными и **пустым** графом. Файл по умолчанию —
+`project.eproj` (историческое `.eut` тоже принимается); существующий не
+затирается без `--force`.
 
 - Умолчания: `--tempo 120`, `--sr 48000`, `--ts 4/4`.
 - `--name`/`--author` задают метаданные; без `--name` имя берётся из имени файла.
@@ -151,12 +173,12 @@ euterpia project <show|set|validate> [файл] [аргументы]
   `time-signature`. Пишет атомарно (tmp + rename) и обновляет
   `metadata.modified`.
 - `validate` — отчёт о формате и целостности; провал даёт код 1.
-- Без файла команды работают с `project.eut`.
+- Без файла команды работают с `project.eproj`.
 
 ### `midi` — экспорт проекта в MIDI
 
 ```text
-euterpia midi <проект.eut> [--out файл.mid] [--split каталог]
+euterpia midi <проект.eproj> [--out файл.mid] [--split каталог]
 ```
 
 - Формат 1: дорожка-дирижёр (имя, темп, размер) + по дорожке на непустой трек.
@@ -170,7 +192,7 @@ euterpia midi <проект.eut> [--out файл.mid] [--split каталог]
 ### `node` — ноды графа
 
 ```text
-euterpia node <list|types|add|rm|show> [аргументы] [--file проект.eut]
+euterpia node <list|types|add|rm|show> [аргументы] [--file проект.eproj]
 ```
 
 - Тип ноды — полный id (`euterpia.osc`), короткий (`osc`) или имя (`Oscillator`).
@@ -183,8 +205,8 @@ euterpia node <list|types|add|rm|show> [аргументы] [--file проект
 ### `connect` / `disconnect` — связи
 
 ```text
-euterpia connect <источник> <приёмник> [--file проект.eut]
-euterpia disconnect <источник>[:порт] <приёмник>[:порт] [--file проект.eut]
+euterpia connect <источник> <приёмник> [--file проект.eproj]
+euterpia disconnect <источник>[:порт] <приёмник>[:порт] [--file проект.eproj]
 ```
 
 - Порт: `нода:out` | `нода:in` | `нода:audio:1` | `нода:ctrl:0` | `нода:event:0`.
@@ -196,7 +218,7 @@ euterpia disconnect <источник>[:порт] <приёмник>[:порт] 
 ### `param` — параметры ноды
 
 ```text
-euterpia param <list|get|set> [аргументы] [--file проект.eut]
+euterpia param <list|get|set> [аргументы] [--file проект.eproj]
 ```
 
 - Значение проверяется по диапазону типа: вне диапазона — отказ, а не запись.
@@ -235,7 +257,7 @@ euterpia param get 3 node:3.1/param:1     # тот же параметр по а
 ### `graph` — проверка графа
 
 ```text
-euterpia graph check [--file проект.eut]
+euterpia graph check [--file проект.eproj]
 ```
 
 - Проверяет структуру (типы, порты, связи, значения параметров) **и**
@@ -246,7 +268,7 @@ euterpia graph check [--file проект.eut]
 ### `render` — офлайн-рендер в WAV
 
 ```text
-euterpia render [проект.eut] [выход.wav] [ключи]
+euterpia render [проект.eproj] [выход.wav] [ключи]
 ```
 
 - Вывод — WAV (PCM 16 или 24 бита, стерео). MP3/OGG требуют кодировщика
@@ -348,16 +370,16 @@ euterpia version
 ### Создать проект, собрать граф и отрендерить (§19)
 
 ```bash
-euterpia init song.eut --name "Demo" --tempo 100
+euterpia init song.eproj --name "Demo" --tempo 100
 
-euterpia node add oscillator --file song.eut --name osc
-euterpia param set osc freq 220 --file song.eut
-euterpia node add gain --file song.eut --name out
-euterpia connect osc:out out:in --file song.eut
-euterpia param set out level 0.5 --file song.eut
+euterpia node add oscillator --file song.eproj --name osc
+euterpia param set osc freq 220 --file song.eproj
+euterpia node add gain --file song.eproj --name out
+euterpia connect osc:out out:in --file song.eproj
+euterpia param set out level 0.5 --file song.eproj
 
-euterpia graph check --file song.eut          # компиляция через Core
-euterpia render song.eut out.wav --seconds 3  # офлайн-рендер, без устройства
+euterpia graph check --file song.eproj          # компиляция через Core
+euterpia render song.eproj out.wav --seconds 3 # офлайн-рендер, без устройства
 euterpia analyze out.wav --fail-on error      # инспектор для CI
 ```
 
@@ -371,8 +393,8 @@ c4/4 d e f | g/2 r/2
 EOF
 
 euterpia notation check motif.notes
-euterpia notation import motif.notes --file song.eut --track "Lead"
-euterpia midi song.eut --out song.mid
+euterpia notation import motif.notes --file song.eproj --track "Lead"
+euterpia midi song.eproj --out song.mid
 ```
 
 ### Проверить окружение перед живым запуском

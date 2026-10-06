@@ -14,9 +14,10 @@
 # печатает результат. Проверка «граф соберётся» живёт в SDK, потому что
 # Core не знает список нод (§54), а CLI не имеет права знать компилятор.
 #
-# Файл проекта: `--file <путь>` или первый аргумент, оканчивающийся на
-# `.eut` (умолчание — `project.eut`). Правило одно для всех команд графа,
-# поэтому «какой файл правится» не зависит от команды.
+# Файл проекта: `--file <путь>` или первый позиционный аргумент с расширением
+# проекта (`.eproj` основное, `.eut` историческое — `ProjectSuffixes` из
+# `cmd_project`; умолчание — `project.eproj`). Правило одно для всех команд
+# графа, поэтому «какой файл правится» не зависит от команды.
 #
 # Безопасность записи — как у `project set` (#89): чтение и проверка формата
 # ДО правки, атомарная запись, `--dry-run` не касается диска.
@@ -43,11 +44,6 @@ const
   NodeSubcommands* = @["list", "types", "add", "rm", "show"]
   ParamSubcommands* = @["list", "get", "set"]
   GraphSubcommands* = @["check"]
-
-  ProjectSuffix = ".eut"
-    ## Признак «позиционный аргумент — путь к проекту». Расширение взято из
-    ## `euterpia render project.eut` (MANIFEST §19): это тот же признак, по
-    ## которому проект узнаёт пользователь.
 
 # =============================================================================
 # Разбор аргументов
@@ -132,14 +128,15 @@ proc scanArgs(args: seq[string]; what: string): ArgScan =
       result.positionals.add token
     inc i
 
-  # Путь к проекту можно указать и позиционным аргументом: `node list demo.eut`
-  # и `node add svf other.eut` читаются так же, как `project show demo.eut`.
+  # Путь к проекту можно указать и позиционным аргументом: `node list demo.eproj`
+  # и `node add svf other.eut` читаются так же, как `project show demo.eproj`.
   # Правило детерминированное: файлом считается позиционный аргумент с
-  # расширением `.eut`; два таких аргумента или пара с `--file` — ошибка,
-  # потому что «какой из них правим» угадывать запрещено (§82).
+  # расширением проекта (`isProjectPath` — один список на все команды); два
+  # таких аргумента или пара с `--file` — ошибка, потому что «какой из них
+  # правим» угадывать запрещено (§82).
   var filePositions: seq[int] = @[]
   for i in 0 ..< result.positionals.len:
-    if result.positionals[i].toLowerAscii().endsWith(ProjectSuffix):
+    if isProjectPath(result.positionals[i]):
       filePositions.add i
   if filePositions.len > 1:
     var names: seq[string] = @[]
@@ -1299,7 +1296,7 @@ proc runGraphCheck(ctx: var Ctx; scan: ArgScan): Report =
 # =============================================================================
 
 proc runNode*(ctx: var Ctx; args: seq[string]): Report =
-  ## `euterpia node <list|types|add|rm|show> [аргументы] [--file проект.eut]`.
+  ## `euterpia node <list|types|add|rm|show> [аргументы] [--file проект.eproj]`.
   if args.len == 0:
     return usageError("node требует подкоманду",
                       "подкоманды: " & NodeSubcommands.join(", "))

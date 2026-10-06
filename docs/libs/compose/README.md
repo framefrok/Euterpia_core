@@ -1,7 +1,7 @@
 # libs/compose — как писать музыку кодом
 
 `libs/compose` — наша библиотека «композиция как код» (#285, #300). Ею пьеса
-описывается на Nim, а на выход идут партитуры (`.notes`), проект (`.eut`) и
+описывается на Nim, а на выход идут партитуры (`.notes`), проект (`.eproj`) и
 звук (`.wav`) — без Editor и без внешних скриптов.
 
 Документация разбита на две части:
@@ -28,9 +28,9 @@ p.add bar(90, n(60, 1), n(62, 1), n(64, 1), n(65, 1))
 p.add bar(90, n(67, 2), n(65, 2))
 arr.add(piano, p)
 
-arr.writeNotes(here)                       # *.notes (человекочитаемо)
-arr.writeProject(here / "song.eut")        # проект
-discard arr.render(here / "song.wav")      # звук
+arr.writeNotes(here)                        # *.notes (человекочитаемо)
+arr.writeProject(here / "song.eproj")       # проект
+discard arr.render(here / "song.wav")       # звук
 ```
 
 **Прогресс рендера.** Часовая пьеса считается за пару минут, и без
@@ -71,7 +71,7 @@ nim c -r --nimcache:build/nc_my_song --out:build/my_song my_song.nim
 | модуль | что делает |
 |---|---|
 | `compose/score` | музыкальная модель: события, такты, мотивы; вывод в нотацию и в ноты проекта |
-| `compose/song` | высокая раскладка: «инструмент + партия», сумматор, запись `.eut`/`.notes` |
+| `compose/song` | высокая раскладка: «инструмент + партия», сумматор, запись `.eproj`/`.notes` |
 | `compose/engine` | рендер проекта в WAV (`loadScene` + `renderToWav`) |
 | `compose/builder` | низкоуровневая сборка **произвольного** графа (нестандартные проекты) |
 | `compose/progress` | индикатор прогресса рендера для stderr (тот же, что в CLI) |
@@ -221,7 +221,7 @@ b.connect(echo, 0, mix, 0, pkAudio)      # delay → сумматор
 var p = part("lead")
 p.add bar(100, n(69, 1), n(72, 1), n(76, 2))
 b.addTrack("lead", p)
-b.writeProject("fx.eut")
+b.writeProject("fx.eproj")
 ```
 
 Виды портов: `pkAudio`, `pkCtrl`, `pkEvent` (порядок совпадает с `SignalType`).
@@ -293,7 +293,7 @@ routine: 'render'». Один импорт решает: `import compose/compose
 ## MIDI: проект в файл
 
 Пьесу можно отдать наружу — в DAW, нотатор или секвенсор: `libs/compose/midi`
-превращает раскладку в Standard MIDI File тем же путём, что и `.eut`
+превращает раскладку в Standard MIDI File тем же путём, что и `.eproj`
 (через `buildProject`), поэтому MIDI и проект описывают **одну и ту же**
 музыку.
 
@@ -314,9 +314,9 @@ discard arr.writeMidiTracks(here / "midi")       # по файлу на инст
 Из CLI то же самое, но для любого готового проекта:
 
 ```bash
-euterpia midi ensemble.eut                            # рядом появится ensemble.mid
-euterpia midi ensemble.eut --out build/song.mid       # один файл
-euterpia midi ensemble.eut --split build/midi         # по файлу на инструмент
+euterpia midi ensemble.eproj                          # рядом появится ensemble.mid
+euterpia midi ensemble.eproj --out build/song.mid     # один файл
+euterpia midi ensemble.eproj --split build/midi       # по файлу на инструмент
 ```
 
 Что важно знать про перенос:

@@ -111,7 +111,7 @@ let cliAbsPath = absolutePath(cliPath)
 proc runCliIn(dir: string; args: openArray[string];
               env: seq[(string, string)] = @[]): RunResult =
   ## Запуск CLI с другим рабочим каталогом: команды проекта умеют работать
-  ## с файлом по умолчанию (`project.eut`), и это поведение проверяется
+  ## с файлом по умолчанию (`project.eproj`), и это поведение проверяется
   ## только из каталога, где такого файла нет «под ногами» у теста.
   ## Путь к бинарю абсолютный: относительный сломался бы после смены каталога.
   let process = startProcess(cliAbsPath, workingDir = dir, args = @args,
@@ -250,7 +250,7 @@ suite "CLI: render — индикатор прогресса (#310)":
     # требует явного `--seconds` — ровно как в §19. `--force` потому, что
     # каталог общий на suite.
     createDir(renderDir)
-    check runCliIn(renderDir, ["init", "project.eut", "--force"]).code == 0
+    check runCliIn(renderDir, ["init", "project.eproj", "--force"]).code == 0
     # Нода обязательна: рендер пустого графа честно отказывает («собирать
     # нечего»), и тест проверял бы ошибку вместо прогресса.
     check runCliIn(renderDir, ["node", "add", "osc", "--name", "o"]).code == 0
@@ -460,11 +460,14 @@ suite "CLI: проект — init/show/set/validate (#89)":
     check "Секвенсор: треков 0, клипов 0, нот 0" in human.output
     check "Состояния плагинов: 0" in human.output
 
-  test "без файла команды проекта работают с project.eut (пример MANIFEST §19)":
+  test "без файла команды проекта работают с project.eproj (пример MANIFEST §19)":
     let work = dir / "cwd"
     createDir(work)
     check runCliIn(work, ["init"]).code == 0
-    check fileExists(work / "project.eut")
+    check fileExists(work / "project.eproj")
+    # Умолчание — ровно `.eproj`: рядом не должно появиться «старого» имени,
+    # иначе две команды правили бы разные файлы и это выглядело бы успехом.
+    check not fileExists(work / "project.eut")
 
     # Имя проекта по умолчанию — имя файла: это задокументированное правило,
     # а не догадка (иначе `project show` печатал бы пустое имя).
@@ -913,10 +916,11 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
 
   let work = dir / "cwd"
   createDir(work)
-  # Проект по умолчанию (`project.eut`) — как в примерах MANIFEST §19:
+  # Проект по умолчанию (`project.eproj`) — как в примерах MANIFEST §19:
   # команды графа без `--file` правят именно его. Отдельный тест проверяет,
-  # что явный путь (`--file` и аргумент с `.eut`) выбирает другой файл.
-  let project = work / "project.eut"
+  # что явный путь (`--file` и аргумент с расширением `.eproj`/`.eut`)
+  # выбирает другой файл.
+  let project = work / "project.eproj"
 
   test "node add: порты, задержка и умолчания берутся из типа ноды":
     check runCliIn(work, ["init", "--name", "Graph"]).code == 0
@@ -928,7 +932,7 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
 
     check runCliIn(work, ["node", "add", "gain"]).code == 0
     let machine = parseJson(runCliIn(work,
-      ["--json", "node", "list", "project.eut"]).output)
+      ["--json", "node", "list", "project.eproj"]).output)
     check machine["ok"].getBool
     check machine["command"].getStr == "node"
     check machine["summary"]["nodes"].getInt == 2
@@ -949,7 +953,7 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
     check onDisk["graph"]["nodes"][0]["parameters"]["freq"].getFloat == 440.0
 
   test "node add: неизвестный тип — код 1 и список доступных типов":
-    let r = runCliIn(work, ["node", "add", "reverb", "--file", "project.eut"])
+    let r = runCliIn(work, ["node", "add", "reverb", "--file", "project.eproj"])
     check r.code == 1
     check "reverb" in r.errput
     check "euterpia.osc" in r.errput
@@ -983,13 +987,13 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
     check onDisk["graph"]["connections"][0]["dstNodeId"].getInt == 2
     check onDisk["graph"]["connections"][0]["sigType"].getInt == 0
 
-    let checked = runCliIn(work, ["graph", "check", "project.eut"])
+    let checked = runCliIn(work, ["graph", "check", "project.eproj"])
     check checked.code == 0
     check "граф компилируется: шагов 2" in checked.output
     check "провалов: 0" in checked.output
 
     let machine = parseJson(runCliIn(work,
-      ["--json", "graph", "check", "project.eut"]).output)
+      ["--json", "graph", "check", "project.eproj"]).output)
     check machine["ok"].getBool
     check machine["compile"]["verdict"].getStr == "compiles"
     check machine["compile"]["steps"].getInt == 2
@@ -1051,7 +1055,7 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
 
   test "--dry-run показывает правку и не пишет файл":
     let before = readFile(project)
-    let r = runCliIn(work, ["--dry-run", "node", "add", "noise", "--file", "project.eut"])
+    let r = runCliIn(work, ["--dry-run", "node", "add", "noise", "--file", "project.eproj"])
     check r.code == 0
     check "добавлена нода #3 Noise (euterpia.noise)" in r.output
     check "не записан" in r.output
@@ -1059,13 +1063,13 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
 
   test "graph check: цикл — провал с вердиктом, а не молчаливый успех":
     check runCliIn(work, ["connect", "gain:out", "gain:in"]).code == 0
-    let r = runCliIn(work, ["graph", "check", "project.eut"])
+    let r = runCliIn(work, ["graph", "check", "project.eproj"])
     check r.code == 1
     check "в графе цикл" in r.output
     check "провалов: 1" in r.output
 
     let machine = parseJson(runCliIn(work,
-      ["--json", "graph", "check", "project.eut"]).output)
+      ["--json", "graph", "check", "project.eproj"]).output)
     check not machine["ok"].getBool
     check machine["exitCode"].getInt == 1
     check machine["compile"]["verdict"].getStr == "cycle"
@@ -1077,7 +1081,7 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
     let off = runCliIn(work, ["disconnect", "gain", "gain"])
     check off.code == 0
     check "снято связей: 1" in off.output
-    check runCliIn(work, ["graph", "check", "project.eut"]).code == 0
+    check runCliIn(work, ["graph", "check", "project.eproj"]).code == 0
 
   test "disconnect: нет такой связи — ошибка, а не тихий успех":
     let r = runCliIn(work, ["disconnect", "2", "1"])
@@ -1100,27 +1104,27 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
     check onDisk["graph"]["connections"].len == 0
 
     # Проверка проекта из #89 видит ту же картину, что и проверка графа.
-    let validated = runCliIn(work, ["project", "validate", "project.eut"])
+    let validated = runCliIn(work, ["project", "validate", "project.eproj"])
     check validated.code == 0
     check "graph: ноды и связи" in validated.output
-    check runCliIn(work, ["graph", "check", "project.eut"]).code == 0
+    check runCliIn(work, ["graph", "check", "project.eproj"]).code == 0
 
   test "пустой граф: предупреждение, но не провал (код 0)":
-    check runCliIn(work, ["init", "empty.eut"]).code == 0
-    let r = runCliIn(work, ["graph", "check", "empty.eut"])
+    check runCliIn(work, ["init", "empty.eproj"]).code == 0
+    let r = runCliIn(work, ["graph", "check", "empty.eproj"])
     check r.code == 0
     check "[warn] в графе есть ноды" in r.output
     check "добавьте ноду: euterpia node add oscillator" in r.output
     check "провалов: 0" in r.output
     check "предупреждений: 1" in r.output
 
-  test "выбор файла: --file и аргумент с .eut указывают на один проект":
-    check runCliIn(work, ["init", "other.eut", "--name", "Other"]).code == 0
-    check runCliIn(work, ["node", "add", "svf", "other.eut"]).code == 0
-    check runCliIn(work, ["node", "add", "delay", "--file", "other.eut"]).code == 0
+  test "выбор файла: --file и аргумент с .eproj указывают на один проект":
+    check runCliIn(work, ["init", "other.eproj", "--name", "Other"]).code == 0
+    check runCliIn(work, ["node", "add", "svf", "other.eproj"]).code == 0
+    check runCliIn(work, ["node", "add", "delay", "--file", "other.eproj"]).code == 0
 
-    # Правки ушли в other.eut, а проект по умолчанию не тронут.
-    check parseJson(readFile(work / "other.eut"))["graph"]["nodes"].len == 2
+    # Правки ушли в other.eproj, а проект по умолчанию не тронут.
+    check parseJson(readFile(work / "other.eproj"))["graph"]["nodes"].len == 2
     check parseJson(readFile(project))["graph"]["nodes"].len == 1
 
     # Первый позиционный аргумент, начинающийся с ключа, файлом не считается.
@@ -1129,8 +1133,8 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
     check "--file" in wrong.errput
 
   test "вывод детерминирован: два запуска совпадают побайтово":
-    let first = runCliIn(work, ["node", "list", "project.eut"]).output
-    let second = runCliIn(work, ["node", "list", "project.eut"]).output
+    let first = runCliIn(work, ["node", "list", "project.eproj"]).output
+    let second = runCliIn(work, ["node", "list", "project.eproj"]).output
     check first == second
 
   test "справка и автодополнение знают новые команды":
@@ -1146,6 +1150,120 @@ suite "CLI: граф — node/connect/param/graph check (#90)":
     let candidates = runCli(["__complete", "--", "n"])
     check candidates.code == 0
     check "node" in candidates.output
+
+
+# =============================================================================
+# Расширение файла проекта: .eproj основное, .eut историческое (#370)
+# =============================================================================
+#
+# Расширение — подпись файла, а не часть формата: тип файла ядро определяет
+# по содержимому (`ProjectFormatName` внутри JSON, §58). Поэтому проверяем не
+# «какое имя записано в умолчании», а два свойства: (1) `.eproj` работает как
+# обычный путь; (2) `.eut` продолжает работать, а переименование файла ничего
+# не ломает и не требует миграции (§59).
+
+suite "CLI: расширение проекта — .eproj и историческое .eut (#370)":
+  let dir = getTempDir() / "euterpia_cli_ext"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  test "умолчание — project.eproj; рядом не появляется project.eut":
+    let work = dir / "default"
+    createDir(work)
+    check runCliIn(work, ["init"]).code == 0
+    check fileExists(work / "project.eproj")
+    # Старое имя не создаётся: иначе две команды правили бы разные файлы,
+    # и это выглядело бы как успех (#82).
+    check not fileExists(work / "project.eut")
+
+  test "переименование .eut в .eproj не меняет ни байта и не требует миграции":
+    let work = dir / "rename"
+    createDir(work)
+    check runCliIn(work, ["init", "demo.eut", "--name", "Demo"]).code == 0
+    check runCliIn(work, ["node", "add", "osc", "demo.eut"]).code == 0
+    check runCliIn(work, ["node", "add", "gain", "demo.eut"]).code == 0
+    check runCliIn(work, ["connect", "osc:out", "gain:in", "demo.eut"]).code == 0
+    let before = readFile(work / "demo.eut")
+
+    moveFile(work / "demo.eut", work / "demo.eproj")
+
+    # Тело файла то же: расширение не участвует в формате, поэтому миграции нет.
+    check readFile(work / "demo.eproj") == before
+    check parseJson(before)["format"].getStr == ProjectFormatName
+
+    # Команды, опознающие проект по позиционному аргументу, видят его как раньше.
+    let listed = runCliIn(work, ["node", "list", "demo.eproj"])
+    check listed.code == 0
+    check "файл: demo.eproj" in listed.output
+    check "euterpia.osc" in listed.output
+    check runCliIn(work, ["graph", "check", "demo.eproj"]).code == 0
+    check runCliIn(work, ["param", "set", "1", "freq", "330", "demo.eproj"]).code == 0
+    check runCliIn(work, ["project", "validate", "demo.eproj"]).code == 0
+    check parseJson(readFile(work / "demo.eproj"))["graph"]["nodes"][0]["parameters"]["freq"].getFloat == 330.0
+
+  test "render и midi принимают .eproj позиционно, а .eut — как историческое имя":
+    let work = dir / "tools"
+    createDir(work)
+    check runCliIn(work, ["init", "song.eproj", "--name", "Song"]).code == 0
+    check runCliIn(work, ["node", "add", "osc", "song.eproj"]).code == 0
+
+    let rendered = runCliIn(work, ["render", "song.eproj", "song.wav",
+                                   "--seconds", "1"])
+    check rendered.code == 0
+    check "файл: song.eproj" in rendered.output
+    check fileExists(work / "song.wav")
+
+    let midi = runCliIn(work, ["midi", "song.eproj", "--out", work / "song.mid"])
+    check midi.code == 0
+    check fileExists(work / "song.mid")
+
+    # Тот же проект под историческим именем: если бы `.eut` не считался
+    # расширением проекта, render отверг бы аргумент как «непонятный».
+    copyFile(work / "song.eproj", work / "legacy.eut")
+    let legacy = runCliIn(work, ["render", "legacy.eut", "legacy.wav",
+                                 "--seconds", "1"])
+    check legacy.code == 0
+    check "файл: legacy.eut" in legacy.output
+    check fileExists(work / "legacy.wav")
+
+  test "постороннее расширение проектом не считается, подсказка называет оба":
+    let work = dir / "foreign"
+    createDir(work)
+    let r = runCliIn(work, ["render", "notes.json", "out.wav", "--seconds", "1"])
+    check r.code == 1
+    check "notes.json" in r.errput
+    check "*.eproj или *.eut" in r.errput
+    check not fileExists(work / "out.wav")
+
+  test "два файла проекта в одной команде — ошибка, а не догадка (#82)":
+    let work = dir / "two"
+    createDir(work)
+    check runCliIn(work, ["init", "a.eproj"]).code == 0
+    check runCliIn(work, ["init", "b.eut"]).code == 0
+
+    let both = runCliIn(work, ["node", "list", "a.eproj", "b.eut"])
+    check both.code == 1
+    check "несколько файлов проекта" in both.errput
+
+    let twice = runCliIn(work, ["node", "list", "a.eproj", "--file", "b.eut"])
+    check twice.code == 1
+    check "файл проекта указан дважды" in twice.errput
+
+  test "справка называет .eproj основным, а .eut — историческим":
+    let initHelp = runCli(["help", "init"])
+    check initHelp.code == 0
+    check "project.eproj" in initHelp.output
+    check "историческое" in initHelp.output
+
+    check "render [проект.eproj]" in runCli(["help", "render"]).output
+
+    let nodeHelp = runCli(["help", "node"])
+    check "--file проект.eproj" in nodeHelp.output
+    check "историческое .eut" in nodeHelp.output
+
+    check "midi <проект.eproj>" in runCli(["help", "midi"]).output
 
 
 # =============================================================================

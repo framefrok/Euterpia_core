@@ -52,9 +52,9 @@ euterpia analyze out.wav --snippets /tmp/snips --heatmap spec.pgm
 в DAW, нотатор или секвенсор:
 
 ```bash
-euterpia midi ensemble.eut                        # один файл: ensemble.mid
-euterpia midi ensemble.eut --out build/song.mid   # один файл, свой путь
-euterpia midi ensemble.eut --split build/midi     # по файлу на инструмент
+euterpia midi ensemble.eproj                        # один файл: ensemble.mid
+euterpia midi ensemble.eproj --out build/song.mid   # один файл, свой путь
+euterpia midi ensemble.eproj --split build/midi     # по файлу на инструмент
 ```
 
 Один файл — формат 1: дорожка-«дирижёр» (имя, темп, размер) плюс по дорожке на
@@ -76,7 +76,7 @@ CLI**: `compositions/neo-romantic` (#275, ~2:48) и `compositions/dark-fantasy`
 ## Композиция как код (`libs/`)
 
 Пьесы описаны **на Nim** через библиотеку `libs/compose` (#285): форма, мотивы
-и приёмы развития (транспозиция, увеличение) — типы языка, а проект (`.eut`)
+и приёмы развития (транспозиция, увеличение) — типы языка, а проект (`.eproj`)
 собирается тем же кодом, что читает ядро (`core/project`), с параметрами из
 описателей нод. Это исключает расхождение форматов и внешние зависимости.
 
@@ -559,15 +559,17 @@ realtime-дисциплина и сборка. Milestone закрыт целик
 ### Команды проекта (#89)
 
 ```bash
-euterpia init demo.eut --tempo 140 --ts 3/4 --name Demo   # создать проект
-euterpia project show demo.eut                            # что лежит в файле
-euterpia project set demo.eut tempo 100                   # изменить одно поле
-euterpia project validate demo.eut                        # проверить целостность
-euterpia --json project show demo.eut                     # то же машинночитаемо
+euterpia init demo.eproj --tempo 140 --ts 3/4 --name Demo   # создать проект
+euterpia project show demo.eproj                            # что лежит в файле
+euterpia project set demo.eproj tempo 100                   # изменить одно поле
+euterpia project validate demo.eproj                        # проверить целостность
+euterpia --json project show demo.eproj                     # то же машинночитаемо
 ```
 
-Файл по умолчанию — `project.eut`, поэтому `euterpia init` и
-`euterpia project set tempo 140` работают как в примере MANIFEST §19.
+Файл по умолчанию — `project.eproj` (историческое `.eut` принимается: расширение
+— подпись файла, а формат определяется по содержимому, MANIFEST §19/§58), поэтому
+`euterpia init` и `euterpia project set tempo 140` работают как в примере
+MANIFEST §19.
 `project set` пишет атомарно (временный файл + rename), не перезаписывает
 повреждённый проект без разбора и печатает diff «было → стало»; `init` не
 затирает существующий файл без `--force`. Полный справочник команд, JSON-схемы
@@ -586,9 +588,10 @@ euterpia --json node list                          # та же картина м
 ```
 
 Файл проекта задаётся `--file <путь>` или позиционным аргументом с расширением
-`.eut`; без них правится `project.eut` — примеры MANIFEST §19 работают как
-написаны. Ноду можно назвать id, именем или коротким id типа (`osc`) — но
-только если нода такого типа в графе одна; иначе CLI требует id, а не угадывает.
+проекта (`.eproj`; историческое `.eut` тоже принимается, `cli/cmd_project.nim` —
+`ProjectSuffixes`); без них правится `project.eproj` — примеры MANIFEST §19
+работают как написаны. Ноду можно назвать id, именем или коротким id типа (`osc`) —
+но только если нода такого типа в графе одна; иначе CLI требует id, а не угадывает.
 `connect` понимает `нода:out`/`нода:in` и явные формы `нода:audio:1`,
 `нода:ctrl:0`, `нода:event:0`; виды портов обязаны совпадать, а самосоединение
 разрешено — компилируемость решает `graph check`, а не догадка CLI.
