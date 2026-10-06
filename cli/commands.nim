@@ -130,6 +130,17 @@ proc runVersion*(ctx: var Ctx; args: seq[string]): Report =
 # help
 # =============================================================================
 
+proc referenceErrorRules*(): seq[ErrorRule] =
+  ## Таблица «причина → код возврата» в виде, который понимает `cli_spec`:
+  ## из неё строится раздел `docs/cli.md` и машинное поле `errorReasons`
+  ## (`help --json`). Источник один — `cli/exit_codes.nim` (#332).
+  for rule in ExitRules:
+    result.add ErrorRule(
+      name: $rule.code,
+      number: frameCodeValue(rule.code),
+      exit: ord(rule.exit),
+      meaning: rule.meaning)
+
 proc helpReport*(cmds: seq[CommandDef]; requested: string): Report =
   ## Справка по одной команде или общая. Оба вида строятся из спецификаций,
   ## поэтому `--help` и `help --json` не могут разойтись (#96, #330).
@@ -149,6 +160,15 @@ proc helpReport*(cmds: seq[CommandDef]; requested: string): Report =
   # каждой команды есть синопсис, ключи с типами и умолчаниями, пример и поля
   # ответа. Испорченная спецификация видна здесь, а не у пользователя.
   body["specProblems"] = %validateSpecs(specsOf(cmds))
+  # Таблица «причина → код возврата» (#332): агент читает её машинно, а тест
+  # сверяет с документацией и с реальными отказами команд. `exitCodeProblems`
+  # — проверка самой таблицы: причина без кода возврата роняет CI.
+  var reasons = newJArray()
+  for rule in referenceErrorRules():
+    reasons.add %*{"name": rule.name, "number": rule.number,
+                   "exit": rule.exit, "meaning": rule.meaning}
+  body["errorReasons"] = reasons
+  body["exitCodeProblems"] = %exitRulesProblems()
   okReport(body = body, lines = helpLines(cmds))
 
 proc runHelp*(ctx: var Ctx; args: seq[string]): Report =
@@ -200,7 +220,8 @@ proc runReference*(ctx: var Ctx; args: seq[string]): Report =
   ## маркерами в документе — этим пользуется задача `nimble cliDocs`, а тест
   ## сверяет раздел в репозитории с этим же текстом байт-в-байт (#330).
   discard ctx
-  let reference = markdownReference(specsOf(allCommands()), CliName)
+  let reference = markdownReference(specsOf(allCommands()), CliName,
+                                  referenceErrorRules())
 
   var writePath = ""
   var i = 0

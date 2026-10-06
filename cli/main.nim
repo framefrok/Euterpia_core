@@ -190,7 +190,7 @@ proc main*(): int =
     loadSettings(ctx)
     return dispatch(ctx)
   except CatchableError as e:
-    let rep = errReport(exPanic, "panic", "внутренняя ошибка CLI: " & e.msg,
-                        "это баг: приложите вывод `euterpia --version` и команду")
+    let rep = panicError("внутренняя ошибка CLI: " & e.msg,
+                         "это баг: приложите вывод `euterpia --version` и команду")
     emit(ctx, rep)
     ord(rep.code)

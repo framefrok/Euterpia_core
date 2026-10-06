@@ -2056,3 +2056,120 @@ suite "CLI: чтение через Query API (#336)":
     check human.code == 0
     check ("документ: " & summary.document) in human.output
     check ("[node:1.1]") in human.output
+
+# =============================================================================
+# Единые коды ошибок: причина → код возврата (#332)
+# =============================================================================
+#
+# Контракт отказа: `--json` несёт класс (`error.kind`), причину числом
+# (`errorCode`) и код возврата (`exitCode`), а таблица «причина → код»
+# публикуется машинно (`help --json`, поле `errorReasons`) и в справочнике.
+#
+# Suite проверяет ТРИ свойства, и ни одно из них не «текст похож»:
+#   1. таблица полна: у каждой причины ядра есть строка (искусственно
+#      добавленная причина роняет тест, а не проходит молча);
+#   2. отказ каждой команды совпадает с таблицей: причина и код возврата —
+#      те же, что обещаны агенту;
+#   3. таблица в `docs/cli.md` — та же, что в `help --json`.
+
+suite "CLI: единые коды ошибок (#332)":
+  let dir = getTempDir() / "euterpia_cli_exit_codes"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  proc helpJson(): JsonNode =
+    parseJson(runCli(["help", "--json"]).output)
+
+  proc exitOf(reason: string): int =
+    ## Код возврата, обещанный таблицей для причины. Пустая строка — причины
+    ## в таблице нет, и это ошибка теста, а не «ноль по умолчанию».
+    for item in helpJson()["errorReasons"]:
+      if item["name"].getStr == reason:
+        return item["exit"].getInt
+    -1
+
+  test "таблица причин полна, без повторов и в контракте кодов":
+    let node = helpJson()
+    check node.hasKey("exitCodeProblems")
+    check node["exitCodeProblems"].len == 0
+
+    var documented: seq[string] = @[]
+    var numbers: seq[int] = @[]
+    for item in node["errorReasons"]:
+      let name = item["name"].getStr
+      check name notin documented
+      documented.add name
+      check item["number"].getInt notin numbers
+      numbers.add item["number"].getInt
+      # `errorCode` и `error.kind` — разные вещи: класс читает человек,
+      # причину — агент. Пустое объяснение означало бы причину без смысла.
+      check item["meaning"].getStr.len > 0
+      check item["exit"].getInt in 0 .. 3
+
+    # Каждая причина control-слоя обязана иметь строку: добавили код в ядро —
+    # добавьте строку в `cli/exit_codes.nim`, иначе этот тест и CI упадут.
+    for code in ErrorCode.low .. ErrorCode.high:
+      if code == ecOk:
+        continue
+      check $code in documented
+
+  test "отказ команды совпадает с обещанным кодом возврата":
+    check runCliIn(dir, ["init", "codes.eproj"]).code == 0
+
+    # (что запускаем, какая причина обещана) — отказы разных классов: вызов,
+    # данные и среда.
+    let cases: seq[(seq[string], ErrorCode)] = @[
+      (@["nonsense"], ecInvalidArgument),
+      (@["doctor", "лишний"], ecInvalidArgument),
+      (@["node", "show", "999", "codes.eproj"], ecNotFound),
+      (@["node", "show", "node:9.9", "codes.eproj"], ecInvalidArgument),
+      (@["connect", "1:out", "2:in", "codes.eproj"], ecNotFound),
+      (@["project", "show", "нет-такого.eproj"], ecNotFound),
+      (@["param", "get", "1", "freq", "codes.eproj"], ecNotFound),
+    ]
+    for (args, reason) in cases:
+      let r = runCliIn(dir, @["--json"] & args)
+      let node = parseJson(r.output)
+      if node["errorCode"].getInt != frameCodeValue(reason):
+        checkpoint($args & ": ожидалась причина " & $reason & ", пришла " &
+                   node["error"]["kind"].getStr & " / " &
+                   $node["errorCode"].getInt)
+      check node["errorCode"].getInt == frameCodeValue(reason)
+      # Код возврата процесса — из ТОЙ ЖЕ таблицы, что опубликована агенту.
+      check node["exitCode"].getInt == exitOf($reason)
+      check r.code == node["exitCode"].getInt
+      check node["error"]["kind"].getStr.len > 0
+
+  test "провал проверки — своя причина, а не «ошибка использования»":
+    ## `graph check` и `project validate` отвечают вердиктом: вызов был
+    ## верным, плохи данные. Это `ecCheckFailed` (код 1), и его видит агент.
+    check runCliIn(dir, ["init", "broken.eproj", "--force"]).code == 0
+    check runCliIn(dir, ["node", "add", "osc", "broken.eproj"]).code == 0
+    # Портим документ: две ноды с одним id — провал целостности.
+    let path = dir / "broken.eproj"
+    var doc = parseJson(readFile(path))
+    doc["graph"]["nodes"].add doc["graph"]["nodes"][0]
+    writeFile(path, $doc)
+
+    for args in [@["graph", "check", "broken.eproj"],
+                 @["project", "validate", "broken.eproj"]]:
+      let r = runCliIn(dir, @["--json"] & args)
+      let node = parseJson(r.output)
+      check not node["ok"].getBool
+      check node["errorCode"].getInt == frameCodeValue(ecCheckFailed)
+      check node["exitCode"].getInt == exitOf("check_failed")
+      check r.code == 1
+
+  test "таблица в справочнике — та же, что в машинной справке":
+    const docsPath = "docs/cli.md"
+    check fileExists(docsPath)
+    let doc = readFile(docsPath)
+    var rows = 0
+    for item in helpJson()["errorReasons"]:
+      let row = "| `" & item["name"].getStr & "` | " &
+                $item["number"].getInt & " | " & $item["exit"].getInt & " |"
+      check row in doc
+      inc rows
+    check rows > 10

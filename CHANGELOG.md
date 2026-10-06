@@ -11,6 +11,38 @@
 ## [Unreleased]
 
 ### Добавлено
+- `cli/exit_codes.nim` — таблица **«причина → код возврата» данными**
+  (issue #332): одна строка на каждую причину `ErrorCode` с кодом возврата и
+  объяснением. Из неё берут код возврата и кадры ядра (`frameReport`), и
+  ошибки самого CLI; `exitRulesProblems` проверяет полноту, а CI-тест
+  перебирает `ErrorCode.low..high` — причина без строки роняет сборку, а не
+  получает «код по умолчанию» незаметно
+  ([#332](https://github.com/framefrok/Euterpia_core/issues/332)).
+- В ядре две новые причины: `ecEnvironment` (нет файла, каталога, прав или
+  устройства — данные верны, окружение не позволяет) и `ecCheckFailed`
+  (вердикт проверки отрицательный: невалидный проект, не компилирующийся
+  граф, дефекты аудио выше порога)
+  ([#332](https://github.com/framefrok/Euterpia_core/issues/332)).
+- `help --json` печатает `errorReasons` — таблицу «причина → код возврата»
+  машинно (`name`, `number`, `exit`, `meaning`), и `exitCodeProblems` —
+  проверку самой таблицы
+  ([#332](https://github.com/framefrok/Euterpia_core/issues/332)).
+- В `docs/cli.md` таблица кодов ошибок **генерируется** вместе со справочником
+  команд: документация не может разойтись с кодом
+  ([#332](https://github.com/framefrok/Euterpia_core/issues/332)).
+
+### Изменено
+- Все команды отдают `errorCode` при отказе: раньше ошибки самого CLI
+  (`euterpia nonsense`, лишний аргумент) печатали `errorCode: 0`, и агент не
+  мог отличить их от «нет ошибки», а теперь причина всегда есть — `usage` от
+  `env` отличается не текстом, а числом и кодом возврата
+  ([#332](https://github.com/framefrok/Euterpia_core/issues/332)).
+- Отказы CLI называют конкретную причину: неверный вызов — `ecInvalidArgument`,
+  нет узла/файла — `ecNotFound`, недоступный файл, каталог или устройство —
+  `ecEnvironment`, провал `project validate`/`graph check`/`analyze --fail-on`
+  — `ecCheckFailed`, баг — `ecInternal`. Класс ответа (`error.kind`:
+  `usage`/`env`/`io`/`defects`/`panic`) и коды 0/1/2/3 не изменились
+  ([#332](https://github.com/framefrok/Euterpia_core/issues/332)).
 - Query API: DTO метаданных (`queryMetadata`), автоматизации
   (`queryAutomationLanes`) и состояний плагинов (`queryPluginStates`), а в
   сводке — `pluginStateBytes`: клиенту больше не нужно обходить формат, чтобы

@@ -314,6 +314,12 @@ CLI — полноценный интерфейс управления (MANIFEST
       для проектов на 1000 нод; обход коллекций документа запрещён guard'ом
       (`nimble archGuard`); сверка с «вторым клиентом» — suite «чтение через
       Query API» в `tests/cli_test.nim`
+- [x] #332 единые коды ошибок — ✅ сделано: таблица «причина → код возврата»
+      **данными** (`cli/exit_codes.nim`), причины `ecEnvironment` и
+      `ecCheckFailed` в ядре, `errorCode` в `--json` у каждого отказа (раньше
+      ошибки CLI печатали 0), таблица публикуется в `help --json`
+      (`errorReasons`) и **генерируется** в `docs/cli.md`; причина без строки
+      в таблице роняет CI
 - [ ] #97 батч/REPL (`--script`)
 - [x] #105 `doctor` (самодиагностика окружения) — ✅ сделано: секции
       build/audio/midi/plugins/fs/csrc, human и `--json`, exit 0/2

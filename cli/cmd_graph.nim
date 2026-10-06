@@ -1425,10 +1425,10 @@ proc runGraphCheck(ctx: var Ctx; scan: ArgScan): Report =
   lines.add "провалов: " & $total.fail & ", предупреждений: " & $total.warn
 
   if total.fail > 0:
-    return errReport(exUsage, "usage",
-                     "граф не прошёл проверку: провалов " & $total.fail,
-                     hint = "подробности: euterpia graph check --verbose",
-                     lines = lines, body = body)
+    return checkFailedError(
+      "граф не прошёл проверку: провалов " & $total.fail,
+      "подробности: euterpia graph check --verbose",
+      lines = lines, body = body)
   okReport(body = body, lines = lines)
 
 # =============================================================================

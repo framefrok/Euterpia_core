@@ -111,6 +111,23 @@ const
     ## Маркеры сгенерированного раздела `docs/cli.md`. Всё между ними
     ## принадлежит `markdownReference`, всё вокруг — прозе человека.
 
+type
+  ErrorRule* = object
+    ## Строка таблицы «причина → код возврата» для документации (issue #332).
+    ##
+    ## `cli_spec` не знает ни ядра, ни CLI: строки передаёт вызывающий
+    ## (`cli/exit_codes.nim` — единственное место, где причина связана с кодом
+    ## возврата), поэтому таблица в разделе собирается из того же источника,
+    ## что и отказы команд.
+    name*: string
+      ## Имя причины (`not_found`) — то же, что в `error.kind` кадра ядра.
+    number*: int
+      ## Числовой код причины для агента (`errorCode` в `--json`).
+    exit*: int
+      ## Код возврата процесса (`exitCode` в `--json`).
+    meaning*: string
+      ## Что причина значит для человека.
+
 # =============================================================================
 # Конструкторы: спецификация пишется как данные
 # =============================================================================
@@ -534,11 +551,16 @@ proc completionCandidates*(specs: seq[CommandSpec]; commandName, prefix: string)
 # Раздел docs/cli.md: то же описание, но Markdown
 # =============================================================================
 
-proc markdownReference*(specs: seq[CommandSpec]; cliName: string): string =
+proc markdownReference*(specs: seq[CommandSpec]; cliName: string;
+                        errorRules: seq[ErrorRule] = @[]): string =
   ## Справочник команд в Markdown. Печатается служебной `__reference` и
   ## вставляется в `docs/cli.md` задачей `nimble cliDocs`; тест сверяет
   ## раздел в репозитории с этим текстом байт-в-байт, поэтому справочник не
-  ## может отстать от кода, а таблицы ключей — соврать.
+  ## может отстать от кода, а таблицы ключей и кодов ошибок — соврать.
+  ##
+  ## `errorRules` — таблица «причина → код возврата» (#332): она тоже
+  ## генерируется, потому что написанная руками разошлась бы с кодом на первом
+  ## же добавленном отказе.
   var lines: seq[string] = @[]
   for spec in visibleSpecs(specs):
     lines.add "### `" & spec.name & "` — " & spec.summary
@@ -592,6 +614,20 @@ proc markdownReference*(specs: seq[CommandSpec]; cliName: string): string =
       for note in spec.notes:
         lines.add "- " & note
       lines.add ""
+  if errorRules.len > 0:
+    lines.add "### Коды ошибок: причина → код возврата"
+    lines.add ""
+    lines.add "При отказе `--json` содержит класс (`error.kind`), причину числом" &
+      " (`errorCode`) и код возврата процесса (`exitCode`). Таблица ниже" &
+      " собирается из `cli/exit_codes.nim`: она не может разойтись с кодом," &
+      " потому что генерируется."
+    lines.add ""
+    lines.add "| Причина | `errorCode` | `exitCode` | Что значит |"
+    lines.add "|---|---|---|---|"
+    for rule in errorRules:
+      lines.add "| `" & rule.name & "` | " & $rule.number & " | " &
+        $rule.exit & " | " & rule.meaning & " |"
+    lines.add ""
   result = lines.join("\n") & "\n"
 
 proc hasReferenceMarkers*(doc: string): bool =

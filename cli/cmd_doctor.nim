@@ -406,9 +406,10 @@ proc runDoctor*(ctx: var Ctx; args: seq[string]): Report =
             $total.fail & " fail"
 
   if total.fail > 0:
-    errReport(exEnv, "env",
-      "критичные проверки не пройдены: " & $total.fail,
-      hint = "устраните рекомендации выше (машинный вид: `euterpia doctor --json`)",
+    # Провал диагностики — окружение, а не данные: причина `ecEnvironment`
+    # (код 2), класс `env` (#332).
+    envError("критичные проверки не пройдены: " & $total.fail,
+      "устраните рекомендации выше (машинный вид: `euterpia doctor --json`)",
       lines = lines, body = body)
   else:
     okReport(body = body, lines = lines)

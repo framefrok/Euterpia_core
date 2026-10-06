@@ -311,11 +311,13 @@ proc buildReport(path: string; rep: InspectionReport; failOn: FailOn;
   if ok:
     okReport(body = body, lines = lines)
   else:
-    # Дефекты — не «ошибка использования», но и не успех: код 1,
-    # чтобы `--fail-on` работал как CI-гейт.
-    errReport(exUsage, "defects",
+    # Дефекты — не «ошибка использования», но и не успех: причина
+    # `ecCheckFailed` (код 1, класс `defects`), чтобы `--fail-on` работал как
+    # CI-гейт и агент отличал вердикт от неверного вызова (#332).
+    checkFailedError(
       "найдено " & $failing & " дефект(ов) уровня " & ($failOn).toLowerAscii(),
-      "порог: --fail-on; подробности в --json", lines, body)
+      "порог: --fail-on; подробности в --json", lines, body,
+      errorKind = "defects")
 
 
 # ==============================================================================
@@ -432,8 +434,8 @@ proc runAnalyze*(ctx: var Ctx; args: seq[string]): Report =
   var sr = 0'i32
   var err = ""
   if not readWavAll(sc.path, samples, channels, sr, err):
-    return errReport(exEnv, "io", "не удалось прочитать файл: " & err,
-      "нужен WAV PCM 16/24/32; проверьте путь и формат")
+    return envError("не удалось прочитать файл: " & err,
+      "нужен WAV PCM 16/24/32; проверьте путь и формат", errorKind = "io")
 
   var opts = defaultInspectionOptions()
   if sc.fftSize > 0:
