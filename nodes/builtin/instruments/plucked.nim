@@ -1,14 +1,17 @@
 # nodes/builtin/instruments/plucked.nim
 #
-# Щипковые на C-ядре eut_inst.c (Карплус-Стронг): арфа и клавесин — ОДИН
-# движок `EutPluck` с разными характерами. Это не «два похожих файла»: у
-# инструментов общий контракт голосов и общий путь событий/рендера, различаются
-# только умолчания и корпус — поэтому здесь одна реализация и четыре точки
-# входа (`getHarpDesc`/`getHarpFactory`/`getHarpsichordDesc`/...).
+# Щипковые на C-ядре eut_inst.c (Карплус-Стронг): арфа, клавесин и укулеле —
+# ОДИН движок `EutPluck` с разными характерами. Это не «три похожих файла»:
+# у инструментов общий контракт голосов и общий путь событий/рендера,
+# различаются только умолчания, корпус и материал струны — поэтому здесь одна
+# реализация и шесть точек входа (`getHarpDesc`/`getHarpFactory`/...).
 #
 # Разница характеров:
 #   * арфа — длинный тёплый звон, мягкий щипок, низкий корпус;
-#   * клавесин — короткий яркий «перьевой» щипок, высокий корпус-дека.
+#   * клавесин — короткий яркий «перьевой» щипок, высокий корпус-дека;
+#   * укулеле — нейлоновая струна (`nylon = 1`): мягкое возбуждение и
+#     быстрый спад верха, отсюда глухой «деревянный» щипок вместо
+#     стеклянного звона стали.
 #
 # Нода — источник; render-путь общий — instrument_common.nim.
 
@@ -31,6 +34,7 @@ const
   PluckParamBody*    = 3'u32   # глубина резонатора корпуса 0..1
   PluckParamPan*     = 4'u32
   PluckParamLevel*   = 5'u32   # dB
+  PluckParamNylon*   = 6'u32   # нейлоновая струна 0..1 (0 — сталь)
 
   PluckVoices = 12
   PluckDefaultSampleRate = 48000.0f
@@ -39,7 +43,7 @@ const
 
 type
   PluckKind = enum
-    pkHarp, pkHarpsichord
+    pkHarp, pkHarpsichord, pkUkulele
 
   PluckState = object
     g: Pluck
@@ -49,40 +53,63 @@ type
     sampleRate: float32
     kind: PluckKind
     bodyHz: float32
-    tone, damping, pluck, body, pan, levelLin: float32
+    tone, damping, pluck, body, nylon, pan, levelLin: float32
 
 var
   harpDesc: NodeDesc
   harpFactory: NodeFactory
   harpsiDesc: NodeDesc
   harpsiFactory: NodeFactory
+  ukuleleDesc: NodeDesc
+  ukuleleFactory: NodeFactory
   pluckReady = false
 
 proc kindDefaults(kind: PluckKind):
-    tuple[tone, damping, pluck, body, bodyHz, levelDb: float32] =
-  ## Характер инструмента: всё, чем арфа отличается от клавесина.
+    tuple[tone, damping, pluck, body, bodyHz, nylon, levelDb: float32] =
+  ## Характер инструмента: всё, чем арфа отличается от клавесина и укулеле.
   case kind
   of pkHarp:
-    (0.55f, 0.78f, 0.35f, 0.45f, 180.0f, -8.0f)
+    (0.55f, 0.78f, 0.35f, 0.45f, 180.0f, 0.0f, -8.0f)
   of pkHarpsichord:
-    (0.85f, 0.42f, 0.78f, 0.28f, 420.0f, -9.0f)
+    (0.85f, 0.42f, 0.78f, 0.28f, 420.0f, 0.0f, -9.0f)
+  of pkUkulele:
+    ## Нейлон глушит верх сам, поэтому `tone` не задираем: яркость даёт корпус.
+    (0.42f, 0.55f, 0.55f, 0.32f, 520.0f, 1.0f, -9.0f)
 
 proc descFor(kind: PluckKind): ptr NodeDesc {.inline.} =
-  if kind == pkHarp: addr harpDesc else: addr harpsiDesc
+  case kind
+  of pkHarp: addr harpDesc
+  of pkHarpsichord: addr harpsiDesc
+  of pkUkulele: addr ukuleleDesc
 
 proc factoryFor(kind: PluckKind): ptr NodeFactory {.inline.} =
-  if kind == pkHarp: addr harpFactory else: addr harpsiFactory
+  case kind
+  of pkHarp: addr harpFactory
+  of pkHarpsichord: addr harpsiFactory
+  of pkUkulele: addr ukuleleFactory
+
+proc kindId(kind: PluckKind): string {.inline.} =
+  case kind
+  of pkHarp: "euterpia.harp"
+  of pkHarpsichord: "euterpia.harpsichord"
+  of pkUkulele: "euterpia.ukulele"
+
+proc kindName(kind: PluckKind): string {.inline.} =
+  case kind
+  of pkHarp: "Harp"
+  of pkHarpsichord: "Harpsichord"
+  of pkUkulele: "Ukulele"
 
 proc initDesc(kind: PluckKind) =
   let d = kindDefaults(kind)
   var desc = NodeDesc(
-    id: fixedId(if kind == pkHarp: "euterpia.harp" else: "euterpia.harpsichord"),
-    name: fixedName(if kind == pkHarp: "Harp" else: "Harpsichord"),
+    id: fixedId(kindId(kind)),
+    name: fixedName(kindName(kind)),
     category: fixedName("instrument"),
     audioInCount: 0, audioOutCount: 1,
     ctrlInCount: 0, ctrlOutCount: 0,
     eventInCount: 1, eventOutCount: 0,
-    latencyFrames: 0, maxChannels: 2, paramCount: 6
+    latencyFrames: 0, maxChannels: 2, paramCount: 7
   )
   desc.params[0] = NodeParamDesc(
     id: PluckParamTone, name: fixedParamName("tone"),
@@ -108,15 +135,20 @@ proc initDesc(kind: PluckKind) =
     id: PluckParamLevel, name: fixedParamName("level"),
     minValue: PluckLevelMinDb, maxValue: PluckLevelMaxDb,
     defaultValue: d.levelDb, step: 0.1f, flags: uint32(npfAutomatable))
+  desc.params[6] = NodeParamDesc(
+    id: PluckParamNylon, name: fixedParamName("nylon"),
+    minValue: 0.0f, maxValue: 1.0f, defaultValue: d.nylon, step: 0.01f,
+    flags: uint32(npfAutomatable) or uint32(npfModulatable))
 
-  if kind == pkHarp:
-    harpDesc = desc
-  else:
-    harpsiDesc = desc
+  case kind
+  of pkHarp: harpDesc = desc
+  of pkHarpsichord: harpsiDesc = desc
+  of pkUkulele: ukuleleDesc = desc
 
 proc initPluckDesc() =
   initDesc(pkHarp)
   initDesc(pkHarpsichord)
+  initDesc(pkUkulele)
 
 proc createPluckState(desc: ptr NodeDesc; userData: pointer): pointer
     {.cdecl, raises: [], gcsafe.} =
@@ -126,8 +158,10 @@ proc createPluckState(desc: ptr NodeDesc; userData: pointer): pointer
   if not pluckReady:
     initPluckDesc()
     pluckReady = true
-  # Какой инструмент просят, видно по описателю: у арфы и клавесина он свой.
-  let kind = if desc == addr harpDesc: pkHarp else: pkHarpsichord
+  # Какой инструмент просят, видно по описателю: у каждого свой.
+  var kind = pkHarpsichord
+  if desc == addr harpDesc: kind = pkHarp
+  elif desc == addr ukuleleDesc: kind = pkUkulele
   let d = kindDefaults(kind)
   result = allocShared0(sizeof(PluckState))
   if result.isNil:
@@ -146,6 +180,7 @@ proc createPluckState(desc: ptr NodeDesc; userData: pointer): pointer
   st.damping = d.damping
   st.pluck = d.pluck
   st.body = d.body
+  st.nylon = d.nylon
   st.pan = 0.0f
   st.levelLin = dbToLin(d.levelDb)
 
@@ -172,6 +207,7 @@ proc setPluckParam(state: pointer; paramId: uint32; value: float32;
   of PluckParamDamping: st.damping = clamp(raw, 0.0f, 1.0f)
   of PluckParamPluck:   st.pluck = clamp(raw, 0.0f, 1.0f)
   of PluckParamBody:    st.body = clamp(raw, 0.0f, 1.0f)
+  of PluckParamNylon:   st.nylon = clamp(raw, 0.0f, 1.0f)
   of PluckParamPan:     st.pan = clamp(raw, -1.0f, 1.0f)
   of PluckParamLevel:   st.levelLin = dbToLin(clamp(raw, PluckLevelMinDb,
                                                     PluckLevelMaxDb))
@@ -186,6 +222,7 @@ proc getPluckParam(state: pointer; paramId: uint32; outValue: ptr float32): bool
   of PluckParamDamping: outValue[] = st.damping
   of PluckParamPluck:   outValue[] = st.pluck
   of PluckParamBody:    outValue[] = st.body
+  of PluckParamNylon:   outValue[] = st.nylon
   of PluckParamPan:     outValue[] = st.pan
   of PluckParamLevel:   outValue[] = linToDb(st.levelLin)
   else: return false
@@ -209,7 +246,7 @@ proc processPluckNode(ctx: ptr NodeProcessContext; audio: ptr NodeAudioPorts;
       instSetSampleRate(st.midi, sr)
 
   pluckSet(addr st.g, st.tone, st.damping, st.pluck, st.body, st.bodyHz,
-           st.pan, st.levelLin)
+           st.nylon, st.pan, st.levelLin)
 
   var q: ptr EventQueue = nil
   if not events.isNil and events.inputCount > 0:
@@ -233,6 +270,8 @@ proc getHarpDesc*(): ptr NodeDesc = pluckNode(pkHarp).desc
 proc getHarpFactory*(): ptr NodeFactory = pluckNode(pkHarp).factory
 proc getHarpsichordDesc*(): ptr NodeDesc = pluckNode(pkHarpsichord).desc
 proc getHarpsichordFactory*(): ptr NodeFactory = pluckNode(pkHarpsichord).factory
+proc getUkuleleDesc*(): ptr NodeDesc = pluckNode(pkUkulele).desc
+proc getUkuleleFactory*(): ptr NodeFactory = pluckNode(pkUkulele).factory
 
 {.pop.}
 

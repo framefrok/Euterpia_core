@@ -1939,6 +1939,7 @@ void eut_pluck_init(EutPluck *g, EutPluckVoice *voices, int voiceCount,
   g->pluck = 0.4f;
   g->body = 0.35f;
   g->bodyHz = 220.0f;
+  g->nylon = 0.0f;      /* стальная струна: как у арфы и клавесина */
   g->pan = 0.0f;
   g->level = 0.7f;
   g->seqCounter = 0;
@@ -1946,7 +1947,8 @@ void eut_pluck_init(EutPluck *g, EutPluckVoice *voices, int voiceCount,
 }
 
 void eut_pluck_set(EutPluck *g, float tone, float damping, float pluck,
-                   float body, float bodyHz, float pan, float level)
+                   float body, float bodyHz, float nylon, float pan,
+                   float level)
 {
   if (g == NULL) return;
   g->tone = inst_clamp(tone, 0.0f, 1.0f);
@@ -1954,6 +1956,7 @@ void eut_pluck_set(EutPluck *g, float tone, float damping, float pluck,
   g->pluck = inst_clamp(pluck, 0.0f, 1.0f);
   g->body = inst_clamp(body, 0.0f, 1.0f);
   g->bodyHz = inst_clamp(bodyHz, 40.0f, 2000.0f);
+  g->nylon = inst_clamp(nylon, 0.0f, 1.0f);
   g->pan = inst_clamp(pan, -1.0f, 1.0f);
   g->level = level;
 }
@@ -2006,10 +2009,13 @@ void eut_pluck_note_on(EutPluck *g, int note, float velocity)
      так гаснет часть гармоник, и щипок звучит «мясистее»). */
   float *line = g->memory + (size_t)v->offset;
   const float noiseAmp = 0.35f + 0.65f * g->pluck;
+  /* Нейлон: щипок мягче — шум возбуждения сглажен глубже. При nylon = 0
+     коэффициент прежний (0.4), поэтому арфа и клавесин не меняются. */
+  const float sm = 0.4f + 0.3f * g->nylon;
   float prev = 0.0f;
   for (int i = 0; i < len; ++i) {
     float nz = inst_noise(&v->v.rng) * noiseAmp;
-    nz = 0.6f * nz + 0.4f * prev;   /* мягче атака: меньше щелчка */
+    nz = (1.0f - sm) * nz + sm * prev;   /* мягче атака: меньше щелчка */
     prev = nz;
     line[i] = nz;
   }
@@ -2047,8 +2053,9 @@ void eut_pluck_process(EutPluck *g, float *outL, float *outR, int stride, int n)
   if (g->active == 0) return;
   float gl, gr;
   inst_pan_gains(g->pan, &gl, &gr);
-  /* Яркость петли: 0 — верхние гаснут сразу, 1 — звонкий «стеклянный» тон. */
-  const float loopCoef = 0.18f + 0.72f * g->tone;
+  /* Яркость петли: 0 — верхние гаснут сразу, 1 — звонкий «стеклянный» тон.
+     Нейлоновая струна теряет верх быстрее стали, поэтому петля глуше. */
+  const float loopCoef = (0.18f + 0.72f * g->tone) * (1.0f - 0.42f * g->nylon);
   const float bodyMix = g->body;
 
   for (int i = 0; i < n; ++i) {
@@ -2749,6 +2756,282 @@ void eut_choir_process(EutChoir *g, float *outL, float *outR, int stride,
     g->active = alive;
     g->lfoPhase += g->lfoInc;
     if (g->lfoPhase >= 1.0f) g->lfoPhase -= 1.0f;
+    if (outL != NULL) outL[i * stride] += sumL * g->level;
+    if (outR != NULL) outR[i * stride] += sumR * g->level;
+  }
+}
+
+
+
+/* ===========================================================================
+ * Свободноязычковые (баян/аккордеон, губная гармошка)
+ *
+ * Язычок качается в камере под давлением воздуха — это не струна и не столб
+ * воздуха. Отсюда три части тембра, которых нет у других движков:
+ *
+ *   1) НЕСКОЛЬКО ЯЗЫЧКОВ на одну ноту (2–3), расстроенных на единицы центов.
+ *      Их биения и есть «разлив»: дрожание уровня в 2–6 Гц, которое одним
+ *      генератором не получается. `detune = 0` складывает язычки в один —
+ *      так звучит гармошка: у неё язычок на ноту один.
+ *   2) КАМЕРА: два резонатора вокруг `formantHz` собирают «тростниковую»
+ *      полосу, а ФВЧ ниже неё убирает гул, которого у язычка нет.
+ *   3) ВОЗДУХ: мех (баян) или дыхание (гармошка) шумят всё время, пока
+ *      звучит нота, и «дышат» с медленной модуляцией. Ровный шумовой фон
+ *      читается как синтезатор, живой мех — нет.
+ *
+ * Плюс механика: язычок разгоняется (мягкая атака), первые десятки
+ * миллисекунд строй чуть ниже и садится в тон, клапан клацает на атаке.
+ *
+ * Характер инструмента задаёт нода, как у щипковых: баян — `formantHz`
+ * ~1.4 кГц и разлив в 12 центов, гармошка — ~2.6 кГц и сухой строй.
+ * ========================================================================= */
+
+static const float kReedSpread[EUT_INST_REED_BANKS] = { 0.0f, 1.0f, -1.0f };
+static const float kReedWeight[EUT_INST_REED_BANKS] = { 1.00f, 0.60f, 0.60f };
+
+/* Пила плюс меандровая составляющая: нечётные гармоники дают «гнусавость»
+   трости, которой нет у гладкой пилы. Обе — band-limited (polyBLEP). */
+static inline float inst_reed_wave(float ph, float dt, float sharp)
+{
+  float s = 2.0f * ph - 1.0f - inst_polyblep(ph, dt);
+  if (sharp > 0.0f) {
+    float sq = (ph < 0.5f) ? 1.0f : -1.0f;
+    sq += inst_polyblep(ph, dt);
+    float t = ph + 0.5f;
+    if (t >= 1.0f) t -= 1.0f;
+    sq -= inst_polyblep(t, dt);
+    s += sharp * sq;
+  }
+  return s;
+}
+
+/* Резонатор Клатта: единичное усиление на постоянной составляющей, полоса
+   `bw`. Та же нормировка, что у формант хора (1 - b - a2). */
+static inline void inst_reed_band(float f, float bw, float sampleRate,
+                                  float *a1, float *a2, float *gain)
+{
+  const float c = (float)exp(-EUT_INST_TWO_PI * bw / sampleRate);
+  const float b = 2.0f * c *
+                  (float)cos((double)(EUT_INST_TWO_PI * f / sampleRate));
+  *a1 = b;
+  *a2 = -c * c;
+  *gain = 1.0f - b + c * c;
+}
+
+void eut_reed_reset(EutReed *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutReedVoice *v = &g->voices[i];
+    memset(&v->v, 0, sizeof(v->v));
+    for (int k = 0; k < EUT_INST_REED_BANKS; ++k) {
+      v->ph[k] = 0.0f;
+      v->ratio[k] = 1.0f;
+      v->w[k] = 0.0f;
+    }
+    v->f1y1 = v->f1y2 = v->f2y1 = v->f2y2 = 0.0f;
+    v->f1a1 = v->f1a2 = v->f1g = 0.0f;
+    v->f2a1 = v->f2a2 = v->f2g = 0.0f;
+    v->lp1 = v->lp2 = v->hp = 0.0f;
+    v->pitchEnv = 0.0f;
+    v->pitchEnvCoef = 0.0f;
+    v->chiff = 0.0f;
+    v->breathLp = 0.0f;
+    v->bellowPh = 0.0f;
+  }
+  g->active = 0;
+}
+
+void eut_reed_init(EutReed *g, EutReedVoice *voices, int voiceCount,
+                   float sampleRate)
+{
+  if (g == NULL) return;
+  g->voices = voices;
+  g->voiceCount = voiceCount > 0 ? voiceCount : 1;
+  g->sampleRate = sampleRate > 0.0f ? sampleRate : 48000.0f;
+  g->tone = 0.55f;
+  g->detune = 12.0f;
+  g->noise = 0.25f;
+  g->attack = 0.05f;
+  g->formantHz = 1400.0f;
+  g->pan = 0.0f;
+  g->level = 0.8f;
+  g->seqCounter = 0;
+  eut_reed_set(g, g->tone, g->detune, g->noise, g->attack, g->formantHz,
+               g->pan, g->level);
+  eut_reed_reset(g);
+}
+
+void eut_reed_set(EutReed *g, float tone, float detuneCents, float noise,
+                  float attackSeconds, float formantHz, float pan, float level)
+{
+  if (g == NULL) return;
+  g->tone = inst_clamp(tone, 0.0f, 1.0f);
+  g->detune = inst_clamp(detuneCents, 0.0f, 40.0f);
+  g->noise = inst_clamp(noise, 0.0f, 1.0f);
+  g->attack = inst_clamp(attackSeconds, 0.002f, 0.5f);
+  g->formantHz = inst_clamp(formantHz, 300.0f, g->sampleRate * 0.4f);
+  g->pan = inst_clamp(pan, -1.0f, 1.0f);
+  g->level = level;
+  /* Срез верха: 0 — тёмный баян, 1 — звонкая гармошка. */
+  const float fc = 1400.0f + 7000.0f * g->tone;
+  g->lpCoef = inst_clamp(EUT_INST_TWO_PI * fc / g->sampleRate, 0.05f, 0.9f);
+  /* Ниже камеры гула нет: срезаем то, что резонатор не поддерживает. */
+  g->hpCoef = inst_clamp(EUT_INST_TWO_PI * (g->formantHz * 0.06f) /
+                         g->sampleRate, 0.0005f, 0.05f);
+  /* «Мех дышит» ~0.9 Гц: медленнее вибрато, это дыхание, а не тремоло. */
+  g->bellowInc = EUT_INST_TWO_PI * 0.9f / g->sampleRate;
+}
+
+void eut_reed_note_on(EutReed *g, int note, float velocity)
+{
+  if (g == NULL || g->voices == NULL) return;
+  EutReedVoice *v = (EutReedVoice *)inst_pick_voice(
+    g->voices, (int)sizeof(EutReedVoice), g->voiceCount);
+  if (v == NULL) return;
+  v->v.seq = g->seqCounter++;
+
+  /* Язычок разгоняется: мягкая атака и быстрый, но не мгновенный релиз
+     (клапан закрывается за десятки миллисекунд). */
+  inst_voice_setup(&v->v, note, velocity, g->attack, 0.96f, 0.8f, 0.09f,
+                   g->sampleRate);
+
+  /* Разлив: язычки одного тона, расстроенные врозь. Веса нормированы, так
+     что один язычок и три звучат с одинаковым уровнем. */
+  float wsum = 0.0f;
+  for (int k = 0; k < EUT_INST_REED_BANKS; ++k) wsum += kReedWeight[k];
+  for (int k = 0; k < EUT_INST_REED_BANKS; ++k) {
+    const float cents = kReedSpread[k] * g->detune;
+    v->ratio[k] = (float)exp2((double)(cents / 1200.0f));
+    v->w[k] = kReedWeight[k] / wsum;
+    /* Фазы независимы: одинаковый старт трёх язычков слышен как щелчок. */
+    v->ph[k] = inst_noise(&v->v.rng) * 0.5f + 0.5f;
+  }
+
+  /* Посадка строя: язычок под давлением начинает ниже и садится в тон; чем
+     сильнее нота, тем глубже просадка (сильнее «толкнули» мех). */
+  const float vel = inst_clamp(velocity, 0.0f, 1.0f);
+  v->pitchEnv = 0.0002f + 0.0045f * vel;
+  v->pitchEnvCoef = inst_coef(0.06f, g->sampleRate);
+
+  /* Резонансы камеры: нижний собирает «тростниковую» полосу, верхний
+     добавляет звон. Ширину полос ведёт `tone` вместе с нодой. */
+  const float f1 = g->formantHz;
+  const float f2 = inst_clamp(f1 * 1.9f, 400.0f, g->sampleRate * 0.45f);
+  inst_reed_band(f1, 240.0f + 180.0f * (1.0f - g->tone), g->sampleRate,
+                 &v->f1a1, &v->f1a2, &v->f1g);
+  inst_reed_band(f2, 420.0f + 260.0f * (1.0f - g->tone), g->sampleRate,
+                 &v->f2a1, &v->f2a2, &v->f2g);
+
+  v->lp1 = v->lp2 = v->hp = 0.0f;
+  v->chiff = 1.0f;          /* клац клапана: гаснет в process() */
+  v->breathLp = 0.0f;
+  /* «Дыхание меха» стартует вразнобой — иначе все ноты дышат в такт. */
+  v->bellowPh = inst_noise(&v->v.rng) * 0.5f + 0.5f;
+  g->active = 1;
+}
+
+void eut_reed_note_off(EutReed *g, int note)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutReedVoice *v = &g->voices[i];
+    if (v->v.active && v->v.note == note) v->v.held = 0;
+  }
+}
+
+void eut_reed_all_off(EutReed *g)
+{
+  if (g == NULL || g->voices == NULL) return;
+  for (int i = 0; i < g->voiceCount; ++i) {
+    EutReedVoice *v = &g->voices[i];
+    if (v->v.active) {
+      v->v.held = 0;
+      v->v.relCoef = inst_coef(0.030f, g->sampleRate);
+    }
+  }
+}
+
+EUT_TARGET_CLONES
+void eut_reed_process(EutReed *g, float *outL, float *outR, int stride,
+                      int n, float bendSemitones, float modCents)
+{
+  if (g == NULL || g->voices == NULL || n <= 0) return;
+  if (g->active == 0) return;
+  const float invSr = 1.0f / g->sampleRate;
+  float gl, gr;
+  inst_pan_gains(g->pan, &gl, &gr);
+  /* «Гнусавость»: доля меандра в источнике растёт с яркостью. */
+  const float sharp = 0.22f + 0.30f * g->tone;
+  const float noiseLvl = g->noise;
+  /* Колесо и модуляция сдвигают все язычки разом: разлив сохраняется. */
+  const float commonCents = bendSemitones * 100.0f + modCents;
+  const float common = (commonCents != 0.0f)
+                     ? (float)exp2((double)(commonCents / 1200.0f)) : 1.0f;
+
+  for (int i = 0; i < n; ++i) {
+    float sumL = 0.0f, sumR = 0.0f;
+    int alive = 0;
+
+    for (int vi = 0; vi < g->voiceCount; ++vi) {
+      EutReedVoice *v = &g->voices[vi];
+      if (!inst_voice_alive(&v->v)) continue;
+      ++alive;
+
+      /* Посадка строя: язычок «въезжает» снизу вверх за десятки мс. */
+      v->pitchEnv *= v->pitchEnvCoef;
+      const float f = v->v.freq * (1.0f - v->pitchEnv) * common;
+
+      float src = 0.0f;
+      for (int k = 0; k < EUT_INST_REED_BANKS; ++k) {
+        const float dk = f * invSr * v->ratio[k];
+        v->ph[k] += dk;
+        if (v->ph[k] >= 1.0f) v->ph[k] -= 1.0f;
+        src += v->w[k] * inst_reed_wave(v->ph[k], dk, sharp);
+      }
+
+      /* Нелинейность трости: громкая нота «гнусавее» — гармоники растут от
+         давления, а не только от фильтра. Уровень при этом сохраняется. */
+      const float pre = 1.0f + 1.3f * v->v.vel;
+      src = inst_soft_clip(src * pre) * (1.0f / pre);
+
+      /* Камера: две полосы плюс остаток источника (прямой звук язычка). */
+      const float o1 = v->f1g * src + v->f1a1 * v->f1y1 + v->f1a2 * v->f1y2;
+      v->f1y2 = v->f1y1;
+      v->f1y1 = o1;
+      const float o2 = v->f2g * src + v->f2a1 * v->f2y1 + v->f2a2 * v->f2y2;
+      v->f2y2 = v->f2y1;
+      v->f2y1 = o2;
+      float s = src * 0.40f
+              + o1 * (0.45f + 0.30f * g->tone)
+              + o2 * (0.15f + 0.35f * g->tone);
+
+      /* Корпус и воздух глушат верх, ФВЧ убирает гул ниже камеры. */
+      v->lp1 += (s - v->lp1) * g->lpCoef;
+      v->lp2 += (v->lp1 - v->lp2) * g->lpCoef;
+      s = v->lp2;
+      v->hp += (s - v->hp) * g->hpCoef;
+      s -= v->hp;
+
+      /* Воздух: полосовой шум, «дышащий» с медленной скоростью. Ровный
+         шумовой фон читается как синтезатор, живой мех — нет. */
+      const float nz = inst_noise(&v->v.rng);
+      v->breathLp += (nz - v->breathLp) * 0.10f;
+      const float air = v->breathLp * (0.65f + 0.35f * inst_sin(v->bellowPh));
+      s += air * noiseLvl * 0.06f;
+      /* Клац клапана: короткий шум на атаке, тоже через полосу воздуха. */
+      s += v->chiff * (nz - v->breathLp) * (0.06f + 0.10f * noiseLvl);
+      v->chiff *= 0.9982f;      /* ≈ 12 мс: щелчок, а не шипение */
+
+      v->bellowPh += g->bellowInc;
+      if (v->bellowPh >= 1.0f) v->bellowPh -= 1.0f;
+
+      s *= v->v.amp;
+      sumL += s * gl;
+      sumR += s * gr;
+    }
+
+    g->active = alive;
     if (outL != NULL) outL[i * stride] += sumL * g->level;
     if (outR != NULL) outR[i * stride] += sumR * g->level;
   }

@@ -217,6 +217,8 @@ type
   EutTimpani {.importc: "EutTimpani", bycopy.} = object
   EutChoirVoice {.importc: "EutChoirVoice", bycopy.} = object
   EutChoir {.importc: "EutChoir", bycopy.} = object
+  EutReedVoice {.importc: "EutReedVoice", bycopy.} = object
+  EutReed {.importc: "EutReed", bycopy.} = object
 
 # ==============================================================================
 # Обёртки состояния
@@ -288,6 +290,9 @@ type
     p: pointer
     voiceCount: int
   Choir* {.bycopy.} = object
+    p: pointer
+    voiceCount: int
+  Reed* {.bycopy.} = object
     p: pointer
     voiceCount: int
 
@@ -505,8 +510,8 @@ proc c_pluck_init(g: ptr EutPluck; voices: ptr EutPluckVoice; voiceCount: cint;
       {.importc: "eut_pluck_init", header: "eut_dsp.h".}
 proc c_pluck_reset(g: ptr EutPluck)
       {.importc: "eut_pluck_reset", header: "eut_dsp.h".}
-proc c_pluck_set(g: ptr EutPluck; tone, damping, pluck, body, bodyHz, pan,
-                 level: float32)
+proc c_pluck_set(g: ptr EutPluck; tone, damping, pluck, body, bodyHz, nylon,
+                 pan, level: float32)
       {.importc: "eut_pluck_set", header: "eut_dsp.h".}
 proc c_pluck_note_on(g: ptr EutPluck; note: cint; velocity: float32)
       {.importc: "eut_pluck_note_on", header: "eut_dsp.h".}
@@ -585,6 +590,24 @@ proc c_choir_process(g: ptr EutChoir; outL, outR: ptr float32; stride, n: cint;
                      bendSemitones, modCents: float32)
       {.importc: "eut_choir_process", header: "eut_dsp.h".}
 
+proc c_reed_init(g: ptr EutReed; voices: ptr EutReedVoice; voiceCount: cint;
+                 sampleRate: float32)
+      {.importc: "eut_reed_init", header: "eut_dsp.h".}
+proc c_reed_reset(g: ptr EutReed)
+      {.importc: "eut_reed_reset", header: "eut_dsp.h".}
+proc c_reed_set(g: ptr EutReed; tone, detuneCents, noise, attackSeconds,
+                formantHz, pan, level: float32)
+      {.importc: "eut_reed_set", header: "eut_dsp.h".}
+proc c_reed_note_on(g: ptr EutReed; note: cint; velocity: float32)
+      {.importc: "eut_reed_note_on", header: "eut_dsp.h".}
+proc c_reed_note_off(g: ptr EutReed; note: cint)
+      {.importc: "eut_reed_note_off", header: "eut_dsp.h".}
+proc c_reed_all_off(g: ptr EutReed)
+      {.importc: "eut_reed_all_off", header: "eut_dsp.h".}
+proc c_reed_process(g: ptr EutReed; outL, outR: ptr float32; stride, n: cint;
+                    bendSemitones, modCents: float32)
+      {.importc: "eut_reed_process", header: "eut_dsp.h".}
+
 proc c_size_inst_voice(): cint {.importc: "eut_abi_sizeof_inst_voice", header: "eut_dsp.h".}
 proc c_size_organ_voice(): cint {.importc: "eut_abi_sizeof_organ_voice", header: "eut_dsp.h".}
 proc c_size_organ(): cint {.importc: "eut_abi_sizeof_organ", header: "eut_dsp.h".}
@@ -612,6 +635,8 @@ proc c_size_timpani_voice(): cint {.importc: "eut_abi_sizeof_timpani_voice", hea
 proc c_size_timpani(): cint {.importc: "eut_abi_sizeof_timpani", header: "eut_dsp.h".}
 proc c_size_choir_voice(): cint {.importc: "eut_abi_sizeof_choir_voice", header: "eut_dsp.h".}
 proc c_size_choir(): cint {.importc: "eut_abi_sizeof_choir", header: "eut_dsp.h".}
+proc c_size_reed_voice(): cint {.importc: "eut_abi_sizeof_reed_voice", header: "eut_dsp.h".}
+proc c_size_reed(): cint {.importc: "eut_abi_sizeof_reed", header: "eut_dsp.h".}
 
 # ==============================================================================
 # Предикаты готовности
@@ -640,6 +665,7 @@ proc isReady*(g: Recorder): bool {.inline.} = not g.p.isNil
 proc isReady*(g: Brass): bool {.inline.} = not g.p.isNil
 proc isReady*(g: Timpani): bool {.inline.} = not g.p.isNil
 proc isReady*(g: Choir): bool {.inline.} = not g.p.isNil
+proc isReady*(g: Reed): bool {.inline.} = not g.p.isNil
 
 # ==============================================================================
 # Внутренние помощники
@@ -1451,11 +1477,13 @@ proc pluckInitAt*(g: ptr Pluck; sampleRate: float32): bool =
                sampleRate)
   true
 
-proc pluckSet*(g: ptr Pluck; tone, damping, pluck, body, bodyHz, pan,
+proc pluckSet*(g: ptr Pluck; tone, damping, pluck, body, bodyHz, nylon, pan,
                level: float32) {.inline.} =
+  ## `nylon` — доля нейлоновой струны: 0 — сталь (арфа, клавесин), 1 — нейлон
+  ## (укулеле). При 0 путь обработки прежний, бит-в-бит.
   if g.isNil or g.p.isNil: return
-  c_pluck_set(cast[ptr EutPluck](g.p), tone, damping, pluck, body, bodyHz, pan,
-              level)
+  c_pluck_set(cast[ptr EutPluck](g.p), tone, damping, pluck, body, bodyHz, nylon,
+              pan, level)
 
 proc pluckNoteOn*(g: ptr Pluck; note: int; velocity: float32) {.inline.} =
   if g.isNil or g.p.isNil: return
@@ -1730,6 +1758,71 @@ proc choirProcess*(g: ptr Choir; outL, outR: ptr float32; stride, n: int;
   c_choir_process(cast[ptr EutChoir](g.p), outL, outR, stride.cint, n.cint,
                   bendSemitones, modCents)
 
+# --- свободноязычковые (баян, губная гармошка) --------------------------------
+
+proc newReed*(voiceCount: int = 12; sampleRate: float32 = 48000.0f): Reed =
+  let n = max(voiceCount, 1)
+  let stateBytes = c_size_reed().int
+  let voiceBytes = c_size_reed_voice().int
+  result.p = allocState(stateBytes + voiceBytes * n)
+  if result.p.isNil:
+    return
+  result.voiceCount = n
+  c_reed_init(cast[ptr EutReed](result.p),
+              cast[ptr EutReedVoice](instVoices(result.p, stateBytes)),
+              n.cint, sampleRate)
+
+proc freeReed*(g: ptr Reed) {.inline.} =
+  if g.isNil or g.p.isNil:
+    return
+  deallocShared(g.p)
+  g.p = nil
+
+proc reedInitAt*(g: ptr Reed; sampleRate: float32): bool =
+  if g.isNil or g.p.isNil:
+    return false
+  let stateBytes = c_size_reed().int
+  c_reed_init(cast[ptr EutReed](g.p),
+              cast[ptr EutReedVoice](instVoices(g.p, stateBytes)),
+              g.voiceCount.cint, sampleRate)
+  true
+
+proc reedSet*(g: ptr Reed; tone, detuneCents, noise, attackSeconds, formantHz,
+              pan, level: float32) {.inline.} =
+  ## `detuneCents` — разлив (0 — сухой строй, как у гармошки), `formantHz` —
+  ## резонанс камеры (баян ниже, гармошка выше).
+  if g.isNil or g.p.isNil: return
+  c_reed_set(cast[ptr EutReed](g.p), tone, detuneCents, noise, attackSeconds,
+             formantHz, pan, level)
+
+proc reedNoteOn*(g: ptr Reed; note: int; velocity: float32) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_reed_note_on(cast[ptr EutReed](g.p), note.cint, velocity)
+
+proc reedNoteOff*(g: ptr Reed; note: int) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_reed_note_off(cast[ptr EutReed](g.p), note.cint)
+
+proc reedReset*(g: ptr Reed) {.inline.} =
+  ## Полный сброс состояния голосов: фазы язычков, резонаторы камеры, шум
+  ## воздуха, счётчик голосов. `reedAllOff` только снимает ноты — для паники
+  ## и сброса транспорта этого мало: остаточное состояние даёт призвук на
+  ## следующем старте. Параметры (tone, level, …) при этом сохраняются
+  ## (issue #316).
+  if g.isNil or g.p.isNil: return
+  c_reed_reset(cast[ptr EutReed](g.p))
+
+proc reedAllOff*(g: ptr Reed) {.inline.} =
+  if g.isNil or g.p.isNil: return
+  c_reed_all_off(cast[ptr EutReed](g.p))
+
+proc reedProcess*(g: ptr Reed; outL, outR: ptr float32; stride, n: int;
+                  bendSemitones: float32 = 0.0f; modCents: float32 = 0.0f)
+    {.inline.} =
+  if g.isNil or g.p.isNil or n <= 0: return
+  c_reed_process(cast[ptr EutReed](g.p), outL, outR, stride.cint, n.cint,
+                 bendSemitones, modCents)
+
 # --- ABI --------------------------------------------------------------------
 
 proc abiCheck*(): bool =
@@ -1778,7 +1871,7 @@ proc abiCheck*(): bool =
   c_size_bell() == 48 and
   c_size_bell() mod 8 == 0 and
   c_size_pluck_voice() == 112 and
-  c_size_pluck() == 64 and
+  c_size_pluck() == 72 and
   c_size_pluck() mod 8 == 0 and
   c_size_recorder_voice() == 96 and
   c_size_recorder() == 56 and
@@ -1791,6 +1884,9 @@ proc abiCheck*(): bool =
   c_size_timpani() mod 8 == 0 and
   c_size_choir_voice() == 140 and
   c_size_choir() == 56 and
-  c_size_choir() mod 8 == 0
+  c_size_choir() mod 8 == 0 and
+  c_size_reed_voice() == 180 and
+  c_size_reed() == 64 and
+  c_size_reed() mod 8 == 0
 
 {.pop.}

@@ -810,6 +810,7 @@ typedef struct {
   float pluck;          /* резкость щипка (шумовая атака) 0..1 */
   float body;           /* глубина резонатора корпуса 0..1 */
   float bodyHz;         /* частота корпуса, Гц */
+  float nylon;          /* нейлоновая струна: 0 — сталь, 1 — нейлон 0..1 */
   float pan;
   float level;
   int   seqCounter;
@@ -820,7 +821,8 @@ void eut_pluck_init(EutPluck *g, EutPluckVoice *voices, int voiceCount,
                     float *memory, int lineCap, float sampleRate);
 void eut_pluck_reset(EutPluck *g);
 void eut_pluck_set(EutPluck *g, float tone, float damping, float pluck,
-                   float body, float bodyHz, float pan, float level);
+                   float body, float bodyHz, float nylon, float pan,
+                   float level);
 void eut_pluck_note_on(EutPluck *g, int note, float velocity);
 void eut_pluck_note_off(EutPluck *g, int note);
 void eut_pluck_all_off(EutPluck *g);
@@ -977,6 +979,66 @@ void eut_choir_process(EutChoir *g, float *outL, float *outR, int stride,
                        int n, float bendSemitones, float modCents);
 
 
+/* --- свободноязычковые (баян/аккордеон, губная гармошка) ------------------- */
+
+/* Язычок — это не струна и не столб воздуха: упругая пластина качается в
+   камере, и её голос складывается из трёх вещей, которых нет у остальных
+   движков:
+     * НЕСКОЛЬКО язычков на одну ноту — у баяна их два-три, и они чуть
+       расстроены; отсюда «разлив» (биения 2–6 Гц), который нельзя получить
+       одним генератором;
+     * КАМЕРА с резонансом — она собирает спектр в характерную «тростниковую»
+       полосу, а всё, что ниже, срезается (у язычка нет суб-баса);
+     * ВОЗДУХ — мех (баян) или дыхание (гармошка) шумят постоянно, а не
+       только в атаке. */
+#define EUT_INST_REED_BANKS 3
+
+typedef struct {
+  EutInstVoice v;
+  float ph[EUT_INST_REED_BANKS];      /* фазы язычков */
+  float ratio[EUT_INST_REED_BANKS];   /* их частоты относительно ноты (разлив) */
+  float w[EUT_INST_REED_BANKS];       /* веса язычков (сумма = 1) */
+  float f1y1, f1y2, f1a1, f1a2, f1g;  /* нижний резонанс камеры */
+  float f2y1, f2y2, f2a1, f2a2, f2g;  /* верхний резонанс: «звон» трости */
+  float lp1, lp2;                     /* спад верха: корпус и воздух */
+  float hp;                           /* срез «гула» ниже камеры */
+  float pitchEnv, pitchEnvCoef;       /* язычок разгоняется: строй садится */
+  float chiff;                        /* шум клапана на атаке */
+  float breathLp;                     /* полоса шума воздуха */
+  float bellowPh;                     /* «дыхание» меха: у каждого голоса своё */
+} EutReedVoice;
+
+typedef struct {
+  EutReedVoice *voices;
+  int   voiceCount;
+  float sampleRate;
+  float tone;       /* яркость: доля верхних гармоник и «гнусавости» 0..1 */
+  float detune;     /* разлив между язычками, центы (0 — сухой строй) */
+  float noise;      /* воздух: мех/дыхание, 0..1 */
+  float attack;     /* время речи язычка, с */
+  float formantHz;  /* резонанс камеры, Гц (баян ~1.4 кГц, гармоника ~2.6 кГц) */
+  float pan;
+  float level;
+  float lpCoef;     /* вычисляет set(): срез верха */
+  float hpCoef;     /* вычисляет set(): срез низа */
+  float bellowInc;  /* шаг фазы «дыхания» меха за сэмпл */
+  int   seqCounter;
+  int   active;
+} EutReed;
+
+void eut_reed_init(EutReed *g, EutReedVoice *voices, int voiceCount,
+                   float sampleRate);
+void eut_reed_reset(EutReed *g);
+void eut_reed_set(EutReed *g, float tone, float detuneCents, float noise,
+                  float attackSeconds, float formantHz, float pan, float level);
+void eut_reed_note_on(EutReed *g, int note, float velocity);
+void eut_reed_note_off(EutReed *g, int note);
+void eut_reed_all_off(EutReed *g);
+EUT_TARGET_CLONES
+void eut_reed_process(EutReed *g, float *outL, float *outR, int stride,
+                      int n, float bendSemitones, float modCents);
+
+
 /* ===========================================================================
  * ABI-проверка
  *
@@ -1022,6 +1084,8 @@ int eut_abi_sizeof_timpani_voice(void);
 int eut_abi_sizeof_timpani(void);
 int eut_abi_sizeof_choir_voice(void);
 int eut_abi_sizeof_choir(void);
+int eut_abi_sizeof_reed_voice(void);
+int eut_abi_sizeof_reed(void);
 
 #ifdef __cplusplus
 }

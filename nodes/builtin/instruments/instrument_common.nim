@@ -438,6 +438,30 @@ proc choirAbi*(g: ptr Choir): InstAbi {.inline.} =
     pedal: nil, process: choirProcessAbi
   )
 
+proc reedNoteOnAbi(state: pointer; note: cint; velocity: float32)
+    {.nimcall, raises: [], gcsafe.} =
+  reedNoteOn(cast[ptr Reed](state), note.int, velocity)
+
+proc reedNoteOffAbi(state: pointer; note: cint) {.nimcall, raises: [], gcsafe.} =
+  reedNoteOff(cast[ptr Reed](state), note.int)
+
+proc reedAllOffAbi(state: pointer) {.nimcall, raises: [], gcsafe.} =
+  reedAllOff(cast[ptr Reed](state))
+
+proc reedProcessAbi(state: pointer; outL, outR: ptr float32; stride, frames: cint;
+                    bendSemitones, modCents: float32) {.nimcall, raises: [], gcsafe.} =
+  reedProcess(cast[ptr Reed](state), outL, outR, stride.int, frames.int,
+              bendSemitones, modCents)
+
+proc reedAbi*(g: ptr Reed): InstAbi {.inline.} =
+  ## Таблица вызовов свободноязычковых: баян и гармошка — один движок с
+  ## разными разливом и камерой.
+  InstAbi(
+    state: cast[pointer](g),
+    noteOn: reedNoteOnAbi, noteOff: reedNoteOffAbi, allOff: reedAllOffAbi,
+    pedal: nil, process: reedProcessAbi
+  )
+
 # =============================================================================
 # Управление голосами
 # =============================================================================
