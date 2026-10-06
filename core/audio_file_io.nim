@@ -123,19 +123,34 @@ proc loadAudioFile*(path: string): tuple[samples: seq[float32], info: AudioFileI
 
   result.samples = newSeq[float32](totalSamples)
 
-  var rawBuf = newSeq[uint8](1024 * 1024)
+  # Чтение БЛОКАМИ, а не файл целиком (#355): раньше один вызов readFrames
+  # клал весь файл в raw-буфер фиксированных 1 МиБ, и файл длиннее ~6 секунд
+  # (стерео, 16 бит, 44.1 кГц) переполнял кучу — ASan падал, обычной сборкой
+  # это порча памяти рядом с seq. Размер блока — в КАДРАХ, поэтому и
+  # `int32(frames)` в вызове не переполняется на многочасовых файлах.
+  const blockSize = 4096
+  let bytesPerFrame = max(1, int(info.channels) * int(info.bitsPerSample div 8))
+  var rawBuf = newSeq[uint8](blockSize * bytesPerFrame)
 
-  let framesRead = decoder.readFrames(
-    cast[ptr UncheckedArray[uint8]](addr rawBuf[0]),
-    cast[ptr UncheckedArray[float32]](addr result.samples[0]),
-    int32(info.numFrames)
-  )
+  var framesDone: int64 = 0
+  while framesDone < info.numFrames:
+    let want = int32(min(int64(blockSize), info.numFrames - framesDone))
+    let offset = int(framesDone * int64(info.channels))
+    let framesRead = decoder.readFrames(
+      cast[ptr UncheckedArray[uint8]](addr rawBuf[0]),
+      cast[ptr UncheckedArray[float32]](addr result.samples[offset]),
+      want)
+    if framesRead <= 0:
+      break
+    framesDone += int64(framesRead)
+    if framesRead < want:
+      break
 
   decoder.close()
 
-  if framesRead < int32(info.numFrames):
-    result.samples.setLen(int(framesRead * int64(info.channels)))
-    result.info.numFrames = int64(framesRead)
+  if framesDone < info.numFrames:
+    result.samples.setLen(int(framesDone * int64(info.channels)))
+    result.info.numFrames = framesDone
 
 proc exportAudio*(path: string, info: AudioFileInfo, samples: openArray[float32]) =
   var encoder = openEncoder(path, info)

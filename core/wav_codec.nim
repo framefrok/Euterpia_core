@@ -113,6 +113,24 @@ proc openWavReader*(path: string): WavReader =
       if not readFmtChunk(result.stream, result.info, chunkSize):
         result.stream.close()
         raise newException(IOError, "Unsupported PCM format")
+      # Валидация заголовка СРАЗУ после fmt (#354, #103): нулевые каналы
+      # давали `Defect: division by zero` при вычислении numFrames — Defect
+      # не ловится `except CatchableError` в CLI, и битый файл ронял процесс
+      # вместо кода возврата 2. Неподдерживаемая глубина (8 бит, 64 float)
+      # читалась бы «тишиной»: в readFrames веток для неё нет.
+      if result.info.channels <= 0 or result.info.channels > 512:
+        result.stream.close()
+        raise newException(IOError,
+          "Invalid channel count: " & $result.info.channels)
+      if result.info.sampleRate <= 0 or result.info.sampleRate > 768000:
+        result.stream.close()
+        raise newException(IOError,
+          "Invalid sample rate: " & $result.info.sampleRate)
+      if result.info.bitsPerSample notin [16'i16, 24'i16, 32'i16]:
+        result.stream.close()
+        raise newException(IOError,
+          "Unsupported bit depth: " & $result.info.bitsPerSample &
+          " (supported: 16, 24, 32)")
         
     elif chunkId == "data":
       result.dataOffset = startPos
@@ -133,7 +151,14 @@ proc openWavReader*(path: string): WavReader =
   if result.dataOffset == 0:
     result.stream.close()
     raise newException(IOError, "No data chunk found")
-  
+
+  # Последний рубеж перед делением (#354): если data шёл ДО fmt (порядок
+  # чанков не нормирован), заголовок ещё не прочитан — и numFrames был бы
+  # делением на ноль.
+  if result.info.channels <= 0 or result.info.bitsPerSample < 8:
+    result.stream.close()
+    raise newException(IOError, "WAV header missing or invalid (no fmt chunk)")
+
   let bytesPerFrame = int64(result.info.channels) * int64(result.info.bitsPerSample div 8)
   result.info.numFrames = result.dataSize div bytesPerFrame
   result.info.duration = float64(result.info.numFrames) / float64(result.info.sampleRate)

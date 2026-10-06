@@ -184,3 +184,94 @@ suite "audio_file_io: оборванная запись (#76)":
     check gotInfo.numFrames == 128
     check samples.len == 128
 
+suite "audio_file_io: файлы длиннее сырого буфера (#355)":
+  test "round-trip файла > 1 МиБ сырых данных читается целиком":
+    ## Регрессия heap-переполнения: раньше loadAudioFile клал весь файл в
+    ## raw-буфер фиксированных 1 МиБ одним вызовом readFrames. Стерео,
+    ## 16 бит, 48 кГц, 6 секунд = 288 000 кадров = 1 152 000 байт сырых —
+    ## больше старого буфера. ASan на старом коде падал здесь.
+    let path = getTempDir() / "euterpia_afio_long.wav"
+    let frames = 48000 * 6
+    var src = newSeq[float32](frames * 2)
+    for f in 0 ..< frames:
+      # Линейный рамп вместо синуса: побайтовая сверка после round-trip
+      # ловит и потерю блоков, и сдвиг порядка каналов.
+      let v = float32(f mod 1000) / 1000.0f - 0.5f
+      src[f * 2] = v
+      src[f * 2 + 1] = -v
+    writeWav(path, info(16, 2, false), src)
+    defer: removeFile(path)
+
+    check getFileSize(path) > 1_048_576'i64   # условие старого переполнения
+
+    let (got, gotInfo) = loadAudioFile(path)
+    check gotInfo.numFrames == int64(frames)
+    check got.len == src.len
+    # Ошибка квантования 16 бит — не больше шага; главное — длина и порядок.
+    var maxErr = 0.0f
+    for i in 0 ..< src.len:
+      maxErr = max(maxErr, abs(got[i] - src[i]))
+    check maxErr < 1e-3f
+
+suite "audio_file_io: враждебный заголовок (#354)":
+  ## Битый WAV обязан дать IOError (CLI ловит CatchableError и возвращает
+  ## код 2), а НЕ Defect — тот не наследует CatchableError и ронял процесс.
+
+  proc writeRawWav(path: string; channels, sampleRate, bits: uint16;
+                   audioFormat: uint16 = 1) =
+    ## Минимальный валидный RIFF/WAVE побайтово: раскладка fmt —
+    ## 20 audioFormat, 22 channels, 24 sampleRate, 28 byteRate,
+    ## 32 blockAlign, 34 bitsPerSample, 36 "data", 40 dataSize.
+    var b = newString(52)
+    b[0 .. 3] = "RIFF"
+    b[8 .. 11] = "WAVE"
+    b[12 .. 15] = "fmt "
+    b[36 .. 39] = "data"
+    proc putU32(off: int; v: uint32) =
+      b[off] = char(v and 0xff)
+      b[off + 1] = char((v shr 8) and 0xff)
+      b[off + 2] = char((v shr 16) and 0xff)
+      b[off + 3] = char((v shr 24) and 0xff)
+    proc putU16(off: int; v: uint16) =
+      b[off] = char(v and 0xff)
+      b[off + 1] = char((v shr 8) and 0xff)
+    let blockAlign = channels * (bits div 8)
+    putU32(4, 44'u32)             # RIFF size
+    putU32(16, 16'u32)            # fmt size
+    putU16(20, audioFormat)
+    putU16(22, channels)
+    putU32(24, uint32(sampleRate))
+    putU32(28, uint32(sampleRate) * uint32(blockAlign))
+    putU16(32, blockAlign)
+    putU16(34, bits)
+    putU32(40, 4'u32)             # data size
+    writeFile(path, b)
+
+  test "channels=0 — IOError, а не division by zero":
+    let path = getTempDir() / "euterpia_afio_ch0.wav"
+    writeRawWav(path, channels = 0, sampleRate = 44100, bits = 16)
+    defer: removeFile(path)
+    expect IOError:
+      discard loadAudioFile(path)
+
+  test "sampleRate=0 — IOError, а не duration=inf":
+    let path = getTempDir() / "euterpia_afio_sr0.wav"
+    writeRawWav(path, channels = 2, sampleRate = 0, bits = 16)
+    defer: removeFile(path)
+    expect IOError:
+      discard loadAudioFile(path)
+
+  test "8-бит PCM — честный отказ, а не тишина без ошибки":
+    let path = getTempDir() / "euterpia_afio_8bit.wav"
+    writeRawWav(path, channels = 2, sampleRate = 44100, bits = 8)
+    defer: removeFile(path)
+    expect IOError:
+      discard loadAudioFile(path)
+
+  test "мусорная глубина (bits=4) — IOError":
+    let path = getTempDir() / "euterpia_afio_4bit.wav"
+    writeRawWav(path, channels = 1, sampleRate = 44100, bits = 4)
+    defer: removeFile(path)
+    expect IOError:
+      discard loadAudioFile(path)
+
