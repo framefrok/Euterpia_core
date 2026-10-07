@@ -224,59 +224,88 @@ proc processCompNode(
   if frames <= 0:
     return
 
-  # Порог, ratio и makeup сглаживаются: без этого автоматизация
-  # порога слышна как «дёрганье» на входах.
-  st.pThreshold = st.smoothThreshold.advance(frames)
-  st.pRatio = st.smoothRatio.advance(frames)
-  st.pMakeup = st.smoothMakeup.advance(frames)
-
-  compSetParams(addr st.comp, st.pThreshold, st.pRatio, st.pKnee,
-                st.pAttack, st.pRelease, st.pMakeup)
-
   let channels = min(channelCount(outBuf), 2'i32)
+  let scale = 1.0f / sqrt(0.5f)
 
-  # --- Детектор -----------------------------------------------------------
-  #
-  # При линке детектор считается по максимуму каналов, нормированному
-  # так, чтобы сумма моно-сигналов не читалась как +3 dB.
-  # Детектор НИКОГДА не пишет во входной буфер: вход может быть общим
-  # для нескольких нод графа.
-  var detectorInput: ptr float32 = nil
+  # Пер-сэмпловое сглаживание (#386). Порог/ratio/makeup двигают кривую gain:
+  # установившийся режим считает её раз в блок, переход — по сэмплу через
+  # `compSetParams`+`compDetect(1)` (одно значение на позицию).
+  let settled =
+    abs(st.smoothThreshold.target - st.smoothThreshold.current) <=
+      snapEps(st.smoothThreshold.target) and
+    abs(st.smoothRatio.target - st.smoothRatio.current) <=
+      snapEps(st.smoothRatio.target) and
+    abs(st.smoothMakeup.target - st.smoothMakeup.current) <=
+      snapEps(st.smoothMakeup.target)
+  var rampThr = st.smoothThreshold.beginRamp(frames)
+  var rampRatio = st.smoothRatio.beginRamp(frames)
+  var rampMakeup = st.smoothMakeup.beginRamp(frames)
 
-  if st.stereoLink and channels >= 2:
-    let l = inBuf.channelPtr(0, frames)
-    let r = inBuf.channelPtr(1, frames)
-    if not l.isNil and not r.isNil and not st.detectorScratch.isNil:
-      let la = cast[ptr UncheckedArray[float32]](l)
-      let ra = cast[ptr UncheckedArray[float32]](r)
-      let scratch = cast[ptr UncheckedArray[float32]](st.detectorScratch)
-      let scale = 1.0f / sqrt(0.5f)
-      for i in 0 ..< frames.int:
-        let a = abs(la[i])
-        let b = abs(ra[i])
-        scratch[i] = (if a > b: a else: b) * scale
-      detectorInput = st.detectorScratch
+  let stereoLink =
+    st.stereoLink and channels >= 2 and not st.detectorScratch.isNil
+
+  if settled:
+    st.pThreshold = rampThr.next()
+    st.pRatio = rampRatio.next()
+    st.pMakeup = rampMakeup.next()
+    compSetParams(addr st.comp, st.pThreshold, st.pRatio, st.pKnee,
+                  st.pAttack, st.pRelease, st.pMakeup)
+
+    # --- Детектор (блок) -------------------------------------------------
+    #
+    # При линке детектор считается по максимуму каналов, нормированному
+    # так, чтобы сумма моно-сигналов не читалась как +3 dB.
+    # Детектор НИКОГДА не пишет во входной буфер: вход может быть общим
+    # для нескольких нод графа.
+    var detectorInput: ptr float32 = nil
+    if st.stereoLink and channels >= 2:
+      let l = inBuf.channelPtr(0, frames)
+      let r = inBuf.channelPtr(1, frames)
+      if not l.isNil and not r.isNil and not st.detectorScratch.isNil:
+        let la = cast[ptr UncheckedArray[float32]](l)
+        let ra = cast[ptr UncheckedArray[float32]](r)
+        let scratch = cast[ptr UncheckedArray[float32]](st.detectorScratch)
+        for i in 0 ..< frames.int:
+          let a = abs(la[i])
+          let b = abs(ra[i])
+          scratch[i] = (if a > b: a else: b) * scale
+        detectorInput = st.detectorScratch
     else:
-      detectorInput = nil
+      detectorInput = inBuf.channelPtr(0, frames)
+    if not detectorInput.isNil:
+      compDetect(addr st.comp, detectorInput, frames.int)
+
+    # --- Применение (блок) ----------------------------------------------
+    for ch in 0 ..< max(channels, 1'i32):
+      let pin = inBuf.channelPtr(ch, frames)
+      let pout = outBuf.channelPtr(ch, frames)
+
+      if pin.isNil or pout.isNil:
+        # Interleaved-раскладка (выход прямо в драйвер): непрерывного
+        # указателя на канал нет, поэтому gain берётся по сэмплам.
+        forEachFrame(outBuf, frames):
+          let x = inBuf.sampleAt(ch, i)
+          outBuf.setSampleAt(ch, i, x * compGainAt(addr st.comp, i))
+      else:
+        compApply(addr st.comp, pin, pout, frames.int)
   else:
-    detectorInput = inBuf.channelPtr(0, frames)
-
-  if not detectorInput.isNil:
-    compDetect(addr st.comp, detectorInput, frames.int)
-
-  # --- Применение ---------------------------------------------------------
-  for ch in 0 ..< max(channels, 1'i32):
-    let pin = inBuf.channelPtr(ch, frames)
-    let pout = outBuf.channelPtr(ch, frames)
-
-    if pin.isNil or pout.isNil:
-      # Interleaved-раскладка (выход прямо в драйвер): непрерывного
-      # указателя на канал нет, поэтому gain берётся по сэмплам.
-      forEachFrame(outBuf, frames):
-        let x = inBuf.sampleAt(ch, i)
-        outBuf.setSampleAt(ch, i, x * compGainAt(addr st.comp, i))
-    else:
-      compApply(addr st.comp, pin, pout, frames.int)
+    # --- Переход: порог/ratio/makeup и обработка — по сэмплу ------------
+    var i: int32 = 0
+    while i < frames:
+      compSetParams(addr st.comp, rampThr.next(), rampRatio.next(), st.pKnee,
+                    st.pAttack, st.pRelease, rampMakeup.next())
+      var det: float32
+      if stereoLink:
+        let a = abs(inBuf.sampleAt(0, i))
+        let b = abs(inBuf.sampleAt(1, i))
+        det = (if a > b: a else: b) * scale
+      else:
+        det = inBuf.sampleAt(0, i)
+      compDetect(addr st.comp, addr det, 1)
+      let g = compGainAt(addr st.comp, 0)
+      for ch in 0 ..< max(channels, 1'i32):
+        outBuf.setSampleAt(ch, i, inBuf.sampleAt(ch, i) * g)
+      inc i
 
   # --- Метрика ------------------------------------------------------------
   if not ctrl.isNil and ctrl.outputCount > 0 and not ctrl.outputs[0].isNil:

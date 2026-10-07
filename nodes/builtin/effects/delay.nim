@@ -197,11 +197,6 @@ proc processDelayNode(
   if frames <= 0:
     return
 
-  let timeL = st.smoothTimeL.advance(frames)
-  let timeR = st.smoothTimeR.advance(frames)
-  let feedback = st.smoothFeedback.advance(frames)
-  let mix = st.smoothMix.advance(frames)
-
   let sr = if ctx.sampleRate > 0.0f: ctx.sampleRate else: st.sampleRate
   if abs(sr - st.sampleRate) > 0.01f:
     # Смена sample rate меняет требуемый размер кольца.
@@ -209,7 +204,22 @@ proc processDelayNode(
     # остаётся прежним, а время просто пересчитывается в кадры.
     st.sampleRate = sr
 
-  delaySet(addr st.dly, sr, timeL, timeR, feedback, mix, st.pingPong)
+  # Пер-сэмпловое сглаживание (#386). Установившийся режим — параметры ставятся
+  # раз в блок; во время перехода — на каждом сэмпле (ядро задержки принимает
+  # одно значение на вызов, поэтому переход идёт вызовами по одному сэмплу).
+  let settled =
+    abs(st.smoothTimeL.target - st.smoothTimeL.current) <=
+      snapEps(st.smoothTimeL.target) and
+    abs(st.smoothTimeR.target - st.smoothTimeR.current) <=
+      snapEps(st.smoothTimeR.target) and
+    abs(st.smoothFeedback.target - st.smoothFeedback.current) <=
+      snapEps(st.smoothFeedback.target) and
+    abs(st.smoothMix.target - st.smoothMix.current) <=
+      snapEps(st.smoothMix.target)
+  var rampTimeL = st.smoothTimeL.beginRamp(frames)
+  var rampTimeR = st.smoothTimeR.beginRamp(frames)
+  var rampFb = st.smoothFeedback.beginRamp(frames)
+  var rampMix = st.smoothMix.beginRamp(frames)
 
   let channels = channelCount(outBuf)
   let inCh = channelCount(inBuf)
@@ -230,7 +240,22 @@ proc processDelayNode(
         outBuf.setSampleAt(1, i, x)
     return
 
-  delayProcess(addr st.dly, inL, inR, outL, outR, frames.int)
+  if settled:
+    delaySet(addr st.dly, sr, rampTimeL.next(), rampTimeR.next(),
+             rampFb.next(), rampMix.next(), st.pingPong)
+    delayProcess(addr st.dly, inL, inR, outL, outR, frames.int)
+  else:
+    let inLA = cast[ptr UncheckedArray[float32]](inL)
+    let inRA = cast[ptr UncheckedArray[float32]](inR)
+    let outLA = cast[ptr UncheckedArray[float32]](outL)
+    let outRA = cast[ptr UncheckedArray[float32]](outR)
+    var i: int32 = 0
+    while i < frames:
+      delaySet(addr st.dly, sr, rampTimeL.next(), rampTimeR.next(),
+               rampFb.next(), rampMix.next(), st.pingPong)
+      delayProcess(addr st.dly, addr inLA[i], addr inRA[i],
+                   addr outLA[i], addr outRA[i], 1)
+      inc i
 
   # Каналы сверх двух (7.1): копируем вход без обработки.
   if channels > 2:

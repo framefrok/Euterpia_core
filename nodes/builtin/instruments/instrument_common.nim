@@ -49,6 +49,14 @@ const
     ## Время сглаживания непрерывных контроллеров. Колесо и модуляция
     ## приходят ступенями MIDI, и без сглаживания слышны «ступеньки».
 
+  InstRenderChunk* = 64'i32
+    ## Размер под-чанка рендера инструмента. Bend/modCents сглаживаются по
+    ## сэмплам (#386), а ядро принимает одно значение на вызов, поэтому переход
+    ## применяется на границах под-чанков. Границы кратны константе и не зависят
+    ## от размера блока (для blockSize, кратных 64): форма перехода одинакова при
+    ## 64/512/4096. Без этого конец блока задавал бы свою границу и переход
+    ## зависел бы от blockSize.
+
   InstScratchFrames* = int32(MaxBlockSize)
     ## Ёмкость временного буфера инструмента (кадров НА КАНАЛ) для
     ## interleaved-выхода. Инструмент, стоящий последним в цепочке,
@@ -531,14 +539,37 @@ proc offsetPtr(p: ptr float32; frames: int32): ptr float32 {.inline.} =
     return p
   cast[ptr float32](cast[uint](p) + uint(frames) * uint(sizeof(float32)))
 
+proc renderSegment(abi: InstAbi; outL, outR: ptr float32;
+                   fromPos, toPos: int32;
+                   bendRamp, modRamp: var ParamRamp) {.inline.} =
+  ## Отрисовка одного сегмента [fromPos, toPos) под-чанками `InstRenderChunk`.
+  ## Bend/modCents берутся на границе под-чанка; границы кратны константе, что и
+  ## делает переход независимым от blockSize (#386).
+  var p = fromPos
+  while p < toPos:
+    let n = min(InstRenderChunk, toPos - p)
+    var b = 0.0f
+    var m = 0.0f
+    var k = 0'i32
+    while k < n:
+      b = bendRamp.next()
+      m = modRamp.next()
+      inc k
+    abi.process(abi.state, offsetPtr(outL, p), offsetPtr(outR, p),
+                1'i32, n.cint, b, m)
+    p += n
+
 proc instRenderPlanar(abi: InstAbi; midi: var InstMidi; outL, outR: ptr float32;
                       frames: int32; q: ptr EventQueue; evIdx: var int32;
-                      bend, modCents: float32) =
+                      bendRamp, modRamp: var ParamRamp) =
   ## Отрисовка в НЕПРЕРЫВНЫЕ каналы: нарезка по событиям + вызовы ядра.
   ##
   ## `evIdx` — курсор по очереди блока: он общий для всех вызовов, поэтому
   ## блок больше временного буфера обрабатывается по частям, а событие не
   ## применяется дважды.
+  ##
+  ## Bend/modCents — пер-сэмпловые ramp'ы (#386), значение берётся на границах
+  ## фиксированных под-чанков (`renderSegment`).
   var pos = 0'i32
   if not q.isNil:
     while evIdx < q.count:
@@ -551,16 +582,14 @@ proc instRenderPlanar(abi: InstAbi; midi: var InstMidi; outL, outR: ptr float32;
 
       let cut = off.int32
       if cut > pos:
-        abi.process(abi.state, offsetPtr(outL, pos), offsetPtr(outR, pos),
-                    1'i32, (cut - pos).cint, bend, modCents)
+        renderSegment(abi, outL, outR, pos, cut, bendRamp, modRamp)
         pos = cut
 
       instApplyEvent(abi, midi, ev)
       inc evIdx
 
   if pos < frames:
-    abi.process(abi.state, offsetPtr(outL, pos), offsetPtr(outR, pos),
-                1'i32, (frames - pos).cint, bend, modCents)
+    renderSegment(abi, outL, outR, pos, frames, bendRamp, modRamp)
 
 proc instRender*(abi: InstAbi; midi: var InstMidi; outBuf: PAudioBuffer;
                  frames: int32; q: ptr EventQueue;
@@ -600,9 +629,9 @@ proc instRender*(abi: InstAbi; midi: var InstMidi; outBuf: PAudioBuffer;
     # ядро складывает L и R — обычная свёртка стерео в моно. Компенсировать
     # её громкость должен микшер: узел не знает, что стоит дальше по графу.
     let outR = if channels >= 2: outBuf.channelPtr(1, frames) else: outL
-    let bend = midi.bend.advance(frames)
-    let modCents = midi.modCents.advance(frames)
-    instRenderPlanar(abi, midi, outL, outR, frames, q, evIdx, bend, modCents)
+    var bendRamp = midi.bend.beginRamp(frames)
+    var modRamp = midi.modCents.beginRamp(frames)
+    instRenderPlanar(abi, midi, outL, outR, frames, q, evIdx, bendRamp, modRamp)
     return
 
   if scratch.isNil:
@@ -619,8 +648,8 @@ proc instRender*(abi: InstAbi; midi: var InstMidi; outBuf: PAudioBuffer;
   var pos = 0'i32
   while pos < frames:
     let part = min(InstScratchFrames, frames - pos)
-    let bend = midi.bend.advance(part)
-    let modCents = midi.modCents.advance(part)
+    var bendRamp = midi.bend.beginRamp(part)
+    var modRamp = midi.modCents.beginRamp(part)
 
     # Ядро ПРИБАВЛЯЕТ к буферу, а `scratch` — общий на все блоки ноды
     # (в отличие от outBuf, который нода только что очистила). Без этой
@@ -635,7 +664,7 @@ proc instRender*(abi: InstAbi; midi: var InstMidi; outBuf: PAudioBuffer;
       inc k
 
     instRenderPlanar(abi, midi, scratchL, scratchR, part, q, evIdx,
-                     bend, modCents)
+                     bendRamp, modRamp)
 
     var i = 0'i32
     while i < part:

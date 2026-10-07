@@ -178,36 +178,60 @@ proc processBiquadNode(
   if frames <= 0:
     return
 
-  let cutoff = st.smoothCutoff.advance(frames)
-  let q = st.smoothQ.advance(frames)
-  let gain = st.smoothGain.advance(frames)
-
   let sr = if ctx.sampleRate > 0.0f: ctx.sampleRate else: st.sampleRate
+
+  # Пер-сэмпловое сглаживание (#386). Установившийся режим — коэффициенты
+  # считаются раз в блок (синусы/косинусы не на каждом сэмпле); во время
+  # перехода — на каждом сэмпле, чтобы переход не зависел от blockSize.
+  let settled =
+    abs(st.smoothCutoff.target - st.smoothCutoff.current) <=
+      snapEps(st.smoothCutoff.target) and
+    abs(st.smoothQ.target - st.smoothQ.current) <=
+      snapEps(st.smoothQ.target) and
+    abs(st.smoothGain.target - st.smoothGain.current) <=
+      snapEps(st.smoothGain.target)
+  var rampCut = st.smoothCutoff.beginRamp(frames)
+  var rampQ = st.smoothQ.beginRamp(frames)
+  var rampGain = st.smoothGain.beginRamp(frames)
+
   if abs(sr - st.sampleRate) > 0.01f:
     st.sampleRate = sr
-    st.smoothCutoff = initSmoother(20.0f, sr, cutoff)
-    st.smoothQ = initSmoother(20.0f, sr, q)
-    st.smoothGain = initSmoother(20.0f, sr, gain)
+    st.smoothCutoff = initSmoother(20.0f, sr, st.smoothCutoff.current)
+    st.smoothQ = initSmoother(20.0f, sr, st.smoothQ.current)
+    st.smoothGain = initSmoother(20.0f, sr, st.smoothGain.current)
 
   let channels = min(channelCount(outBuf), 2'i32)
 
-  for ch in 0 ..< channels:
-    # Пересчёт коэффициентов раз в блок на канал: это несколько
-    # синусов и косинусов, что на 128 сэмплах дешевле, чем нарезка
-    # сигнала обратной связью при смене коэффициентов каждый сэмпл.
-    biquadDesign(addr st.filters[ch], st.kind, sr, cutoff, q, gain)
+  if settled:
+    let cutoff = rampCut.next()
+    let q = rampQ.next()
+    let gain = rampGain.next()
+    for ch in 0 ..< channels:
+      biquadDesign(addr st.filters[ch], st.kind, sr, cutoff, q, gain)
 
-    let pin = inBuf.channelPtr(ch, frames)
-    let pout = outBuf.channelPtr(ch, frames)
-    if pin.isNil or pout.isNil:
-      # Interleaved-раскладка (таков выход в драйвер): непрерывного
-      # указателя на канал нет, поэтому фильтруем по одному сэмплу.
-      forEachFrame(outBuf, frames):
+      let pin = inBuf.channelPtr(ch, frames)
+      let pout = outBuf.channelPtr(ch, frames)
+      if pin.isNil or pout.isNil:
+        # Interleaved-раскладка (таков выход в драйвер): непрерывного
+        # указателя на канал нет, поэтому фильтруем по одному сэмплу.
+        forEachFrame(outBuf, frames):
+          let x = inBuf.sampleAt(ch, i)
+          outBuf.setSampleAt(ch, i, biquadProcessOne(addr st.filters[ch], x))
+      else:
+        # in == out допустимо: TDF-II читает x до записи результата.
+        biquadProcess(addr st.filters[ch], pin, pout, frames.int)
+  else:
+    # Переход: пересчёт коэффициентов и обработка — по сэмплу.
+    var i: int32 = 0
+    while i < frames:
+      let cutoff = rampCut.next()
+      let q = rampQ.next()
+      let gain = rampGain.next()
+      for ch in 0 ..< channels:
+        biquadDesign(addr st.filters[ch], st.kind, sr, cutoff, q, gain)
         let x = inBuf.sampleAt(ch, i)
         outBuf.setSampleAt(ch, i, biquadProcessOne(addr st.filters[ch], x))
-    else:
-      # in == out допустимо: TDF-II читает x до записи результата.
-      biquadProcess(addr st.filters[ch], pin, pout, frames.int)
+      inc i
 
 proc getBiquadDesc*(): ptr NodeDesc =
   if not biquadReady:

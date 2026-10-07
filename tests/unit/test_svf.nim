@@ -6,6 +6,8 @@
 # поэтому Butterworth Q = 0.707 задаётся как resonance = 1.414.
 
 import std/[unittest, math]
+import signal_types
+import node_interface
 import sdk/node_api
 import builtin/filters/svf
 import builtin/native/eut_native
@@ -29,7 +31,67 @@ proc renderSineSvf(kind, cutoff, reso: float32; freq: float32;
         phase += inc
   )
 
+proc renderSvfTransition(blockSize, total: int): seq[float32] =
+  ## Вход — синус 1 кГц; cutoff сглаживается с 8000 к 500 Гц (переход).
+  ## Один и тот же переход при разных blockSize обязан совпасть по сэмплам (#386):
+  ## коэффициенты фильтра пересчитываются по сэмплам, поэтому смена блока не
+  ## меняет ни одного выходного отсчёта.
+  let factory = getSvfFactory()
+  let desc = getSvfDesc()
+  let state = factory.create(desc, nil)
+  check state != nil
+  factory.setParam(state, SvfParamType, 0.0f, false)        # lowpass
+  factory.setParam(state, SvfParamCutoff, 8000.0f, false)   # старт перехода
+  factory.setParam(state, SvfParamResonance, 1.414f, false)
+  factory.setParam(state, SvfParamCutoff, 500.0f, false)    # цель перехода
+
+  var inBuf = newSeq[float32](blockSize)
+  var outBuf = newSeq[float32](blockSize)
+
+  var ctx: NodeProcessContext
+  ctx.sampleRate = TestSampleRate
+  ctx.blockSize = int32(blockSize)
+
+  var ab: AudioBuffer
+  ab.data = cast[ptr UncheckedArray[float32]](addr inBuf[0])
+  ab.channels = 1
+  ab.frames = int32(blockSize)
+  ab.stride = int32(blockSize)
+
+  var ob: AudioBuffer
+  ob.data = cast[ptr UncheckedArray[float32]](addr outBuf[0])
+  ob.channels = 1
+  ob.frames = int32(blockSize)
+  ob.stride = int32(blockSize)
+
+  var audio: NodeAudioPorts
+  audio.inputCount = 1
+  audio.outputCount = 1
+  audio.inputs[0] = addr ab
+  audio.outputs[0] = addr ob
+
+  result = newSeq[float32](total)
+  let inc = 2.0 * PI * 1000.0 / float64(TestSampleRate)
+  var done = 0
+  while done < total:
+    for i in 0 ..< blockSize:
+      inBuf[i] = sin(inc * float64(done + i)).float32
+    ctx.samplePosition = int64(done)
+    factory.process(addr ctx, addr audio, nil, nil, state)
+    for i in 0 ..< blockSize:
+      result[done + i] = outBuf[i]
+    done += blockSize
+
+  factory.destroy(state)
+
 suite "svf":
+  test "переход cutoff идентичен при blockSize 64/512 (#386)":
+    let a64 = renderSvfTransition(64, 4096)
+    let a512 = renderSvfTransition(512, 4096)
+    check a64.len == 4096
+    for i in 0 ..< 4096:
+      check abs(a64[i] - a512[i]) < 1e-4f
+
   test "lowpass: проходная полоса без потерь":
     let s = renderSineSvf(0.0f, 1000.0f, ButterworthReso, 100.0f, 8)
     check s.isFinite()

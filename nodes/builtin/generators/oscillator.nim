@@ -195,6 +195,11 @@ proc getOscParam(state: pointer; paramId: uint32; outValue: ptr float32): bool
 # Обработка (audio thread)
 # ==============================================================================
 
+proc oscChanPtr(a: ptr float32; i: int32): ptr float32 {.inline.} =
+  ## Указатель на сэмпл `i` канала: `channelPtr` даёт на канал, а ядру осциллятора
+  ## нужен указатель на конкретный сэмпл (пер-сэмпловый переход, #386).
+  cast[ptr float32](addr cast[ptr UncheckedArray[float32]](a)[int(i)])
+
 proc processOscNode(
     ctx: ptr NodeProcessContext,
     audio: ptr NodeAudioPorts,
@@ -228,62 +233,99 @@ proc processOscNode(
     return
 
   # --- Сглаживание параметров ------------------------------------------------
-  # freq/detune/pulse — control rate (влияют на фазовый инкремент ядра).
-  let freq = st.smoothFreq.advance(frames)
-  let detune = st.smoothDetune.advance(frames)
-  let pulse = st.smoothPulse.advance(frames)
-  # Уровень применяется ПО СЭМПЛУ (#386): ядро рендерит с единичным gain,
-  # а ramp домножается ниже — переход не зависит от blockSize.
-  var levelRamp = st.smoothLevel.beginRamp(frames)
-  let level = st.smoothLevel.current
-
+  # Уровень — всегда по сэмплу (#386). freq/detune/pulse двигают состояние ядра
+  # (фазовый инкремент и ширину импульса): в установившемся режиме ставятся раз
+  # в блок, в переходе — на каждом сэмпле (рендер по одному сэмплу).
   let sr = if ctx.sampleRate > 0.0f: ctx.sampleRate else: st.sampleRate
   if abs(sr - st.sampleRate) > 0.01f:
     # Смена sample rate пересоздаёт сглаживатели с новым шагом,
     # но сохраняет текущие значения: иначе параметр «прыгает».
     st.sampleRate = sr
-    st.smoothFreq = initSmoother(20.0f, sr, freq)
-    st.smoothLevel = initSmoother(10.0f, sr, level)
-    st.smoothDetune = initSmoother(20.0f, sr, detune)
-    st.smoothPulse = initSmoother(10.0f, sr, pulse)
+    st.smoothFreq = initSmoother(20.0f, sr, st.smoothFreq.current)
+    st.smoothLevel = initSmoother(10.0f, sr, st.smoothLevel.current)
+    st.smoothDetune = initSmoother(20.0f, sr, st.smoothDetune.current)
+    st.smoothPulse = initSmoother(10.0f, sr, st.smoothPulse.current)
 
-  oscSetFreq(addr st.osc, sr, freq)
-  oscSetPulseWidth(addr st.osc, pulse)
+  let settledOsc =
+    abs(st.smoothFreq.target - st.smoothFreq.current) <=
+      snapEps(st.smoothFreq.target) and
+    abs(st.smoothDetune.target - st.smoothDetune.current) <=
+      snapEps(st.smoothDetune.target) and
+    abs(st.smoothPulse.target - st.smoothPulse.current) <=
+      snapEps(st.smoothPulse.target)
+  var rampFreq = st.smoothFreq.beginRamp(frames)
+  var rampDetune = st.smoothDetune.beginRamp(frames)
+  var rampPulse = st.smoothPulse.beginRamp(frames)
+  var levelRamp = st.smoothLevel.beginRamp(frames)
 
   let channels = channelCount(outBuf)
-  let n = frames.cint
   let kind = st.waveform
 
-  if channels <= 1:
-    let p = outBuf.channelPtr(0, frames)
-    if p.isNil:
-      outBuf.fillZero(frames)
-    else:
-      oscRender(addr st.osc, kind, p, n, 1.0f)
-  elif abs(detune) < 0.001f:
-    # Без расстройки оба канала получают один и тот же инкремент фазы:
-    # так они когерентны, как у настоящего моно-генератора.
-    for ch in 0 ..< channels:
-      let p = outBuf.channelPtr(ch, frames)
+  if settledOsc:
+    let freq = rampFreq.next()
+    let detune = rampDetune.next()
+    let pulse = rampPulse.next()
+    oscSetFreq(addr st.osc, sr, freq)
+    oscSetPulseWidth(addr st.osc, pulse)
+
+    let n = frames.cint
+    if channels <= 1:
+      let p = outBuf.channelPtr(0, frames)
       if p.isNil:
         outBuf.fillZero(frames)
-        return
-      oscRender(addr st.osc, kind, p, n, 1.0f)
-  else:
-    let pl = outBuf.channelPtr(0, frames)
-    let pr = outBuf.channelPtr(1, frames)
-    if pl.isNil or pr.isNil:
-      outBuf.fillZero(frames)
+      else:
+        oscRender(addr st.osc, kind, p, n, 1.0f)
+    elif abs(detune) < 0.001f:
+      # Без расстройки оба канала получают один и тот же инкремент фазы:
+      # так они когерентны, как у настоящего моно-генератора.
+      for ch in 0 ..< channels:
+        let p = outBuf.channelPtr(ch, frames)
+        if p.isNil:
+          outBuf.fillZero(frames)
+          return
+        oscRender(addr st.osc, kind, p, n, 1.0f)
     else:
-      oscRenderStereo(addr st.osc, kind, pl, pr, n, 1.0f, detune)
+      let pl = outBuf.channelPtr(0, frames)
+      let pr = outBuf.channelPtr(1, frames)
+      if pl.isNil or pr.isNil:
+        outBuf.fillZero(frames)
+      else:
+        oscRenderStereo(addr st.osc, kind, pl, pr, n, 1.0f, detune)
 
-  # Уровень: одно значение на позицию сэмпла, применённое ко всем каналам (#386).
-  var i: int32 = 0
-  while i < frames:
-    let g = levelRamp.next()
-    for ch in 0 ..< channels:
-      outBuf.setSampleAt(ch, i, outBuf.sampleAt(ch, i) * g)
-    inc i
+    # Уровень: одно значение на позицию сэмпла, ко всем каналам (#386).
+    var i: int32 = 0
+    while i < frames:
+      let g = levelRamp.next()
+      for ch in 0 ..< channels:
+        outBuf.setSampleAt(ch, i, outBuf.sampleAt(ch, i) * g)
+      inc i
+  else:
+    # Переход: freq/detune/pulse/level — на каждом сэмпле. Каналы заранее
+    # сводятся к указателям: рендер идёт по одному сэмплу.
+    var chanPtr: array[8, ptr float32]
+    let nch = min(channels, 8'i32)
+    for ch in 0 ..< nch:
+      chanPtr[int(ch)] = outBuf.channelPtr(ch, frames)
+      if chanPtr[int(ch)].isNil:
+        outBuf.fillZero(frames)
+        return
+    var i: int32 = 0
+    while i < frames:
+      let f = rampFreq.next()
+      let d = rampDetune.next()
+      let p = rampPulse.next()
+      let g = levelRamp.next()
+      oscSetFreq(addr st.osc, sr, f)
+      oscSetPulseWidth(addr st.osc, p)
+      if nch <= 1:
+        oscRender(addr st.osc, kind, oscChanPtr(chanPtr[0], i), 1, g)
+      elif abs(d) < 0.001f:
+        for ch in 0 ..< nch:
+          oscRender(addr st.osc, kind, oscChanPtr(chanPtr[int(ch)], i), 1, g)
+      else:
+        oscRenderStereo(addr st.osc, kind, oscChanPtr(chanPtr[0], i),
+                        oscChanPtr(chanPtr[1], i), 1, g, d)
+      inc i
 
 # ==============================================================================
 # Экспорт

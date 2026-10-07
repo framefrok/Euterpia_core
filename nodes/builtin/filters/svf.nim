@@ -161,28 +161,53 @@ proc processSvfNode(
   if frames <= 0:
     return
 
-  let cutoff = st.smoothCutoff.advance(frames)
-  let reso = st.smoothReso.advance(frames)
   let sr = if ctx.sampleRate > 0.0f: ctx.sampleRate else: st.sampleRate
+
+  # Пер-сэмпловое сглаживание (#386). Установившийся режим — коэффициенты
+  # считаются раз в блок (быстро); во время перехода — на КАЖДОМ сэмпле, чтобы
+  # форма перехода не зависела от blockSize. Ядро SVF принимает одно значение
+  # на вызов, поэтому per-sample переход идёт через `svfProcessOne`.
+  let settled =
+    abs(st.smoothCutoff.target - st.smoothCutoff.current) <=
+      snapEps(st.smoothCutoff.target) and
+    abs(st.smoothReso.target - st.smoothReso.current) <=
+      snapEps(st.smoothReso.target)
+  var rampCut = st.smoothCutoff.beginRamp(frames)
+  var rampReso = st.smoothReso.beginRamp(frames)
 
   if abs(sr - st.sampleRate) > 0.01f:
     st.sampleRate = sr
-    st.smoothCutoff = initSmoother(20.0f, sr, cutoff)
-    st.smoothReso = initSmoother(20.0f, sr, reso)
+    st.smoothCutoff = initSmoother(20.0f, sr, st.smoothCutoff.current)
+    st.smoothReso = initSmoother(20.0f, sr, st.smoothReso.current)
 
   let channels = min(channelCount(outBuf), 2'i32)
 
-  for ch in 0 ..< channels:
-    svfDesign(addr st.filters[ch], st.kind, sr, cutoff, reso)
+  if settled:
+    let cutoff = rampCut.next()
+    let reso = rampReso.next()
+    for ch in 0 ..< channels:
+      svfDesign(addr st.filters[ch], st.kind, sr, cutoff, reso)
 
-    let pin = inBuf.channelPtr(ch, frames)
-    let pout = outBuf.channelPtr(ch, frames)
-    if pin.isNil or pout.isNil:
-      forEachFrame(outBuf, frames):
+      let pin = inBuf.channelPtr(ch, frames)
+      let pout = outBuf.channelPtr(ch, frames)
+      if pin.isNil or pout.isNil:
+        forEachFrame(outBuf, frames):
+          outBuf.setSampleAt(ch, i,
+            svfProcessOne(addr st.filters[ch], st.kind, inBuf.sampleAt(ch, i)))
+      else:
+        svfProcess(addr st.filters[ch], st.kind, pin, pout, frames.int)
+  else:
+    # Переход: коэффициенты и обработка — по сэмплу (одно значение на позицию,
+    # общее для всех каналов).
+    var i: int32 = 0
+    while i < frames:
+      let cutoff = rampCut.next()
+      let reso = rampReso.next()
+      for ch in 0 ..< channels:
+        svfDesign(addr st.filters[ch], st.kind, sr, cutoff, reso)
         outBuf.setSampleAt(ch, i,
           svfProcessOne(addr st.filters[ch], st.kind, inBuf.sampleAt(ch, i)))
-    else:
-      svfProcess(addr st.filters[ch], st.kind, pin, pout, frames.int)
+      inc i
 
 proc getSvfDesc*(): ptr NodeDesc =
   if not svfReady:
