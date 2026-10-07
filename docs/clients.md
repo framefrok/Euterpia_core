@@ -89,10 +89,14 @@ Input → Command → Core → State update → Render
 | `param.set` | задать параметр | `edit` | `param.set` | `param` | целиком |
 | `view.graph` | граф: ноды и связи | `view` | — | `node` | целиком |
 | `view.graphCheck` | проверка графа и компиляции | `view` | — | `graph` | целиком |
-| `transport.set` | темп, размер, петля | `edit` | `transport.set` | `project` | #257 |
-| `transport.play` | играть | `runtime` | `postPlay` | — | #92 |
-| `transport.stop` | остановить | `runtime` | `postStop` | — | #92 |
-| `transport.seek` | перейти к позиции | `runtime` | `postSeekSeconds` | — | #92 |
+| `transport.set` | темп, размер, петля | `edit` | `transport.set` | `transport` | #257 |
+| `transport.play` | играть | `runtime` | `postPlay` | `transport` | #92 |
+| `transport.pause` | пауза | `runtime` | `postPause` | `transport` | #257 |
+| `transport.stop` | остановить | `runtime` | `postStop` | `transport` | #92 |
+| `transport.seek` | перейти к позиции | `runtime` | `postSeekSeconds` | `transport` | #92 |
+| `transport.loop` | задать цикл воспроизведения | `runtime` | `postSetLoop` | `transport` | #257 |
+| `transport.position` | показать позицию транспорта | `view` | — | `transport` | целиком |
+| `transport.state` | показать состояние транспорта | `view` | — | `transport` | целиком |
 | `track.add` | добавить дорожку | `edit` | `track.add` | — | #87 |
 | `track.delete` | удалить дорожку | `edit` | `track.delete` | — | #87 |
 | `clip.add` | добавить клип | `edit` | `clip.add` | — | #87 |
@@ -178,8 +182,10 @@ euterpia --json node list demo.eproj
 Честный список разрывов; каждый закрывается своим issue, и до закрытия он
 виден в `core/control/actions.nim` номером, а не забыт:
 
-- транспорт: `transport.play/stop/seek` вызывают движок напрямую, команд CLI и
-  общего пути у них нет (#92, #257);
+- транспорт: `transport` (CLI #257) уже несёт темп/размер/позицию/цикл и
+  offline-состояние; живой путь (`play`/`pause`/`stop`/`seek` на реальном
+  устройстве) и реализация команды документа `transport.set` в control-слое —
+  за #92 и #257 соответственно;
 - секвенсор: команды дорожек, клипов и нот объявлены и отвечают
   `ecUnsupportedCommand`, CLI-команд для них нет (#87);
 - стемы и батч-рендер: действие объявлено, пути исполнения нет (#108);

@@ -20,10 +20,14 @@
 ##   setLoop(...)         -> postSetLoop(...)     (cmdTransportSetLoop)
 ## ============================================================================
 
-import std/atomics
+import std/[atomics, json]
 
 type
   TransportState* = enum
+    ## Состояние транспорта (control-plane). `tsPaused` отличается от
+    ## `tsStopped` сохранением позиции (#257). По смыслу совпадает с
+    ## `ipc_bus.TransportState` (audio-поток): два представления одного
+    ## состояния.
     tsStopped
     tsPlaying
     tsRecording
@@ -277,3 +281,94 @@ proc getSnapshot*(t: var Transport): TransportSnapshot =
     spBar / float64(t.sampleRate) else: 0.0
   result.secondsToBars = if spBar > 0.0 and t.sampleRate > 0.0: 
     float64(t.sampleRate) / spBar else: 0.0
+
+# ============================================================================
+# Строковое имя состояния (#257)
+# ============================================================================
+
+proc transportStateName*(s: TransportState): string =
+  ## Стабильное имя состояния для `--json` и логов. Значения — часть
+  ## контракта `euterpia.transport.v1` и меняются только вместе с версией
+  ## схемы (§58).
+  case s
+  of tsStopped: "stopped"
+  of tsPlaying: "playing"
+  of tsRecording: "recording"
+  of tsPaused: "paused"
+
+proc transportStateFromName*(name: string; s: var TransportState): bool =
+  ## Разбор имени состояния. `false` — имя не наше (в сессии — повреждённый
+  ## файл): молча чинить нельзя.
+  case name
+  of "stopped": s = tsStopped; true
+  of "playing": s = tsPlaying; true
+  of "recording": s = tsRecording; true
+  of "paused": s = tsPaused; true
+  else: false
+
+proc currentState*(t: var Transport): TransportState =
+  ## Текущее состояние control-plane транспорта (не только «играет/нет»).
+  t.state.load(moAcquire)
+
+# ============================================================================
+# Offline-сессия транспорта (#257)
+# ============================================================================
+#
+# Зачем в Core, а не в CLI: CLI без активного аудиоустройства оперирует
+# OFF-LINE сессией — контрол-плоскостью транспорта, переживающей запуск
+# процесса. Формат сессии принадлежит транспорту (он решает, что такое
+# состояние/позиция/цикл), поэтому и (де)сериализация живёт здесь: клиент
+# раскладывает сессию в файл и обратно, не зная полей (#63 — клиент не лезет
+# во внутренности; формат — часть модели, а не клиента).
+#
+# Темп, размер и частота дискретизации в сессии НЕ хранятся: их источник —
+# документ проекта (tempo/meter) и его метаданные (sampleRate). Сессия держит
+# только РАНТАЙМ: состояние, позицию в кадрах и цикл. Так у каждого поля один
+# источник, и `tempo` не может «разойтись» между проектом и сессией.
+
+const
+  TransportSessionSchema* = "euterpia.transport.v1"
+    ## Версия схемы offline-сессии. Меняется только при несовместимом
+    ## изменении полей: клиент обязан увидеть, что схема другая.
+
+proc sessionSnapshotJson*(t: var Transport): JsonNode =
+  ## Рантайм-срез транспорта для offline-сессии. Только поля, которых нет в
+  ## документе: состояние, позиция, цикл.
+  result = newJObject()
+  result["schema"] = %TransportSessionSchema
+  result["state"] = %transportStateName(t.currentState())
+  result["samplePosition"] = %t.samplePosition.load(moRelaxed)
+  result["loop"] = %*{
+    "enabled": t.loopEnabled.load(moRelaxed),
+    "startFrames": t.loopStart.load(moRelaxed),
+    "endFrames": t.loopEnd.load(moRelaxed)
+  }
+
+proc applySessionSnapshot*(node: JsonNode; t: var Transport): bool =
+  ## Применяет рантайм-срез к транспорту. `false` — это не наша сессия:
+  ## чужой `schema`, неизвестное состояние или не-объект. Молчаливая замена
+  ## на умолчания превратила бы повреждённый файл в «транспорт остановлен».
+  if node.kind != JObject:
+    return false
+  if not node.hasKey("schema") or node["schema"].getStr != TransportSessionSchema:
+    return false
+
+  var state: TransportState
+  if not node.hasKey("state") or
+     not transportStateFromName(node["state"].getStr, state):
+    return false
+  t.state.store(state, moRelease)
+
+  if node.hasKey("samplePosition"):
+    t.samplePosition.store(node["samplePosition"].getBiggestInt(), moRelease)
+
+  if node.hasKey("loop") and node["loop"].kind == JObject:
+    let loop = node["loop"]
+    if loop.hasKey("enabled"):
+      t.loopEnabled.store(loop["enabled"].getBool(), moRelease)
+    if loop.hasKey("startFrames"):
+      t.loopStart.store(loop["startFrames"].getBiggestInt(), moRelease)
+    if loop.hasKey("endFrames"):
+      t.loopEnd.store(loop["endFrames"].getBiggestInt(), moRelease)
+
+  true

@@ -27,6 +27,7 @@ import cmd_project
 import cmd_render
 import cmd_analyze
 import cmd_midi
+import cmd_transport
 import cmd_history
 import euterpia_version
 
@@ -273,6 +274,7 @@ proc setupRegistry*() =
     CommandDef(spec: InitSpec, run: runInit),
     CommandDef(spec: ProjectSpec, run: runProject),
     CommandDef(spec: MidiSpec, run: runMidi),
+    CommandDef(spec: TransportSpec, run: runTransport),
     CommandDef(spec: NodeSpec, run: runNode),
     CommandDef(spec: ConnectSpec, run: runConnectCommand),
     CommandDef(spec: DisconnectSpec, run: runDisconnectCommand),

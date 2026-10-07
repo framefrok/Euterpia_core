@@ -23,7 +23,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + **17 инструментов** (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`, `strings`, `bell`, `harp`, `harpsichord`, `recorder`, `brass`, `timpani`, `choir`, `ukulele`, `accordion`, `harmonica`) + нотный секвенсор `notes`; всего 28 типов, полный каталог с параметрами — [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md); C-ядра с SIMD-дисплеями (#274, #301, #303, #321) |
 | Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
 | Тесты | ✅ 300+ unit-проверок + интеграционный набор; Core/Commons/инструменты покрыты (#57, #274, #290) |
-| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290) и настройки окружения `config` (#258), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; `transport`, `play`, запись и плагины — впереди; справочник команд и JSON-схем — **[docs/cli.md](docs/cli.md)** |
+| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258) и транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; живой `play` на устройстве, запись и плагины — впереди; справочник команд и JSON-схем — **[docs/cli.md](docs/cli.md)** |
 | Инспектор аудио | 🟡 пассивный анализ WAV: клиппинг, DC, щелчки, провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость; отчёт с локализацией (#290); позже — помощник в v0.7 (#178) |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
 | Надёжность и диагностика | 🟡 план линии v0.5 — библиотека тестов ядра (golden, Node Contract Suite, fault injection, санитайзеры) и «отказ вместо краха»: модель ошибок, чёрный ящик, crash guard, containment нод и плагинов, изоляция скана (#115) |
@@ -286,8 +286,13 @@ CLI — полноценный интерфейс управления (MANIFEST
       диапазону до записи, `graph check` компилирует граф через Core
       (вердикты `compiles`/`cycle`/`unknownType`), отчёт — те же секции, что у
       `project validate` (#96)
-- [ ] #257 транспорт: `transport tempo/meter/position/play/stop/seek/loop`
-      и `transport state --json`
+- [x] #257 транспорт: `transport tempo/meter/position/seek/play/pause/stop/loop`
+      и `transport state --json` — ✅ сделано: темп/размер пишут документ
+      (`transport tempo 140` + `render` учитывает его), состояние/позиция/цикл
+      живут в offline-сессии ядра (`core/transport`), BBT считает Core;
+      runtime-контракт движка `postPlay/postPause/postStop/postSeek*/postSetLoop`
+      (пауза бережёт позицию, стоп возвращает в 0) покрыт unit-тестом;
+      живой Play на устройстве — за #92
 - [ ] #91 offline-рендер в WAV: `render` (детерминизм + CI-проверка)
 - [ ] #92 живое воспроизведение: `device list`, `play` через
       `backend_manager` (метрики, SIGINT)

@@ -11,6 +11,7 @@
 
 import std/unittest
 import std/atomics
+import std/json
 import transport
 
 const
@@ -127,3 +128,42 @@ suite "transport: размер такта и BBT":
     t.setPosition(500)
     t.advancePosition(-2000)         # назад за начало -> конец такта
     check t.samplePosition.load(moRelaxed) == 70500
+
+suite "transport: offline-сессия (#257)":
+  test "имена состояний обратимы":
+    for s in [tsStopped, tsPlaying, tsRecording, tsPaused]:
+      var back: TransportState
+      check transportStateFromName(transportStateName(s), back)
+      check back == s
+    var unknown: TransportState
+    check not transportStateFromName("nonsense", unknown)
+
+  test "срез сессии переживает round-trip (состояние, позиция, цикл)":
+    var t = mk(4, 4)
+    t.setPosition(339000)
+    t.setLoop(true, 192000, 384000)
+    t.pause()
+
+    let snap = t.sessionSnapshotJson()
+    check snap["schema"].getStr == TransportSessionSchema
+    check snap["state"].getStr == "paused"
+
+    var restored = initTransport(Sr)
+    check applySessionSnapshot(snap, restored)
+    check restored.currentState() == tsPaused
+    check restored.samplePosition.load(moRelaxed) == 339000
+    check restored.loopEnabled.load(moRelaxed)
+    check restored.loopStart.load(moRelaxed) == 192000
+    check restored.loopEnd.load(moRelaxed) == 384000
+
+  test "чужая или битая сессия отвергается, а не чинится молча":
+    var t = initTransport(Sr)
+    # Чужой schema.
+    check not applySessionSnapshot(%*{"schema": "other.v9", "state": "playing"}, t)
+    # Наш schema, но неизвестное состояние.
+    check not applySessionSnapshot(
+      %*{"schema": TransportSessionSchema, "state": "flying"}, t)
+    # Не объект.
+    check not applySessionSnapshot(newJArray(), t)
+    # Состояние не изменилось: отвергнутое не «применилось наполовину».
+    check t.currentState() == tsStopped
