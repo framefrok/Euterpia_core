@@ -108,17 +108,33 @@ proc processGainNode(
   if frames <= 0:
     return
 
-  let lin = dbToLin(st.smoothDb.advance(frames))
   let channels = channelCount(outBuf)
 
-  for ch in 0 ..< max(channels, 1'i32):
-    let pin = inBuf.channelPtr(ch, frames)
-    let pout = outBuf.channelPtr(ch, frames)
-    if pin.isNil or pout.isNil:
-      forEachFrame(outBuf, frames):
-        outBuf.setSampleAt(ch, i, inBuf.sampleAt(ch, i) * lin)
-    else:
-      mixGain(pin, pout, frames.int, lin)
+  # Пер-сэмпловое сглаживание (#386): нода больше не применяет одно значение
+  # конца блока ко всему блоку, поэтому переход параметра не зависит от blockSize.
+  let settled = abs(st.smoothDb.target - st.smoothDb.current) <=
+    snapEps(st.smoothDb.target)
+  var ramp = st.smoothDb.beginRamp(frames)
+
+  if settled:
+    # Установившийся режим: усиление постоянно — оставляем быстрый SIMD-путь.
+    let lin = dbToLin(ramp.next())
+    for ch in 0 ..< max(channels, 1'i32):
+      let pin = inBuf.channelPtr(ch, frames)
+      let pout = outBuf.channelPtr(ch, frames)
+      if pin.isNil or pout.isNil:
+        forEachFrame(outBuf, frames):
+          outBuf.setSampleAt(ch, i, inBuf.sampleAt(ch, i) * lin)
+      else:
+        mixGain(pin, pout, frames.int, lin)
+  else:
+    # Переход: усиление считается и применяется ПО СЭМПЛУ.
+    var i: int32 = 0
+    while i < frames:
+      let g = dbToLin(ramp.next())
+      for ch in 0 ..< channels:
+        outBuf.setSampleAt(ch, i, inBuf.sampleAt(ch, i) * g)
+      inc i
 
 proc getGainDesc*(): ptr NodeDesc =
   if not gainReady:

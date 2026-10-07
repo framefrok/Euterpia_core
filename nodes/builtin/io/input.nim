@@ -116,8 +116,6 @@ proc processInputNode(
   if frames <= 0:
     return
 
-  let lin = dbToLin(st.smoothDb.advance(frames))
-
   let src = if ctx.isNil: nil else: ctx.input
   if src.isNil or src.data.isNil or src.channels <= 0:
     # Входа нет: молчим, а не отдаём мусор прошлого блока.
@@ -127,26 +125,21 @@ proc processInputNode(
   let inChans = src.channels
   let outChans = max(channelCount(outBuf), 1'i32)
 
-  for ch in 0 ..< outChans:
-    # Моно-вход разводится в оба выхода; стерео — канал-в-канал.
-    let srcCh =
-      if inChans == 1: 0'i32
-      elif ch < inChans: ch
-      else: inChans - 1'i32
+  # Пер-сэмпловое сглаживание (#386): усиление входа применяется по сэмплу,
+  # а не одним значением конца блока — иначе переход «прыгает» на границе.
+  var ramp = st.smoothDb.beginRamp(frames)
 
-    let psrc = src.channelPtr(srcCh, frames)
-    let pdst = outBuf.channelPtr(ch, frames)
-
-    if not psrc.isNil and not pdst.isNil:
-      # Оба буфера planar: непрерывная запись, компилятор её векторизует.
-      let sa = cast[ptr UncheckedArray[float32]](psrc)
-      let da = cast[ptr UncheckedArray[float32]](pdst)
-      forEachFrame(outBuf, frames):
-        da[int(i)] = sa[int(i)] * lin
-    else:
-      # Один из буферов interleaved: скалярный путь по сэмплу.
-      forEachFrame(outBuf, frames):
-        outBuf.setSampleAt(ch, i, src.sampleAt(srcCh, i) * lin)
+  var i: int32 = 0
+  while i < frames:
+    let g = dbToLin(ramp.next())
+    for ch in 0 ..< outChans:
+      # Моно-вход разводится в оба выхода; стерео — канал-в-канал.
+      let srcCh =
+        if inChans == 1: 0'i32
+        elif ch < inChans: ch
+        else: inChans - 1'i32
+      outBuf.setSampleAt(ch, i, src.sampleAt(srcCh, i) * g)
+    inc i
 
 proc getInputDesc*(): ptr NodeDesc =
   if not inputReady:

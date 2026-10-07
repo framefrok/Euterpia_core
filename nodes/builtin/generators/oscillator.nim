@@ -227,11 +227,15 @@ proc processOscNode(
   if frames <= 0:
     return
 
-  # --- Сглаживание параметров: control rate, один раз на блок ---------------
+  # --- Сглаживание параметров ------------------------------------------------
+  # freq/detune/pulse — control rate (влияют на фазовый инкремент ядра).
   let freq = st.smoothFreq.advance(frames)
-  let level = st.smoothLevel.advance(frames)
   let detune = st.smoothDetune.advance(frames)
   let pulse = st.smoothPulse.advance(frames)
+  # Уровень применяется ПО СЭМПЛУ (#386): ядро рендерит с единичным gain,
+  # а ramp домножается ниже — переход не зависит от blockSize.
+  var levelRamp = st.smoothLevel.beginRamp(frames)
+  let level = st.smoothLevel.current
 
   let sr = if ctx.sampleRate > 0.0f: ctx.sampleRate else: st.sampleRate
   if abs(sr - st.sampleRate) > 0.01f:
@@ -255,7 +259,7 @@ proc processOscNode(
     if p.isNil:
       outBuf.fillZero(frames)
     else:
-      oscRender(addr st.osc, kind, p, n, level)
+      oscRender(addr st.osc, kind, p, n, 1.0f)
   elif abs(detune) < 0.001f:
     # Без расстройки оба канала получают один и тот же инкремент фазы:
     # так они когерентны, как у настоящего моно-генератора.
@@ -264,14 +268,22 @@ proc processOscNode(
       if p.isNil:
         outBuf.fillZero(frames)
         return
-      oscRender(addr st.osc, kind, p, n, level)
+      oscRender(addr st.osc, kind, p, n, 1.0f)
   else:
     let pl = outBuf.channelPtr(0, frames)
     let pr = outBuf.channelPtr(1, frames)
     if pl.isNil or pr.isNil:
       outBuf.fillZero(frames)
     else:
-      oscRenderStereo(addr st.osc, kind, pl, pr, n, level, detune)
+      oscRenderStereo(addr st.osc, kind, pl, pr, n, 1.0f, detune)
+
+  # Уровень: одно значение на позицию сэмпла, применённое ко всем каналам (#386).
+  var i: int32 = 0
+  while i < frames:
+    let g = levelRamp.next()
+    for ch in 0 ..< channels:
+      outBuf.setSampleAt(ch, i, outBuf.sampleAt(ch, i) * g)
+    inc i
 
 # ==============================================================================
 # Экспорт

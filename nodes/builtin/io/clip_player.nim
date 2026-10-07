@@ -192,7 +192,8 @@ proc processClipNode(
   if pfTransportPlaying notin ctx.flags:
     return
 
-  let lin = dbToLin(st.gainDb.advance(frames))
+  # Пер-сэмпловое сглаживание усиления (#386): переход не зависит от blockSize.
+  var ramp = st.gainDb.beginRamp(frames)
   let blockStart = ctx.samplePosition
 
   # Позиция — в СЭМПЛАХ таймлайна: `startSample`/`endSample` клипа уже
@@ -215,8 +216,9 @@ proc processClipNode(
       acc0 += slot.data[base]
       acc1 += slot.data[base + (if slot.channels > 1: 1'i64 else: 0'i64)]
 
-    outBuf.setSampleAt(0, int32(f), acc0 * lin)
-    outBuf.setSampleAt(1, int32(f), acc1 * lin)
+    let g = dbToLin(ramp.next())
+    outBuf.setSampleAt(0, int32(f), acc0 * g)
+    outBuf.setSampleAt(1, int32(f), acc1 * g)
 
 # ==============================================================================
 # Экспорт

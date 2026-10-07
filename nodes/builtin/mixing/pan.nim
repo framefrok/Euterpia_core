@@ -108,45 +108,39 @@ proc processPanNode(
   if frames <= 0:
     return
 
-  var gl, gr: float32
-  mixPanGains(st.smoothPan.advance(frames), gl, gr)
+  # Пер-сэмпловое сглаживание панорамы (#386): коэффициенты L/R считаются
+  # на каждом сэмпле, поэтому переход не зависит от blockSize.
+  var ramp = st.smoothPan.beginRamp(frames)
 
   let channels = channelCount(outBuf)
   let inCh = channelCount(inBuf)
 
   if channels >= 2 and inCh >= 2:
-    let inL = inBuf.channelPtr(0, frames)
-    let inR = inBuf.channelPtr(1, frames)
-    let outL = outBuf.channelPtr(0, frames)
-    let outR = outBuf.channelPtr(1, frames)
-
-    if not inL.isNil and not inR.isNil and not outL.isNil and not outR.isNil:
-      mixPan(inL, inR, outL, outR, frames.int, gl, gr)
-      # Каналы сверх двух (7.1 и т.п.) копируются без панорамы:
-      # на них нет закона «слева-справа».
-      for ch in 2 ..< channels:
-        let p = outBuf.channelPtr(ch, frames)
-        if p.isNil:
-          outBuf.fillZero(frames)
-          return
-        mixGain(inBuf.channelPtr(ch, frames), p, frames.int, 1.0f)
-    else:
-      forEachFrame(outBuf, frames):
-        let l = inBuf.sampleAt(0, i) * gl
-        let r = inBuf.sampleAt(1, i) * gr
-        outBuf.setSampleAt(0, i, l)
-        outBuf.setSampleAt(1, i, r)
-  else:
-    # Моно-вход: панорама сводится к простой балансу.
-    for ch in 0 ..< max(channels, 1'i32):
+    var i: int32 = 0
+    while i < frames:
+      var gl, gr: float32
+      mixPanGains(ramp.next(), gl, gr)
+      outBuf.setSampleAt(0, i, inBuf.sampleAt(0, i) * gl)
+      outBuf.setSampleAt(1, i, inBuf.sampleAt(1, i) * gr)
+      inc i
+    # Каналы сверх двух (7.1 и т.п.) копируются без панорамы:
+    # на них нет закона «слева-справа».
+    for ch in 2 ..< channels:
       let p = outBuf.channelPtr(ch, frames)
       if p.isNil:
-        forEachFrame(outBuf, frames):
-          let x = inBuf.sampleAt(0, i)
-          outBuf.setSampleAt(ch, i, x * (if ch == 0: gl else: gr))
-      else:
-        mixGain(inBuf.channelPtr(0, frames), p, frames.int,
-                (if ch == 0: gl else: gr))
+        outBuf.fillZero(frames)
+        return
+      mixGain(inBuf.channelPtr(ch, frames), p, frames.int, 1.0f)
+  else:
+    # Моно-вход: панорама сводится к простому балансу.
+    let nch = max(channels, 1'i32)
+    var i: int32 = 0
+    while i < frames:
+      var gl, gr: float32
+      mixPanGains(ramp.next(), gl, gr)
+      for ch in 0 ..< nch:
+        outBuf.setSampleAt(ch, i, inBuf.sampleAt(0, i) * (if ch == 0: gl else: gr))
+      inc i
 
 proc getPanDesc*(): ptr NodeDesc =
   if not panReady:

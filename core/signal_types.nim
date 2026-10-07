@@ -186,4 +186,47 @@ proc advance*(s: var ParamSmoother; samples: int32): float32 {.cdecl, inline.} =
 proc setTarget*(s: var ParamSmoother, val: float32) {.cdecl, inline.} =
   s.target = val
 
+# ==============================================================================
+# Per-sample ramp (issue #386)
+# ==============================================================================
+#
+# Проблема: ноды вызывали `advance(frames)` ОДИН раз на блок и применяли это
+# ОДНО значение ко ВСЕМУ блоку. Переход параметра становился ступенькой
+# размером в блок, а его слышимая форма зависела от blockSize (64 vs 1024).
+#
+# Решение: разделить «продвижение состояния» и «интерполяцию». `beginRamp`
+# продвигает состояние на весь блок (для следующего блока) и возвращает
+# генератор, чей `next()` даёт ТОЧНОЕ per-sample значение той же экспоненты.
+# Нода применяет значение по одному сэмплу — переход один и тот же при любом
+# blockSize, потому что каждый сэмпл делает ровно один шаг one-pole.
+
+type
+  ParamRamp* = object
+    ## Генератор per-sample значений сглаживателя на один блок.
+    target: float32   ## цель (не меняется внутри блока)
+    diff: float32     ## target - current ДО очередного шага
+    coeff: float32    ## коэффициент one-pole
+    eps: float32      ## порог снапа для этой цели
+
+proc beginRamp*(s: var ParamSmoother; samples: int32): ParamRamp {.cdecl, inline.} =
+  ## Продвинуть состояние сглаживателя на `samples` (чтобы следующий блок
+  ## начался со значения конца текущего) и вернуть per-sample генератор,
+  ## воспроизводящий РОВНО ту же траекторию, что `samples` вызовов `process`.
+  result.target = s.target
+  result.coeff = s.coeff
+  result.eps = snapEps(s.target)
+  result.diff = s.target - s.current
+  discard s.advance(samples)
+
+proc next*(r: var ParamRamp): float32 {.cdecl, inline.} =
+  ## Значение сглаживателя на следующем сэмпле блока. Ровно один шаг one-pole,
+  ## поэтому результат не зависит от размера блока.
+  if abs(r.diff) <= r.eps:
+    r.diff = 0.0f
+    return r.target
+  let nd = r.coeff * r.diff
+  let v = r.target - nd
+  r.diff = nd
+  v
+
 {.pop.}

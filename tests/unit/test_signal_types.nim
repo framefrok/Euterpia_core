@@ -48,6 +48,52 @@ suite "signal_types":
       discard sm.process()
     check sm.current < 0.02f
 
+  test "ParamRamp воспроизводит process() по сэмплам (#386)":
+    var a = initSmoother(timeMs = 15.0f, sampleRate = 48000.0f, initialVal = 0.0f)
+    a.setTarget(1.0f)
+    var b = initSmoother(timeMs = 15.0f, sampleRate = 48000.0f, initialVal = 0.0f)
+    b.setTarget(1.0f)
+
+    # Эталон — N вызовов process(), по одному на сэмпл.
+    var expected: seq[float32]
+    for i in 0 ..< 700:
+      expected.add(b.process())
+
+    var ramp = a.beginRamp(700)
+    for i in 0 ..< 700:
+      # Допуск ~ULP float32: ramp пересчитывает ту же экспоненту по одному
+      # шагу, process — тоже, различие только в порядке округления.
+      check abs(ramp.next() - expected[i]) < 1e-5f
+    # Состояние тоже совпало.
+    check abs(a.current - b.current) < 1e-5f
+
+  test "ParamRamp: нарезка на блоки не меняет поток значений (#386)":
+    ## Один и тот же переход, разбитый по-разному, обязан дать одинаковые
+    ## значения по сэмплам — это и есть независимость от blockSize.
+    proc renderChunked(blockSizes: seq[int]): seq[float32] =
+      var sm = initSmoother(timeMs = 15.0f, sampleRate = 48000.0f, initialVal = 0.0f)
+      sm.setTarget(1.0f)
+      var total = 0
+      for b in blockSizes:
+        total += b
+      result = newSeq[float32](total)
+      var pos = 0
+      for b in blockSizes:
+        var ramp = sm.beginRamp(int32(b))
+        for i in 0 ..< b:
+          result[pos + i] = ramp.next()
+        pos += b
+
+    let total = 512
+    let one = renderChunked(@[total])                     # один блок 512
+    let small = renderChunked(@[64, 64, 64, 64, 64, 64, 64, 64])  # восемь по 64
+    let mixed = renderChunked(@[100, 1, 300, 111])        # произвольная нарезка
+
+    check one.len == small.len
+    for i in 0 ..< one.len:
+      check abs(one[i] - small[i]) < 1e-6f
+      check abs(one[i] - mixed[i]) < 1e-6f
+
   test "EventQueue: сортировка по кадру и доле кадра":
     var q: EventQueue
     clearEvents(addr q)

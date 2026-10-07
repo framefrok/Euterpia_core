@@ -142,20 +142,27 @@ proc processNoiseNode(
   if frames <= 0:
     return
 
-  let level = st.smoothLevel.advance(frames)
+  let channels = max(channelCount(outBuf), 1'i32)
 
-  let channels = channelCount(outBuf)
-  for ch in 0 ..< max(channels, 1'i32):
+  # Пер-сэмпловое сглаживание уровня (#386). Ядро `noiseRender` принимает
+  # скалярный gain, поэтому рендерим с 1.0 и применяем уровень ПО СЭМПЛУ —
+  # так переход одинаков при любом blockSize.
+  for ch in 0 ..< channels:
     let p = outBuf.channelPtr(ch, frames)
     if p.isNil:
       outBuf.fillZero(frames)
       return
     # Левый и правый получают РАЗНЫЕ отсчёты: общий шум в двух каналах
     # слышен как узкий моно-сигнал и «схлопывает» стерео-сцену.
-    if ch == 0:
-      noiseRender(addr st.nz, st.color, p, frames.int, level)
-    else:
-      noiseRender(addr st.nz, st.color, p, frames.int, level)
+    noiseRender(addr st.nz, st.color, p, frames.int, 1.0f)
+
+  var ramp = st.smoothLevel.beginRamp(frames)
+  var i: int32 = 0
+  while i < frames:
+    let g = ramp.next()
+    for ch in 0 ..< channels:
+      outBuf.setSampleAt(ch, i, outBuf.sampleAt(ch, i) * g)
+    inc i
 
 proc getNoiseDesc*(): ptr NodeDesc =
   if not noiseReady:

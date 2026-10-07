@@ -126,29 +126,35 @@ proc processMixNode(
     return
 
   let channels = max(channelCount(outBuf), 1'i32)
-  let lin = dbToLin(st.smoothDb.advance(frames))
 
   # DC-блокер: сумма даёт постоянную составляющую, и её надо снять здесь,
   # на мастер-шине. R зависит от частоты дискретизации.
   let sr = if ctx.sampleRate > 0.0f: ctx.sampleRate else: 48000.0f
   let dcR = clamp(1.0f - (2.0f * PI * DcBlockerHz / sr), 0.9f, 0.9999f)
 
-  # Каждый сэмпл выхода — сумма соответствующего сэмпла всех входов.
-  # `sampleAt` ничего не аллоцирует и безопасен для nil-входа (вернёт 0),
-  # поэтому неподключённый вход не создаёт ветвлений в горячем цикле.
-  for ch in 0 ..< channels:
-    let ci = int(ch) mod MixMaxChannels
-    forEachFrame(outBuf, frames):
+  # Пер-сэмпловое сглаживание уровня (#386). Порядок циклов — сэмпл-снаружи,
+  # канал-внутри: одно значение усиления на позицию, общее для всех каналов.
+  # DC-блокер по-прежнему независим на канал.
+  var ramp = st.smoothDb.beginRamp(frames)
+  var i: int32 = 0
+  while i < frames:
+    let g = dbToLin(ramp.next())
+    for ch in 0 ..< channels:
+      let ci = int(ch) mod MixMaxChannels
+      # Каждый сэмпл выхода — сумма соответствующего сэмпла всех входов.
+      # `sampleAt` ничего не аллоцирует и безопасен для nil-входа (вернёт 0),
+      # поэтому неподключённый вход не создаёт ветвлений в горячем цикле.
       var acc = 0.0f
       for k in 0 ..< audio.inputCount:
         let inBuf = audio.inputs[k]
         if not inBuf.isNil:
           acc += inBuf.sampleAt(ch, i)
-      let x = acc * lin
+      let x = acc * g
       let y = x - st.dcX1[ci] + dcR * st.dcY1[ci]
       st.dcX1[ci] = x
       st.dcY1[ci] = y
       outBuf.setSampleAt(ch, i, y)
+    inc i
 
 proc getMixDesc*(): ptr NodeDesc =
   if not mixReady:
