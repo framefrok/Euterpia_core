@@ -28,6 +28,8 @@ type
     cmdSetParamNormalized,
     cmdTransportPlay,
     cmdTransportStop,
+    cmdTransportPause,
+    cmdTransportSetLoop,
     cmdSetTempo,
     cmdSetPlayhead,
     cmdMidiNoteOn,
@@ -52,6 +54,13 @@ type
       midiPad*: uint8
     of cmdSetTempo, cmdSetPlayhead:
       transportValue*: float64
+    of cmdTransportSetLoop:
+      ## Границы и активность цикла (#257). Одна команда, а не три: смена
+      ## границ без активности (или наоборот) — не отдельное состояние, и
+      ## audio-поток не должен видеть «полу-применённый» цикл.
+      loopEnabled*: bool
+      loopStart*: int64
+      loopEnd*: int64
     of cmdAutomationBlock, cmdGraphUpdate, cmdLoadResource:
       sharedBufferId*: int32
       dataSize*: uint32
@@ -59,9 +68,15 @@ type
       discard
 
   TransportState* = enum
+    ## Состояние транспорта в audio-потоке. `tsPaused` отличается от
+    ## `tsStopped` ТЕМ, ЧТО позиция сохраняется (#257): пауза — остановка без
+    ## сброса, стоп — остановка со сбросом в 0. Этот enum обязан совпадать по
+    ## смыслу с `transport.TransportState` (control-plane): два имени одного
+    ## состояния, а не два состояния.
     tsStopped = 0,
     tsPlaying,
-    tsRecording
+    tsRecording,
+    tsPaused
 
   EngineMetric* = object
     peakL*: float32

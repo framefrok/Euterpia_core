@@ -12,6 +12,7 @@
 
 import test_signal_types
 import test_transport
+import test_transport_runtime
 import test_native_abi
 import test_ring_buffer
 import test_midi_api
