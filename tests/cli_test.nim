@@ -2170,6 +2170,8 @@ suite "CLI: спецификация команд — один источник 
                    @["config", "get", "sampleRate"],
                    @["config", "set", "sampleRate", "44100"],
                    @["config", "unset", "sampleRate"]]),
+      ("transport", @[@["transport", "state", "spec.eproj"],
+                      @["transport", "tempo", "100", "spec.eproj"]]),
       ("help", @[@["help"], @["help", "render"]]),
       ("version", @[@["version"]]),
     ]
@@ -2473,3 +2475,147 @@ suite "CLI: единые коды ошибок (#332)":
       check row in doc
       inc rows
     check rows > 10
+
+# =============================================================================
+# Транспорт (#257)
+# =============================================================================
+#
+# Чёрная проверка поверхности `transport`: аудиоустройства нет, поэтому
+# команда оперирует offline-сессией (ядро `core/transport`), а темп/размер
+# пишет в ДОКУМЕНТ проекта — тот же источник, который читает `render`.
+# Отсюда критерий приёмки issue: `transport tempo 140`, за которым идёт
+# `render`, даёт правильную длительность, потому что темп изменился в проекте.
+
+suite "CLI: транспорт — tempo/meter/position/seek/loop/state (#257)":
+  let dir = getTempDir() / "euterpia_cli_transport"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  proc jrun(args: openArray[string]): JsonNode =
+    parseJson(runCliIn(dir, @["--json"] & @args).output)
+
+  test "state --json парсится и несёт версионированную схему":
+    check runCliIn(dir, ["init", "t1.eproj"]).code == 0
+    let r = runCliIn(dir, @["--json", "transport", "state", "t1.eproj"])
+    check r.code == 0
+    check r.errput.len == 0
+    let n = parseJson(r.output)
+    check n["schema"].getStr == "euterpia.transport.v1"
+    check n["ok"].getBool
+    check n["state"].getStr == "stopped"
+    check n["position"]["frames"].getBiggestInt == 0
+    check n["tempo"].getFloat == 120.0
+    check n["meter"]["numerator"].getInt == 4
+    check n["meter"]["denominator"].getInt == 4
+    check n["loop"]["enabled"].getBool == false
+    check n["metrics"]["xruns"].getInt == 0
+    check n["metrics"]["cpuLoad"].kind == JNull
+
+  test "tempo меняет документ и идемпотентен":
+    check runCliIn(dir, ["init", "t2.eproj", "--tempo", "120"]).code == 0
+    check runCliIn(dir, ["transport", "tempo", "140", "t2.eproj"]).code == 0
+    # Темп виден документу — это и делает осмысленным `transport tempo` + `render`.
+    check jrun(["transport", "state", "t2.eproj"])["tempo"].getFloat == 140.0
+    # Повтор не переписывает проект: `modified` не поднимается на ровном месте.
+    let before = readFile(dir / "t2.eproj")
+    let again = runCliIn(dir, ["transport", "tempo", "140", "t2.eproj"])
+    check again.code == 0
+    check "без изменений" in again.output
+    check readFile(dir / "t2.eproj") == before
+
+  test "meter меняет размер и учитывается в BBT":
+    check runCliIn(dir, ["init", "t3.eproj", "--tempo", "120"]).code == 0
+    check runCliIn(dir, ["transport", "meter", "6/8", "t3.eproj"]).code == 0
+    let n = jrun(["transport", "state", "t3.eproj"])
+    check n["meter"]["numerator"].getInt == 6
+    check n["meter"]["denominator"].getInt == 8
+    # 120 BPM 6/8: такт = 6 восьмых = 3 четверти = 72000 кадров @48кГц.
+    check runCliIn(dir, ["transport", "seek", "2.1.0", "t3.eproj"]).code == 0
+    let p = jrun(["transport", "state", "t3.eproj"])
+    check p["position"]["frames"].getBiggestInt == 72000
+
+  test "seek в секундах и кадрах":
+    check runCliIn(dir, ["init", "t4.eproj"]).code == 0
+    check runCliIn(dir, ["transport", "seek", "1.5", "--seconds", "t4.eproj"]).code == 0
+    check jrun(["transport", "state", "t4.eproj"])["position"]["frames"].getBiggestInt == 72000
+    check runCliIn(dir, ["transport", "seek", "339000", "--frames", "t4.eproj"]).code == 0
+    check jrun(["transport", "state", "t4.eproj"])["position"]["frames"].getBiggestInt == 339000
+
+  test "play/pause/stop: пауза бережёт позицию, стоп возвращает в 0":
+    check runCliIn(dir, ["init", "t5.eproj"]).code == 0
+    check runCliIn(dir, ["transport", "seek", "4.2.120", "t5.eproj"]).code == 0
+    let seeked = jrun(["transport", "state", "t5.eproj"])["position"]["frames"].getBiggestInt
+    check seeked > 0
+
+    check runCliIn(dir, ["transport", "play", "t5.eproj"]).code == 0
+    var n = jrun(["transport", "state", "t5.eproj"])
+    check n["state"].getStr == "playing"
+    check n["position"]["frames"].getBiggestInt == seeked
+
+    check runCliIn(dir, ["transport", "pause", "t5.eproj"]).code == 0
+    n = jrun(["transport", "state", "t5.eproj"])
+    check n["state"].getStr == "paused"
+    check n["position"]["frames"].getBiggestInt == seeked
+
+    check runCliIn(dir, ["transport", "stop", "t5.eproj"]).code == 0
+    n = jrun(["transport", "state", "t5.eproj"])
+    check n["state"].getStr == "stopped"
+    check n["position"]["frames"].getBiggestInt == 0
+
+  test "loop on/off/set":
+    check runCliIn(dir, ["init", "t6.eproj"]).code == 0
+    check runCliIn(dir, ["transport", "loop", "set", "4.1.0", "8.1.0", "t6.eproj"]).code == 0
+    var n = jrun(["transport", "state", "t6.eproj"])
+    check n["loop"]["enabled"].getBool
+    check n["loop"]["endFrames"].getBiggestInt > n["loop"]["startFrames"].getBiggestInt
+    check runCliIn(dir, ["transport", "loop", "off", "t6.eproj"]).code == 0
+    n = jrun(["transport", "state", "t6.eproj"])
+    check n["loop"]["enabled"].getBool == false
+
+  test "position — чтение, лишний аргумент отвергается":
+    check runCliIn(dir, ["init", "t7.eproj"]).code == 0
+    check runCliIn(dir, ["transport", "position", "t7.eproj"]).code == 0
+    check runCliIn(dir, ["transport", "position", "4.1.0", "t7.eproj"]).code == 1
+
+  test "tempo без проекта — ошибка использования":
+    check runCliIn(dir, ["transport", "tempo", "140"]).code == 1
+
+  test "tempo + render: длительность задаётся темпом, а не «на слух» (#257)":
+    # Критерий приёмки issue: `transport tempo 140` + `render` дают файл,
+    # длительность которого соответствует темпу. Проверяем ЧИСЛОМ: длина
+    # партитуры в тиках не меняется, а перевод в секунды — меняется ровно во
+    # столько раз, во сколько раз изменился темп.
+    check runCliIn(dir, ["init", "r.eproj", "--tempo", "60"]).code == 0
+    check runCliIn(dir, ["node", "add", "osc", "r.eproj"]).code == 0
+    check runCliIn(dir, ["node", "add", "gain", "r.eproj"]).code == 0
+    check runCliIn(dir, ["connect", "1:out", "2:in", "r.eproj"]).code == 0
+    check runCliIn(dir, ["node", "add", "notes", "r.eproj"]).code == 0
+    check runCliIn(dir, ["connect", "3:event:0", "1:event:0", "r.eproj"]).code == 0
+    writeFile(dir / "r.notes", "c4/4 d e f\n")
+    check runCliIn(dir, ["notation", "import", "r.notes", "--file",
+                         "r.eproj"]).code == 0
+
+    # `--tail 0`: длительность = ровно партитура, без хвоста инструмента.
+    let slow = jrun(["render", "r.eproj", dir / "slow.wav", "--tail", "0"])
+    check slow["ok"].getBool
+    let ticks = slow["songEndTick"].getInt
+    let slowSeconds = slow["seconds"].getFloat
+    check slow["tempo"].getFloat == 60.0
+
+    # Удваиваем темп через транспорт: та же партитура звучит вдвое короче.
+    check runCliIn(dir, ["transport", "tempo", "120", "r.eproj"]).code == 0
+    let fast = jrun(["render", "r.eproj", dir / "fast.wav", "--tail", "0"])
+    check fast["ok"].getBool
+    check fast["songEndTick"].getInt == ticks          # число тактов то же
+    check fast["tempo"].getFloat == 120.0
+    check abs(fast["seconds"].getFloat * 2.0 - slowSeconds) < 0.01
+
+  test "state без проекта работает с умолчаниями ядра (offline)":
+    let r = runCliIn(dir, @["--json", "transport", "state"])
+    check r.code == 0
+    let n = parseJson(r.output)
+    check n["state"].getStr == "stopped"
+    check n["tempo"].getFloat == 120.0
+

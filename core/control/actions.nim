@@ -144,15 +144,28 @@ proc clientActions*(): seq[ClientAction] =
     viewAction("view.graphCheck", "Проверить граф и компиляцию", "graph"),
 
     # --- транспорт --------------------------------------------------------
-    # Документная часть (темп, размер, петля) — команда control-слоя, но
-    # поставляется вместе с CLI-транспортом (#257): сегодня темп пишет
-    # `project set tempo`, а команды транспорта в CLI ещё нет.
+    # Поверхность транспорта целиком — CLI-команда `transport` (#257).
+    # Темп/размер меняют документ (`csEdit`); play/pause/stop/seek/loop —
+    # рантайм (`csRuntime`, документа не трогают); position/state — чтение.
+    # Живой путь (устройство, реальный Play) остаётся за #92: у play/pause/
+    # stop/seek там же и backend lifecycle. Команды документа
+    # (`ccSetTransport`) control-слой ещё не реализует, поэтому `transport.set`
+    # поставляется частями (#257).
     editAction("transport.set", "Задать темп, размер и петлю", ccSetTransport,
-               "project", issue = 257),
-    engineAction("transport.play", "Играть", "postPlay", "", issue = 92),
-    engineAction("transport.stop", "Остановить", "postStop", "", issue = 92),
-    engineAction("transport.seek", "Перейти к позиции", "postSeekSeconds", "",
+               "transport", issue = 257),
+    engineAction("transport.play", "Играть", "postPlay", "transport",
                  issue = 92),
+    engineAction("transport.pause", "Пауза", "postPause", "transport",
+                 issue = 257),
+    engineAction("transport.stop", "Остановить", "postStop", "transport",
+                 issue = 92),
+    engineAction("transport.seek", "Перейти к позиции", "postSeekSeconds",
+                 "transport", issue = 92),
+    engineAction("transport.loop", "Задать цикл воспроизведения", "postSetLoop",
+                 "transport", issue = 257),
+    viewAction("transport.position", "Показать позицию транспорта",
+               "transport"),
+    viewAction("transport.state", "Показать состояние транспорта", "transport"),
 
     # --- секвенсор: дорожки, клипы, ноты ----------------------------------
     # Команды документа объявлены (#139) и отвечают `ecUnsupportedCommand`,

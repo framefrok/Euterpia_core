@@ -277,6 +277,9 @@ DOCUMENT_ACCESS_ALLOWED: dict[str, dict[str, str]] = {
     "cli/cmd_import.nim": {
         "runImport": "создание аудиоресурса и audio-клипа: путь записи (`import`, #107)",
     },
+    "cli/cmd_transport.nim": {
+        "setProjectField": "запись темпа и размера в документ (`transport tempo/meter`, #257)",
+    },
 }
 
 

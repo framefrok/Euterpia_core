@@ -279,6 +279,56 @@ euterpia midi ensemble.eproj --out ensemble.mid
 - --dry-run печатает план и не пишет файлов
 - раскодировать обратно можно тем же кодеком: `commons/midi_io.parseSmf`
 
+### `transport` — транспорт: темп, размер, позиция, воспроизведение, цикл
+
+```text
+euterpia transport <подкоманда> [аргументы] [проект.eproj] [ключи]
+```
+
+Подкоманды: tempo | meter | position | seek | play | pause | stop | loop | state
+
+Аргументы:
+
+- `<подкоманда>` — tempo|meter|position|seek|play|pause|stop|loop|state
+- `проект.eproj` — проект; без аргумента — `project.eproj`, если он есть
+
+Ключи:
+
+| Ключ | Значение | Умолчание | Смысл |
+|---|---|---|---|
+| `--file` | проект.eproj | — | проект, если он не задан позиционно |
+| `--unit` | bbt|seconds|frames | bbt | единица позиции для seek/loop set |
+| `--seconds` | — | — | то же, что `--unit seconds` |
+| `--frames` | — | — | то же, что `--unit frames` |
+
+Пример:
+
+```text
+euterpia transport tempo 140 demo.eproj
+```
+
+Поля ответа `--json`:
+
+- `schema` — версия схемы ответа: `euterpia.transport.v1`
+- `state` — состояние: `stopped`|`playing`|`recording`|`paused`
+- `position` — позиция: `frames`, `seconds`, `bar`, `beat`, `tick`, `quarter`
+- `tempo` — темп в BPM
+- `meter` — размер такта: `numerator`, `denominator`
+- `loop` — цикл: `enabled`, `startFrames`, `endFrames`
+- `metrics` — метрики: `xruns`, `cpuLoad` (offline — `null`)
+- `path` — проект, если команда его читала или меняла
+- `change` — что изменил `tempo`/`meter`: поле, до и после
+
+Подробности:
+
+- `tempo` и `meter` меняют ДОКУМЕНТ проекта: `transport tempo 140` + `render` учитывает новый темп
+- `play`/`pause`/`stop`/`seek`/`loop` меняют offline-сессию рядом с проектом (живого устройства нет — это #92)
+- позиция BBT ↔ кадры и длительности такта считает ядро (`core/transport`); CLI формул не копирует
+- `position` — чтение, `seek` — запись: одна команда не совмещает get и set
+- пауза сохраняет позицию, стоп возвращает в 0 (#257)
+- `metrics.cpuLoad` в offline равен null: реальную загрузку предоставит живой backend (#92)
+- `--dry-run` печатает план и не пишет ни проект, ни сессию
+
 ### `node` — ноды графа: список, каталог типов, добавление, удаление, показ
 
 ```text
@@ -1120,7 +1170,9 @@ euterpia config get backend     # откуда взялось значение
 
 Со ссылками на открытые Issues (не выдаются за готовое):
 
-- `transport`/`play`/сессия живого воспроизведения — ещё нет (#91, #92).
+- `transport` есть (#257), но `play`/`pause`/`stop`/`seek` управляют
+  offline-сессией: живое воспроизведение на устройстве (и сессия backend) —
+  ещё нет (#91, #92).
 - Запись входа (#94), MIDI-мониторинг (#93), скан плагинов (#95).
 - `param set` отвергает дробные значения из-за флагов-маски — план v0.3.2
   ([#292](https://github.com/framefrok/Euterpia_core/issues/292)).

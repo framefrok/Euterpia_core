@@ -42,10 +42,15 @@ const
 
 type
   TransportRuntime = object
+    ## Состояние транспорта ВНУТРИ audio-потока. Меняется только из
+    ## `applyCommands` (lock-free очередь), никогда — с control-path напрямую
+    ## (#257). `state` различает стоп/игру/запись/паузу; предыдущее поле
+    ## `playing: bool` не могло отличить паузу от стопа, хотя контракт
+    ## (`core/transport.nim`) это требует.
     frame: int64
     sampleRate: float32
     tempo: float64
-    playing: bool
+    state: TransportState
     timeSigNum: int32
     timeSigDen: int32
     loopEnabled: bool
@@ -319,7 +324,7 @@ proc createAudioEngine*(
     frame: 0,
     sampleRate: sampleRate,
     tempo: 120.0,
-    playing: false,
+    state: tsStopped,
     timeSigNum: 4,
     timeSigDen: 4,
     loopEnabled: false,
@@ -438,12 +443,32 @@ proc applyCommands(engine: ptr AudioEngine) {.rt.} =
     case cmd.kind
 
     of cmdTransportPlay:
-      if not engine.transport.playing:
+      # Первый блок после старта помечается: ноты секвенсора не должны
+      # «сыграть всё с начала песни», если play нажали не с нуля.
+      if engine.transport.state != tsPlaying:
         engine.firstBlockPending = true
-      engine.transport.playing = true
+      engine.transport.state = tsPlaying
+
+    of cmdTransportPause:
+      # Пауза: остановка БЕЗ сброса позиции (#257). Именно этим она
+      # отличается от стопа — иначе команда была бы косметической.
+      if engine.transport.state != tsPaused:
+        engine.transport.state = tsPaused
 
     of cmdTransportStop:
-      engine.transport.playing = false
+      # Стоп: остановка И возврат в 0 (#257). Позицию сбрасывает та же
+      # команда, что и контрол-плоскость (`transport.stop`), — иначе два
+      # представления одного состояния разошлись бы.
+      engine.transport.state = tsStopped
+      engine.transport.frame = 0
+
+    of cmdTransportSetLoop:
+      # Цикл приезжает командой через очередь, а не пишется в runtime с
+      # control-path: audio-поток — единственный владелец своего состояния
+      # (#257, MANIFEST §10).
+      engine.transport.loopEnabled = cmd.loopEnabled
+      engine.transport.loopStartFrame = cmd.loopStart
+      engine.transport.loopEndFrame = cmd.loopEnd
 
     of cmdSetTempo:
       if cmd.transportValue > 0.0:
@@ -872,7 +897,10 @@ proc renderBlockInternal(
 
     applyCommands(engine)
 
-    let transportActive = engine.transport.playing or forceAdvance
+    # Транспорт «идёт», если играет/пишет или это офлайн-рендер (forceAdvance).
+    # Пауза и стоп — не идут: одновременно это «состояние без продвижения».
+    let transportActive =
+      engine.transport.state in {tsPlaying, tsRecording} or forceAdvance
 
     # Входной тракт: раскладываем драйверный вход в арену ДО рендера графа,
     # чтобы input-ноды увидели актуальный блок. Offline-путь передаёт driverIn
@@ -909,10 +937,10 @@ proc renderBlockInternal(
     metric.sampleRate = float64(engine.transport.sampleRate)
     metric.bufferSize = uint32(engine.blockSize)
 
-    if transportActive:
-      metric.transportState = ord(tsPlaying).uint8
-    else:
-      metric.transportState = ord(tsStopped).uint8
+    # Состояние в метрике — то, что реально лежит в runtime, а не вывод из
+    # `transportActive`: пауза обязана доезжать до control-plane как пауза,
+    # а не как стоп (#257).
+    metric.transportState = ord(engine.transport.state).uint8
 
     metric.activeVoices = 0
 
@@ -1072,11 +1100,25 @@ proc postPlay*(engine: ptr AudioEngine): bool =
 
 
 proc postStop*(engine: ptr AudioEngine): bool =
+  ## Остановить транспорт И вернуть позицию в 0 (#257). Отличается от
+  ## `postPause` именно сбросом позиции: стоп — «в начало», пауза — «на месте».
   if engine == nil:
     return false
 
   engine.toAudio.push(
     EngineCommand(kind: cmdTransportStop)
+  )
+
+
+proc postPause*(engine: ptr AudioEngine): bool =
+  ## Приостановить транспорт, сохранив позицию (#257). Команда идёт тем же
+  ## путём control → queue → audio, что play/stop/seek: control-path не
+  ## трогает `transport` напрямую.
+  if engine == nil:
+    return false
+
+  engine.toAudio.push(
+    EngineCommand(kind: cmdTransportPause)
   )
 
 
@@ -1125,19 +1167,52 @@ proc postSeekSamples*(engine: ptr AudioEngine; samples: int64): bool =
   postSeekSeconds(engine, seconds)
 
 
-proc setLoop*(
+proc postSetLoop*(
   engine: ptr AudioEngine;
   enabled: bool;
   startFrame: int64;
   endFrame: int64
-) =
-  ## Управляет границами и состоянием зацикливания воспроизведения (Loop).
+): bool =
+  ## Управляет границами и активностью цикла (#257). В отличие от прежнего
+  ## `setLoop`, который писал в `transport` прямо с control-path, команда
+  ## кладётся в очередь и применяется в audio-потоке — единый путь для всего,
+  ## что меняет состояние транспорта (MANIFEST §10).
   if engine == nil:
-    return
+    return false
 
-  engine.transport.loopEnabled = enabled
-  engine.transport.loopStartFrame = startFrame
-  engine.transport.loopEndFrame = endFrame
+  engine.toAudio.push(
+    EngineCommand(
+      kind: cmdTransportSetLoop,
+      loopEnabled: enabled,
+      loopStart: startFrame,
+      loopEnd: endFrame
+    )
+  )
+
+
+proc transportState*(engine: ptr AudioEngine): TransportState =
+  ## Состояние транспорта последнего обработанного блока (control-path).
+  ## Для «живого» состояния, а не «намерения»: значение меняется в
+  ## audio-потоке, когда приходит соответствующая команда (#257).
+  if engine == nil:
+    return tsStopped
+  engine.transport.state
+
+
+proc currentTempo*(engine: ptr AudioEngine): float64 =
+  ## Темп, применяемый audio-потоком в данный момент (control-path).
+  if engine == nil:
+    return 0.0
+  engine.transport.tempo
+
+
+proc currentTimeSignature*(
+  engine: ptr AudioEngine
+): tuple[numerator, denominator: int32] =
+  ## Размер такта, применяемый audio-потоком в данный момент (control-path).
+  if engine == nil:
+    return (4'i32, 4'i32)
+  (engine.transport.timeSigNum, engine.transport.timeSigDen)
 
 
 proc isLoopEnabled*(engine: ptr AudioEngine): bool =
