@@ -7,6 +7,8 @@ import std/[os, strutils]
 import codec_api
 import wav_codec
 import audio_buffer
+import codecs/decoders
+import codecs/aiff
 
 # Контракт форматов виден вызывающим через фасад (issue #356): им не нужно
 # тянуть `wav_codec` (файл ОДНОГО формата) ради `AudioFileInfo`.
@@ -16,23 +18,82 @@ export codec_api
 # {.push raises: [].} здесь НЕ используется намеренно.
 
 type
-  # Variant Object: явный, безопасный и быстрый полиморфизм
+  # Variant Object: явный, безопасный и быстрый полиморфизм.
+  #
+  # WAV читается ПОТОКОВО (`wav_codec`), остальные форматы декодируются
+  # ЦЕЛИКОМ (dr_flac/dr_mp3/stb_vorbis и AIFF работают буфером), а `readFrames`
+  # отдаёт срезы — у фасада один контракт для всех форматов (issue #10).
   AudioDecoder* = object
     case format*: AudioFileFormat
-    of afWav: wavReader*: WavReader
-    of afFlac, afOgg, afMp3, afAiff: discard # Заглушки для будущих форматов
+    of afWav:
+      wavReader*: WavReader
+    of afFlac, afMp3, afOgg, afAiff:
+      packed*: seq[float32]
+      packedPos*: int
+      packedInfo*: AudioFileInfo
 
   AudioEncoder* = object
     case format*: AudioFileFormat
-    of afWav: wavWriter*: WavWriter
-    of afFlac, afOgg, afMp3, afAiff: discard
+    of afWav:
+      wavWriter*: WavWriter
+    of afAiff:
+      aiffPath*: string
+      aiffInfo*: AudioFileInfo
+      aiffSamples*: seq[float32]
+    of afFlac, afMp3, afOgg:
+      discard  # ядро эти форматы только читает (энкодеров нет)
+
+proc codecKindOf(format: AudioFileFormat): CodecKind =
+  case format
+  of afFlac: ckFlac
+  of afMp3: ckMp3
+  of afOgg: ckVorbis
+  else: ckFlac
+
+proc openPacked(decoder: var AudioDecoder; path: string;
+                format: AudioFileFormat): bool =
+  ## Декодирует сжатый/чужой файл целиком. `false` — не наш/битый файл.
+  if format == afAiff:
+    var ai: AiffInfo
+    decoder.packed = readAiffAll(path, ai)
+    if decoder.packed.len == 0:
+      return false
+    decoder.packedInfo = AudioFileInfo(
+      sampleRate: int32(ai.sampleRate), channels: int16(ai.channels),
+      bitsPerSample: int16(ai.bitsPerSample), numFrames: ai.frames,
+      isFloat: ai.isFloat, format: afAiff)
+  else:
+    let kind = codecKindOf(format)
+    var ci: CodecInfo
+    if not probeCodec(path, kind, ci):
+      return false
+    decoder.packed = decodeCodec(path, kind)
+    if decoder.packed.len == 0:
+      return false
+    decoder.packedInfo = AudioFileInfo(
+      sampleRate: int32(ci.sampleRate), channels: int16(ci.channels),
+      bitsPerSample: 32, numFrames: ci.frames, isFloat: true, format: format)
+  decoder.packedPos = 0
+  true
 
 proc openDecoder*(path: string): AudioDecoder =
   let ext = path.splitFile().ext.toLowerAscii()
   case ext
   of ".wav", ".wave":
-    result.format = afWav
+    # Ветвь варианта выбирается КОНСТРУКЦИЕЙ объекта, а не присваиванием
+    # `format` у значения по умолчанию: смена ветви — это FieldDefect (§ язык).
+    result = AudioDecoder(format: afWav)
     result.wavReader = openWavReader(path)
+  of ".flac", ".mp3", ".ogg", ".oga", ".aiff", ".aif", ".aifc":
+    let fmt =
+      case ext
+      of ".flac": afFlac
+      of ".mp3": afMp3
+      of ".ogg", ".oga": afOgg
+      else: afAiff
+    result = AudioDecoder(format: fmt)
+    if not openPacked(result, path, fmt):
+      raise newException(IOError, "не удалось прочитать аудиофайл: " & path)
   else:
     raise newException(IOError, "Unsupported format: " & ext)
 
@@ -40,29 +101,51 @@ proc readFrames*(decoder: var AudioDecoder, rawBuf: ptr UncheckedArray[uint8], o
   case decoder.format
   of afWav:
     return readFrames(decoder.wavReader, rawBuf, outBuf, frames)
-  else:
-    return 0
+  of afFlac, afMp3, afOgg, afAiff:
+    if outBuf.isNil or frames <= 0:
+      return 0
+    let channels = int(decoder.packedInfo.channels)
+    if channels <= 0:
+      return 0
+    let remaining = decoder.packed.len div channels - decoder.packedPos
+    let toCopy = min(int(frames), remaining)
+    if toCopy <= 0:
+      return 0
+    copyMem(addr outBuf[0], addr decoder.packed[decoder.packedPos * channels],
+            toCopy * channels * sizeof(float32))
+    decoder.packedPos += toCopy
+    return int32(toCopy)
 
 proc close*(decoder: var AudioDecoder) =
   case decoder.format
   of afWav:
     close(decoder.wavReader)
-  else:
-    discard
+  of afFlac, afMp3, afOgg, afAiff:
+    decoder.packed.setLen(0)
+    decoder.packedPos = 0
 
 proc getInfo*(decoder: AudioDecoder): AudioFileInfo =
   case decoder.format
   of afWav:
     return decoder.wavReader.info
-  else:
-    return AudioFileInfo()
+  of afFlac, afMp3, afOgg, afAiff:
+    return decoder.packedInfo
 
 proc openEncoder*(path: string, info: AudioFileInfo): AudioEncoder =
   let ext = path.splitFile().ext.toLowerAscii()
   case ext
   of ".wav", ".wave":
-    result.format = afWav
+    result = AudioEncoder(format: afWav)
     result.wavWriter = openWavWriter(path, info)
+  of ".aiff", ".aif", ".aifc":
+    result = AudioEncoder(format: afAiff)
+    result.aiffPath = path
+    result.aiffInfo = info
+    result.aiffSamples = @[]
+  of ".flac", ".mp3", ".ogg", ".oga":
+    # Энкодеров этих форматов в ядре нет — честный отказ, а не тихо битый файл.
+    raise newException(IOError,
+      "кодирование " & ext & " не поддерживается (только чтение)")
   else:
     raise newException(IOError, "Unsupported format: " & ext)
 
@@ -70,14 +153,28 @@ proc writeFrames*(encoder: var AudioEncoder, buffer: ptr UncheckedArray[float32]
   case encoder.format
   of afWav:
     writeFrames(encoder.wavWriter, buffer, frames)
-  else:
+  of afAiff:
+    # AIFF пишется одним файлом при close: формат не умеет дописываться так,
+    # как RIFF (шапка зависит от полного числа кадров), поэтому копим сэмплы.
+    if buffer.isNil or frames <= 0:
+      return
+    let total = int(frames) * int(encoder.aiffInfo.channels)
+    for i in 0 ..< total:
+      encoder.aiffSamples.add buffer[i]
+  of afFlac, afMp3, afOgg:
     discard
 
 proc close*(encoder: var AudioEncoder) =
   case encoder.format
   of afWav:
     close(encoder.wavWriter)
-  else:
+  of afAiff:
+    if not writeAiff(encoder.aiffPath, int(encoder.aiffInfo.channels),
+                     int(encoder.aiffInfo.sampleRate),
+                     int(encoder.aiffInfo.bitsPerSample), encoder.aiffSamples):
+      raise newException(IOError, "не удалось записать AIFF: " & encoder.aiffPath)
+    encoder.aiffSamples.setLen(0)
+  of afFlac, afMp3, afOgg:
     discard
 
 proc streamFileToBuffer*(path: string, rtBuffer: var StreamingAudioBuffer) {.thread.} =

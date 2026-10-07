@@ -40,5 +40,15 @@ rt_scratch*
 # К ядру EUTERPIA не относится и в репозиторий не попадает.
 .agents/
 
+# Тестовые аудио-фикстуры кодеков (#10): маленькие сэмплы (tone.*) —
+# часть теста, поэтому им разрешено лежать в git вопреки общему запрету
+# на аудио выше. Скоуп узкий: только tests/fixtures/.
+!tests/fixtures/
+!tests/fixtures/*.wav
+!tests/fixtures/*.flac
+!tests/fixtures/*.mp3
+!tests/fixtures/*.ogg
+!tests/fixtures/*.aiff
+
 # Служебный вывод фоновых запусков (nohup, nimble - логи в /tmp).
 nohup.out

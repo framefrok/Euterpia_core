@@ -218,7 +218,7 @@ proc runImport*(ctx: var Ctx; args: seq[string]): Report =
   except CatchableError as e:
     return envError("не удалось прочитать аудиофайл: " & scan.audioFile &
                     " (" & e.msg & ")",
-                    "поддерживается WAV (16/24/32-bit); другие форматы — issue #10",
+                    "поддерживается WAV, FLAC, MP3, OGG Vorbis и AIFF (#10)",
                     code = ecEnvironment, errorKind = "io")
 
   if info.numFrames <= 0 or info.channels <= 0:
