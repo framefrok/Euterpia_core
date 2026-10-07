@@ -21,7 +21,7 @@ import std/[json, math, os, strutils]
 import context
 import audio_inspect
 import spectrum
-import wav_codec
+import audio_file_io
 import cli_spec
 
 const
@@ -177,27 +177,15 @@ proc readWavAll(path: string; samples: var seq[float32]; channels: var int;
     if not path.toLowerAscii().endsWith(WavSuffix):
       err = "ожидается WAV-файл (.wav), получено: " & path
       return false
-    var r = openWavReader(path)
-    channels = int(r.info.channels)
-    sampleRate = r.info.sampleRate
-    let frames = r.info.numFrames
-    if frames <= 0 or channels <= 0 or r.info.sampleRate <= 0:
-      r.close()
+    # Чтение — через фасад (issue #356): CLI не знает про `wav_codec` и не
+    # раскладывает чтение блоками сам.
+    let (data, info) = readAllAudioFile(path)
+    if data.len == 0 or info.channels <= 0 or info.sampleRate <= 0:
       err = "в файле нет сэмплов или некорректный заголовок"
       return false
-    let total = int(frames) * channels
-    samples = newSeq[float32](total)
-    var raw = newSeq[uint8](total * 4 + 8)
-    let got = readFrames(r,
-      cast[ptr UncheckedArray[uint8]](addr raw[0]),
-      cast[ptr UncheckedArray[float32]](addr samples[0]),
-      int32(frames))
-    r.close()
-    if got <= 0:
-      err = "не удалось прочитать сэмплы"
-      return false
-    if int(got) < int(frames):
-      samples.setLen(int(got) * channels)
+    samples = data
+    channels = int(info.channels)
+    sampleRate = info.sampleRate
     true
   except CatchableError as e:
     err = e.msg
@@ -352,12 +340,10 @@ proc writeSnippets(dir: string; samples: seq[float32]; channels, sr: int;
       var slice = newSeq[float32]((b - a) * channels)
       copyMem(addr slice[0], unsafeAddr samples[a * channels],
               slice.len * sizeof(float32))
-      var w = openWavWriter(path, AudioFileInfo(
+      # Запись сниппета — через фасад (issue #356).
+      exportAudio(path, AudioFileInfo(
         sampleRate: int32(sr), channels: int16(channels),
-        bitsPerSample: 16, isFloat: false))
-      writeFrames(w, cast[ptr UncheckedArray[float32]](addr slice[0]),
-                  int32(b - a))
-      close(w)
+        bitsPerSample: 16, isFloat: false), slice)
       result.files.add path
       inc n
     except CatchableError as e:

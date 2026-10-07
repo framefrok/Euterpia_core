@@ -35,7 +35,7 @@ import
   compiled_pipeline,
   audio_engine,
   sequencer,
-  wav_codec
+  audio_file_io
 
 {.push raises: [].}
 
@@ -245,9 +245,11 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
   var chunk = newSeq[float32](int(chunkFrames) * channels)
   var scratch = newSeq[float32](int(blockFrames) * channels)
 
-  var writer: WavWriter
+  # Запись — через ФАСАД (issue #356): `offline_render` не знает про `wav_codec`
+  # и не вызывает `openWavWriter` напрямую.
+  var encoder: AudioEncoder
   try:
-    writer = openWavWriter(
+    encoder = openEncoder(
       path,
       AudioFileInfo(
         sampleRate: opts.sampleRate,
@@ -300,7 +302,7 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
         sumSquares += float64(v) * float64(v)
         inc i
 
-      writeFrames(writer,
+      writeFrames(encoder,
                   cast[ptr UncheckedArray[float32]](addr chunk[0]),
                   framesThis)
       done += int64(framesThis)
@@ -314,13 +316,13 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
   except CatchableError as e:
     result.error = "ошибка записи файла: " & e.msg
     try:
-      close(writer)
+      close(encoder)
     except CatchableError:
       discard
     return
 
   try:
-    close(writer)
+    close(encoder)
   except CatchableError as e:
     result.error = "не удалось закрыть файл: " & e.msg
     return

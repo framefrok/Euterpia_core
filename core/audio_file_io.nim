@@ -8,6 +8,10 @@ import codec_api
 import wav_codec
 import audio_buffer
 
+# Контракт форматов виден вызывающим через фасад (issue #356): им не нужно
+# тянуть `wav_codec` (файл ОДНОГО формата) ради `AudioFileInfo`.
+export codec_api
+
 # I/O операции и аллокации памяти могут генерировать исключения.
 # {.push raises: [].} здесь НЕ используется намеренно.
 
@@ -175,6 +179,23 @@ proc loadAudioFile*(path: string): tuple[samples: seq[float32], info: AudioFileI
   if framesDone < info.numFrames:
     result.samples.setLen(int(framesDone * int64(info.channels)))
     result.info.numFrames = framesDone
+
+proc seekAudioFile*(decoder: var AudioDecoder; frame: int64) =
+  ## Устанавливает позицию чтения в КАДРАХ (issue #356). Раньше фасад не давал
+  ## seek, и вызывающие (`waveform_cache`) читали весь файл целиком, комментируя
+  ## отсутствие API. Теперь seek — часть фасада.
+  case decoder.format
+  of afWav:
+    seek(decoder.wavReader, frame)
+  else:
+    discard
+
+proc readAllAudioFile*(path: string): tuple[samples: seq[float32], info: AudioFileInfo] =
+  ## Прочитать файл целиком в interleaved float32 (issue #356). Раньше это
+  ## делали сами вызывающие (`cmd_analyze.readWavAll` звал `openWavReader` +
+  ## `readFrames` напрямую), обходя фасад. Теперь у «прочитать весь файл» одно
+  ## имя в фасаде; реализация — `loadAudioFile`.
+  loadAudioFile(path)
 
 proc exportAudio*(path: string, info: AudioFileInfo, samples: openArray[float32]) =
   var encoder = openEncoder(path, info)

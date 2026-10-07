@@ -72,7 +72,9 @@ proc evictLru(cache: WaveformCache) =
 
 proc generateWaveformData(filepath: string, numPoints: int32): WaveformData =
   try:
-    # Используем loadAudioFile, так как в фасаде audio_file_io нет seekAudioFile
+    # Читаем файл целиком через фасад (issue #356). Для построения пиков на
+    # весь файл удобнее `loadAudioFile`; для частичного чтения у фасада теперь
+    # есть `seekAudioFile`.
     let (samples, info) = loadAudioFile(filepath)
     let totalFrames = info.numFrames
     let channels = int32(info.channels)

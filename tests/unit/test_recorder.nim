@@ -11,6 +11,7 @@
 
 import std/[unittest, os, atomics, typedthreads]
 import audio_recorder
+import audio_file_io
 
 # ---------------------------------------------------------------------------
 # Датчик гонки disarm/arm (#61)
@@ -186,6 +187,19 @@ suite "audio_recorder":
       check regions[0].lengthSamples > 0'i64
       check regions[0].sampleRate == 48000
       check regions[0].channels == 2
+
+      # Файл, записанный рекордером, читается ФАСАДОМ (issue #356): рекордер и
+      # фасад используют ОДИН писатель WAV, поэтому форматы совместимы.
+      let (samples, info) = loadAudioFile(regions[0].filename)
+      check info.sampleRate == 48000
+      check info.channels == 2
+      check samples.len > 0
+      var peak = 0.0f
+      for s in samples:
+        let a = if s < 0.0f: -s else: s
+        if a > peak:
+          peak = a
+      check peak > 0.1f
 
     rec.cleanupRecordings()
     destroyAudioRecorder(rec)

@@ -15,6 +15,11 @@
 import std/[os, times, atomics, locks]
 import rt_guard
 
+# Общий писатель WAV ядра (issue #356): RIFF/RF64-шапка пишется РОВНО в одном
+# месте ядра. Импорт под алиасом, чтобы имена `WavWriter`/`openWavWriter`/
+# `writeFrames`/`close` не сталкивались с одноимёнными у рекордера.
+import wav_codec as codec
+
 const
   MaxRecordTracks* = 32
   MaxPendingCommands = 256
@@ -140,12 +145,12 @@ type
     count: int
 
   WavWriter = object
-    ## Компактный WAV writer для worker thread.
-    f: File
-    sampleRate: int32
+    ## WAV writer worker-thread — тонкая обёртка над общим писателем ядра
+    ## `wav_codec.WavWriter` (issue #356). Раньше здесь была СВОЯ реализация
+    ## RIFF-шапки, которая уже разошлась с `wav_codec` (другие разрядности,
+    ## нет RF64/NaN-guard). Теперь шапка пишется в одном месте.
+    inner: codec.WavWriter
     channels: int32
-    bitsPerSample: int32
-    bytesWritten: int64
     isOpen: bool
 
   WorkerLocal = object
@@ -256,18 +261,8 @@ proc makeTakeFilename(outDir: string; trackId, take: int32; timestamp: string): 
   result = outDir / name
 
 # ---------------------------------------------------------------------------
-# Minimal WAV writer
+# WAV writer: обёртка над общим писателем ядра (issue #356)
 # ---------------------------------------------------------------------------
-
-proc putU16(buf: var openArray[byte]; pos: int; v: uint16) =
-  buf[pos + 0] = byte(v and 0xff'u16)
-  buf[pos + 1] = byte((v shr 8) and 0xff'u16)
-
-proc putU32(buf: var openArray[byte]; pos: int; v: uint32) =
-  buf[pos + 0] = byte(v and 0xff'u32)
-  buf[pos + 1] = byte((v shr 8) and 0xff'u32)
-  buf[pos + 2] = byte((v shr 16) and 0xff'u32)
-  buf[pos + 3] = byte((v shr 24) and 0xff'u32)
 
 proc openWavWriter(
     w: var WavWriter;
@@ -276,106 +271,35 @@ proc openWavWriter(
     channels: int32;
     bitsPerSample: int32
 ): bool =
-  ## Открывает WAV файл и пишет пустой заголовок, который будет обновлён
-  ## при закрытии.
+  ## Открывает WAV через ОБЩИЙ писатель ядра (issue #356). Любая ошибка
+  ## уровня worker-thread гасится в `false`: исключений в потоке записи быть
+  ## не должно.
   w.isOpen = false
-  w.bytesWritten = 0
-  w.sampleRate = sampleRate
   w.channels = channels
-  w.bitsPerSample = if bitsPerSample == 16: 16 else: 24
-
-  var fileOpened = false
-  try:
-    fileOpened = open(w.f, filename, fmWrite)
-  except CatchableError:
-    fileOpened = false
-
-  if not fileOpened:
+  if channels <= 0 or channels > 2:
     return false
-
-  w.isOpen = true
-
-  var h: array[44, byte]
-
-  # RIFF header
-  h[0] = byte('R')
-  h[1] = byte('I')
-  h[2] = byte('F')
-  h[3] = byte('F')
-  putU32(h, 4, 0'u32) # final RIFF size later
-
-  h[8] = byte('W')
-  h[9] = byte('A')
-  h[10] = byte('V')
-  h[11] = byte('E')
-
-  # fmt chunk
-  h[12] = byte('f')
-  h[13] = byte('m')
-  h[14] = byte('t')
-  h[15] = byte(' ')
-  putU32(h, 16, 16'u32)
-
-  putU16(h, 20, 1'u16)                 # PCM
-  putU16(h, 22, uint16(w.channels))
-
-  putU32(h, 24, uint32(w.sampleRate))
-
-  let blockAlign = int32(w.channels * (w.bitsPerSample div 8))
-  let byteRate = int64(w.sampleRate) * int64(blockAlign)
-
-  putU32(h, 28, uint32(byteRate))
-  putU16(h, 32, uint16(blockAlign))
-  putU16(h, 34, uint16(w.bitsPerSample))
-
-  # data chunk
-  h[36] = byte('d')
-  h[37] = byte('a')
-  h[38] = byte('t')
-  h[39] = byte('a')
-  putU32(h, 40, 0'u32) # final data size later
-
+  let bits: int16 = if bitsPerSample == 16: 16 else: 24
   try:
-    discard w.f.writeBuffer(addr h[0], h.len)
+    w.inner = codec.openWavWriter(filename, codec.AudioFileInfo(
+      sampleRate: sampleRate,
+      channels: int16(channels),
+      bitsPerSample: bits,
+      isFloat: false
+    ))
+    w.isOpen = true
     return true
   except CatchableError:
-    try:
-      w.f.close()
-    except CatchableError:
-      discard
     w.isOpen = false
     return false
 
 proc closeWavWriter(w: var WavWriter) =
   if not w.isOpen:
     return
-
-  # Обновить размеры в заголовке.
   try:
-    flushFile(w.f)
-
-    let dataSize = w.bytesWritten
-    let riffSize = 36 + dataSize
-
-    var b: array[4, byte]
-
-    w.f.setFilePos(4)
-    putU32(b, 0, uint32(riffSize))
-    discard w.f.writeBuffer(addr b[0], b.len)
-
-    w.f.setFilePos(40)
-    putU32(b, 0, uint32(dataSize))
-    discard w.f.writeBuffer(addr b[0], b.len)
+    codec.close(w.inner)
   except CatchableError:
     discard
-
-  try:
-    w.f.close()
-  except CatchableError:
-    discard
-
   w.isOpen = false
-  w.bytesWritten = 0
 
 proc writeWavFrames(
     w: var WavWriter;
@@ -383,96 +307,30 @@ proc writeWavFrames(
     frames: int;
     channels: int
 ): int =
-  ## Пишет interleaved float32 фреймы как PCM 16/24 bit.
-  ##
-  ## Возвращает количество успешно записанных фреймов.
+  ## Пишет interleaved float32 через общий писатель (PCM 16/24, NaN-guard —
+  ## в `wav_codec.writeFrames`). Возвращает число записанных фреймов.
   if not w.isOpen or frames <= 0 or src.isNil or channels <= 0 or channels > 2:
     return 0
 
-  let bytesPerSample = w.bitsPerSample div 8
-  let frameBytes = channels * bytesPerSample
-
+  # Пишем короткими чанками: общий писатель аллоцирует буфер под вызов,
+  # а worker не должен запрашивать сотни килобайт за раз.
   const ChunkFrames = 512
-  var buf: array[ChunkFrames * 2 * 3, byte]
-
   var remaining = frames
-  var srcOffset = 0
-  var framesWritten = 0
-
+  var offset = 0
   while remaining > 0:
     let n = min(ChunkFrames, remaining)
-    let bytesNeeded = n * frameBytes
-
-    if bytesNeeded > buf.len:
+    try:
+      codec.writeFrames(
+        w.inner,
+        cast[ptr UncheckedArray[float32]](addr src[offset * channels]),
+        int32(n)
+      )
+    except CatchableError:
       break
-
-    var p = 0
-
-    if w.bitsPerSample == 16:
-      for f in 0 ..< n:
-        let base = srcOffset + f * channels
-        for c in 0 ..< channels:
-          var y = src[base + c]
-
-          # NaN guard
-          if y != y:
-            y = 0.0
-
-          if y > 1.0:
-            y = 1.0
-          elif y < -1.0:
-            y = -1.0
-
-          let v = int32(y * 32767.0)
-          let u = cast[uint32](v)
-
-          buf[p + 0] = byte(u and 0xff'u32)
-          buf[p + 1] = byte((u shr 8) and 0xff'u32)
-          inc p, 2
-
-    else:
-      # 24-bit
-      for f in 0 ..< n:
-        let base = srcOffset + f * channels
-        for c in 0 ..< channels:
-          var y = src[base + c]
-
-          # NaN guard
-          if y != y:
-            y = 0.0
-
-          if y > 1.0:
-            y = 1.0
-          elif y < -1.0:
-            y = -1.0
-
-          let v = int32(y * 8388607.0)
-          let u = cast[uint32](v)
-
-          buf[p + 0] = byte(u and 0xff'u32)
-          buf[p + 1] = byte((u shr 8) and 0xff'u32)
-          buf[p + 2] = byte((u shr 16) and 0xff'u32)
-          inc p, 3
-
-    let writtenBytes =
-      try:
-        w.f.writeBuffer(addr buf[0], bytesNeeded)
-      except CatchableError:
-        0
-
-    if writtenBytes <= 0:
-      break
-
-    w.bytesWritten += int64(writtenBytes)
-
-    if writtenBytes != bytesNeeded:
-      break
-
-    framesWritten += n
-    srcOffset += n * channels
+    offset += n
     remaining -= n
 
-  result = framesWritten
+  result = frames - remaining
 
 # ---------------------------------------------------------------------------
 # Ring buffers
