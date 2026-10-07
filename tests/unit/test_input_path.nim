@@ -14,7 +14,7 @@
 #
 # Тест синхронный: блоки «прокручиваются» вручную, поток драйвера не нужен.
 
-import std/[unittest, os, tables]
+import std/[unittest, os, tables, atomics]
 import signal_types
 import node_interface
 import graph_compiler
@@ -391,3 +391,117 @@ suite "input path: запись в WAV":
     destroyAudioRecorder(rec)
     if dirExists(recDir):
       removeDir(recDir)
+
+# ==============================================================================
+# Диагностика входа и позиции (#383, #384)
+# ==============================================================================
+
+type
+  FrameRaceCtx = object
+    engine: ptr AudioEngine
+    stop: Atomic[bool]
+
+proc frameReaderLoop(arg: pointer) {.thread.} =
+  ## Control-поток: параллельно рендеру читает позицию и счётчики.
+  ## Под TSan ловит гонку данных, если поля не атомарные (#384).
+  let c = cast[ptr FrameRaceCtx](arg)
+  while not c.stop.load(moAcquire):
+    discard c.engine.currentFrame()
+    discard c.engine.currentPositionSeconds()
+    discard c.engine.droppedMetricsCount()
+    discard c.engine.droppedRetirementsCount()
+
+suite "input path: диагностика входа и позиции (#383, #384)":
+  test "inputStatusFlags накапливается через OR, а не складывается (#383)":
+    let engine = createAudioEngine(
+      sampleRate = 48000.0f, blockSize = int32(BlockSize)
+    )
+    check engine != nil
+    defer: destroyAudioEngine(engine)
+
+    const
+      paInputOverflow = 0x0000_0002'u32
+      paInputUnderflow = 0x0000_0001'u32
+
+    # Два одинаковых входных события: битмаск не меняется (было fetchAdd -> 4).
+    engine.noteInputStatus(paInputOverflow)
+    engine.noteInputStatus(paInputOverflow)
+    check engine.inputStatusFlags() == paInputOverflow
+
+    # Разные события объединяются по OR.
+    engine.noteInputStatus(paInputUnderflow)
+    check engine.inputStatusFlags() == (paInputOverflow or paInputUnderflow)
+
+  test "4-канальный вход: L/R читаются из корректных слотов (#383)":
+    ## Раньше `chans` клампился до 2 и использовался как interleaved-stride:
+    ## при 4-канальном входе читались не те сэмплы. Проверяем раскладку.
+    var rig: InputRig
+    let (cr, binding) = rig.buildInputRig()
+    discard binding
+
+    let engine = createAudioEngine(
+      sampleRate = 48000.0f, blockSize = int32(BlockSize)
+    )
+    check engine != nil
+    engine.setInputChannels(4)
+    check engine.postGraphUpdate(cr.pipeline)
+    check engine.postPlay()
+
+    var inBuf: array[BlockSize * 4, float32]
+    for i in 0 ..< BlockSize:
+      inBuf[i * 4 + 0] = 0.5f    # L — должен попасть в левый выход
+      inBuf[i * 4 + 1] = -0.25f  # R — в правый
+      inBuf[i * 4 + 2] = 0.9f    # игнорируется
+      inBuf[i * 4 + 3] = -0.9f   # игнорируется
+
+    var outBuf: array[BlockSize * 2, float32]
+    let pin = cast[ptr UncheckedArray[float32]](addr inBuf[0])
+    let pout = cast[ptr UncheckedArray[float32]](addr outBuf[0])
+
+    engine.renderBlock(pin, 4'i32, pout)  # применяет граф
+    engine.renderBlock(pin, 4'i32, pout)  # чистый проход
+
+    for i in 0 ..< BlockSize:
+      check abs(outBuf[i * 2] - 0.5f) < 1e-6f
+      check abs(outBuf[i * 2 + 1] - (-0.25f)) < 1e-6f
+
+    destroyAudioEngine(engine)
+    rig.destroyInputRig()
+
+  test "control параллельно читает позицию/счётчики во время рендера (#384)":
+    var rig: InputRig
+    let (cr, binding) = rig.buildInputRig()
+    discard binding
+
+    let engine = createAudioEngine(
+      sampleRate = 48000.0f, blockSize = int32(BlockSize)
+    )
+    check engine != nil
+    engine.setInputChannels(2)
+    check engine.postGraphUpdate(cr.pipeline)
+    check engine.postPlay()
+
+    var c: FrameRaceCtx
+    c.engine = engine
+    c.stop.store(false, moRelaxed)
+
+    var th: Thread[pointer]
+    createThread(th, frameReaderLoop, addr c)
+
+    var inBuf: array[BlockSize * 2, float32]
+    var outBuf: array[BlockSize * 2, float32]
+    fillSine(inBuf)
+    let pin = cast[ptr UncheckedArray[float32]](addr inBuf[0])
+    let pout = cast[ptr UncheckedArray[float32]](addr outBuf[0])
+
+    for _ in 0 ..< 5000:
+      engine.renderBlock(pin, 2'i32, pout)
+
+    c.stop.store(true, moRelease)
+    joinThread(th)
+
+    # Позиция монотонна и неотрицательна после прогона.
+    check engine.currentFrame() > 0'i64
+
+    destroyAudioEngine(engine)
+    rig.destroyInputRig()

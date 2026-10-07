@@ -22,12 +22,20 @@ const
 
   ## Ёмкость SPSC-очереди утилизированных пайплайнов: столько смен графа
   ## движок готов отдать control-plane через `pollReclamation` (issue #73).
-  AudioRetireQueueCapacity* = 1024
+  ##
+  ## Увеличена (issue #385): фиксированный retirement-storage обязан с запасом
+  ## покрывать `MaxRetireBacklog`, чтобы RT-путь никогда не освобождал память.
+  AudioRetireQueueCapacity* = 4096
 
   ## Ёмкость локального overflow утилизации: столько пайплайнов движок
-  ## держит в audio-потоке, если SPSC-очередь полна. При переполнении ОБОИХ
-  ## уровней пайплайн освобождается аварийно (issue #73).
-  LocalRetireCapacity* = 1024
+  ## держит в audio-потоке, если SPSC-очередь полна (issue #73, #385).
+  LocalRetireCapacity* = 4096
+
+  ## Максимум одновременных «незакрытых» смен графа (backpressure, #385).
+  ## Строго меньше суммы ёмкостей утилизации (queue + localRetire): при любом
+  ## раскладе хотя бы один уровень остаётся свободным, поэтому `retirePipelineRT`
+  ## не может упереться в оба уровня и НЕ освобождает пайплайн в audio-потоке.
+  MaxRetireBacklog* = AudioRetireQueueCapacity
 
   MaxPendingParams = 256
 
@@ -81,14 +89,29 @@ type
     localRetireCount: int32
 
     # Публичный снапшот позиции для control plane.
-    # Не атомарный сознательно: в большинстве случаев этого достаточно
-    # для UI/редактора, а метрики остаются основным источником.
-    frameSnapshot: int64
+    #
+    # Атомарный (issue #384): пишется в audio-потоке, читается control-path
+    # (`currentFrame`). Обычный int64 давал формальный data race, а на 32-бит
+    # платформах — рваный (torn) int64: control мог увидеть половину старого
+    # и половину нового значения позиции.
+    frameSnapshot: Atomic[int64]
 
     # Diagnostics
     blockIndex: uint64
-    droppedMetrics: uint32
-    droppedRetirements: uint32
+    ## Оба — RT-инкремент / control-чтение (issue #384): сделаны атомарными,
+    ## чтобы диагностика не создавала гонку данных.
+    droppedMetrics: Atomic[uint32]
+    droppedRetirements: Atomic[uint32]
+
+    # Backpressure смены графа (issue #385).
+    #
+    # Счётчик «резервирований» смены графа: инкрементируется в
+    # `postGraphUpdate` (по одному на публикацию), декрементируется при
+    # применении команды, если утилизации не будет, и в `pollReclamation` при
+    # каждом освобождённом пайплайне. Верхняя граница (`MaxRetireBacklog`)
+    # гарантирует, что хранилище утилизации (SPSC + localRetire) никогда не
+    # переполнится, а значит RT-путь НИКОГДА не освобождает память.
+    retireBacklog: Atomic[int32]
 
     # Небольшая очередь параметров, пришедших до появления пайплайна.
     pendingParams: array[MaxPendingParams, EngineCommand]
@@ -193,16 +216,15 @@ proc retirePipelineRT*(
   ##      control-plane через `pollReclamation`;
   ##   2. локальный overflow `localRetire` — если очередь полна.
   ##
-  ## Если полны ОБА уровня, хранить пайплайн некуда. Раньше указатель просто
-  ## терялся: `droppedRetirements` рос, а `destroyPipeline` не вызывался
-  ## никогда — утечка неограниченная (issue #73). Теперь пайплайн
-  ## освобождается ПРЯМО ЗДЕСЬ.
+  ## При переполнении ОБОИХ уровней пайплайн НЕ освобождается (issue #385):
+  ## `deallocShared`/teardown чужих арен в audio-потоке нарушает MANIFEST
+  ## §9/§10, а `destroyPipeline` — это полноценный teardown, не «быстрый free».
   ##
-  ## Это единственное освобождение памяти в audio-пути и осознанное
-  ## отступление от MANIFEST §9/§10: событие исключительное (control-plane
-  ## не разбирал очередь >~2000 смен графа), цена — один `deallocShared`,
-  ## а альтернатива — тихая потеря арен и шагов пайплайна. Факт виден
-  ## control-plane через `droppedRetirementsCount()`.
+  ## Переполнение недостижимо: `postGraphUpdate` (backpressure, #385) держит
+  ## число незакрытых смен графа ниже суммы ёмкостей утилизации, поэтому хотя
+  ## бы один уровень всегда свободен. Ветка оставлена как защита от логической
+  ## ошибки: фиксируем факт для control-plane через `droppedRetirementsCount()`,
+  ## но память в RT не трогаем.
   if p == nil:
     return
 
@@ -218,9 +240,8 @@ proc retirePipelineRT*(
     engine.localRetire[engine.localRetireCount] = p
     inc engine.localRetireCount
   else:
-    # Оба уровня полны: аварийное освобождение (issue #73).
-    inc engine.droppedRetirements
-    destroyPipeline(p)
+    # Недостижимо при корректном backpressure (#385): НЕ освобождаем в RT.
+    discard engine.droppedRetirements.fetchAdd(1'u32, moRelaxed)
 
 
 proc writeUint64ToBlock(
@@ -334,11 +355,12 @@ proc createAudioEngine*(
 
   result.firstBlockPending = false
   result.activePipeline = nil
-  result.frameSnapshot = 0
+  result.frameSnapshot.store(0'i64, moRelaxed)
 
   result.blockIndex = 0
-  result.droppedMetrics = 0
-  result.droppedRetirements = 0
+  result.droppedMetrics.store(0'u32, moRelaxed)
+  result.droppedRetirements.store(0'u32, moRelaxed)
+  result.retireBacklog.store(0'i32, moRelaxed)
 
   result.localRetireCount = 0
   result.pendingParamCount = 0
@@ -498,6 +520,9 @@ proc applyCommands(engine: ptr AudioEngine) {.rt.} =
       let newPipeline = consumeGraphUpdate(engine, cmd.sharedBufferId)
       let oldPipeline = engine.activePipeline
 
+      # Резервирование утилизации (backpressure, issue #385) снимается ровно
+      # один раз на команду: либо здесь (если утилизации НЕ будет), либо в
+      # `pollReclamation` (когда пайплайн реально освобождён).
       if newPipeline != oldPipeline:
         # Гарантия инварианта до первого renderBlock:
         # Проверяем корректность структуры и наличие процедур рендеринга/привязки буферов.
@@ -510,11 +535,17 @@ proc applyCommands(engine: ptr AudioEngine) {.rt.} =
 
           if oldPipeline != nil:
             retirePipelineRT(engine, oldPipeline)
+          else:
+            # Первый пайплайн: утилизировать нечего — возвращаем резерв.
+            discard engine.retireBacklog.fetchAdd(-1'i32, moRelaxed)
 
           if newPipeline == nil:
             engine.pendingParamCount = 0
           else:
             replayPendingParams(engine, newPipeline)
+      else:
+        # `newPipeline == oldPipeline` — состояние не меняется, утилизации нет.
+        discard engine.retireBacklog.fetchAdd(-1'i32, moRelaxed)
 
     of cmdAutomationBlock, cmdLoadResource:
       # Пока просто освобождаем общий блок.
@@ -728,30 +759,37 @@ proc publishInput(
 
   let stride = int32(signal_types.MaxBlockSize)
 
-  var chans = inputChannels
-  if chans < 0:
-    chans = 0
-  if chans > int32(MaxInputChannels):
-    chans = int32(MaxInputChannels)
+  # ИСХОДНОЕ число каналов драйвера — это interleaved-stride (issue #383).
+  # Раньше `chans` клампился до MaxInputChannels и использовался как шаг:
+  # при 4-канальном входе сэмплы L/R лежат с шагом 4, а читались с шагом 2 —
+  # раскладка каналов ломалась. Кламп должен ограничивать лишь ЧИСЛО
+  # копируемых каналов, но не шаг исходного буфера.
+  var driverChans = inputChannels
+  if driverChans < 0:
+    driverChans = 0
 
-  if not driverIn.isNil and chans > 0:
+  var copyChans = driverChans
+  if copyChans > int32(MaxInputChannels):
+    copyChans = int32(MaxInputChannels)
+
+  if not driverIn.isNil and copyChans > 0:
     var ch: int32 = 0
-    while ch < chans:
+    while ch < copyChans:
       let dst = cast[ptr UncheckedArray[float32]](
         addr engine.inputArena[int(ch) * int(stride)]
       )
       var f: int32 = 0
       while f < frames:
-        dst[int(f)] = driverIn[int(f) * int(chans) + int(ch)]
+        dst[int(f)] = driverIn[int(f) * int(driverChans) + int(ch)]
         inc f
       inc ch
-    engine.inputDeviceChannels = chans
+    engine.inputDeviceChannels = copyChans
   else:
-    chans = 0
+    copyChans = 0
     engine.inputDeviceChannels = 0
 
   engine.inputBuffer.data = engine.inputArena
-  engine.inputBuffer.channels = chans
+  engine.inputBuffer.channels = copyChans
   engine.inputBuffer.frames = frames
   engine.inputBuffer.stride = stride
 
@@ -824,7 +862,10 @@ proc noteInputStatus*(engine: ptr AudioEngine; statusFlags: uint32) {.cdecl, gcs
   ## xrun'ов (issue #3): драйвер сообщает входные overflow/underflow.
   if engine == nil or statusFlags == 0'u32:
     return
-  discard engine.inputStatusFlags.fetchAdd(statusFlags, moRelaxed)
+  # `statusFlags` — БИТМАСК (issue #383): накапливается через OR, как и
+  # `driverStatusFlags`. `fetchAdd` складывал флаги: два одинаковых входных
+  # xrun'а давали 2+2=4 — «чужой» флаг, которого драйвер не сообщал.
+  discard engine.inputStatusFlags.fetchOr(statusFlags, moRelaxed)
   discard engine.inputXruns.fetchAdd(1'u32, moRelaxed)
   noteXrunInternal(engine, statusFlags)
 
@@ -832,6 +873,14 @@ proc inputXrunCount*(engine: ptr AudioEngine): uint32 =
   if engine == nil:
     return 0
   engine.inputXruns.load(moRelaxed)
+
+proc inputStatusFlags*(engine: ptr AudioEngine): uint32 =
+  ## Битмаск входных xrun-событий (issue #3, #383). Control-path. Накопление
+  ## через OR (см. `noteInputStatus`), поэтому повтор одного и того же флага
+  ## не меняет маску.
+  if engine == nil:
+    return 0'u32
+  engine.inputStatusFlags.load(moRelaxed)
 
 proc xrunCount*(engine: ptr AudioEngine): uint32 =
   ## Монотонный счётчик xrun'ов любого направления за время жизни движка.
@@ -960,7 +1009,7 @@ proc renderBlockInternal(
     metric.driverStatusFlags = engine.driverStatusFlags.load(moRelaxed)
 
     if not engine.fromAudioMetrics.push(metric):
-      inc engine.droppedMetrics
+      discard engine.droppedMetrics.fetchAdd(1'u32, moRelaxed)
 
     if transportActive:
       engine.transport.frame += int64(frames)
@@ -970,7 +1019,7 @@ proc renderBlockInternal(
         if le > ls and engine.transport.frame >= le:
           engine.transport.frame = ls + ((engine.transport.frame - ls) mod (le - ls))
 
-    engine.frameSnapshot = engine.transport.frame
+    engine.frameSnapshot.store(engine.transport.frame, moRelease)
 
 
 proc renderBlock*(
@@ -1081,7 +1130,7 @@ proc renderOffline*(
       # а нам нужен только остаток.
       let overshoot = engine.blockSize.int64 - remaining
       engine.transport.frame -= overshoot
-      engine.frameSnapshot = engine.transport.frame
+      engine.frameSnapshot.store(engine.transport.frame, moRelease)
 
       done = totalFrames
 
@@ -1275,13 +1324,27 @@ proc postGraphUpdate*(
   engine: ptr AudioEngine;
   p: ptr CompiledPipeline
 ): bool =
+  ## Публикация нового графа в RT (MANIFEST §10). Control-path.
+  ##
+  ## Backpressure (issue #385): если незакрытых смен графа уже
+  ## `MaxRetireBacklog`, публикация отклоняется. Это держит хранилище
+  ## утилизации (SPSC + localRetire) ниже ёмкости, поэтому RT-путь НИКОГДА не
+  ## доходит до освобождения памяти. Хост обязан периодически звать
+  ## `pollReclamation`, чтобы очередь разбиралась.
   if engine == nil:
+    return false
+
+  if engine.retireBacklog.load(moAcquire) >= MaxRetireBacklog.int32:
     return false
 
   let id = engine.sharedPool.acquireBlock()
 
   if id < 0:
     return false
+
+  # Резервируем слот утилизации ДО публикации: если команда создаст утилизацию,
+  # резерв держится до `pollReclamation`; иначе возвращается в `applyCommands`.
+  discard engine.retireBacklog.fetchAdd(1'i32, moRelaxed)
 
   let val = cast[uint](p).uint64
   writeUint64ToBlock(engine.sharedPool.blocks[id], val)
@@ -1295,6 +1358,8 @@ proc postGraphUpdate*(
   if engine.toAudio.push(cmd):
     return true
 
+  # Публикация не удалась — возвращаем резерв.
+  discard engine.retireBacklog.fetchAdd(-1'i32, moRelaxed)
   engine.sharedPool.releaseBlock(id)
   return false
 
@@ -1374,6 +1439,10 @@ proc pollMetrics*(
 
 
 proc pollReclamation*(engine: ptr AudioEngine) =
+  ## Control-path: освободить все утилизированные аудиопотоком пайплайны.
+  ##
+  ## Каждый освобождённый пайплайн снимает одно резервирование backpressure
+  ## (issue #385), открывая место для новых публикаций `postGraphUpdate`.
   if engine == nil:
     return
 
@@ -1382,13 +1451,14 @@ proc pollReclamation*(engine: ptr AudioEngine) =
   while engine.fromAudioRetire.pop(p):
     if p != nil:
       destroyPipeline(p)
+      discard engine.retireBacklog.fetchAdd(-1'i32, moRelaxed)
 
 
 proc currentFrame*(engine: ptr AudioEngine): int64 =
   if engine == nil:
     return 0
 
-  engine.frameSnapshot
+  engine.frameSnapshot.load(moAcquire)
 
 
 proc currentPositionSeconds*(engine: ptr AudioEngine): float64 =
@@ -1405,16 +1475,27 @@ proc droppedMetricsCount*(engine: ptr AudioEngine): uint32 =
   if engine == nil:
     return 0
 
-  engine.droppedMetrics
+  engine.droppedMetrics.load(moRelaxed)
 
 
 proc droppedRetirementsCount*(engine: ptr AudioEngine): uint32 =
-  ## Сколько пайплайнов пришлось освободить АВАРИЙНО в audio-потоке: оба
-  ## уровня утилизации были полны, то есть control-plane не разбирал очередь
-  ## (`pollReclamation`). Control-path диагностика: ненулевое значение —
-  ## признак, что хост перестал опрашивать движок при частой смене графа
-  ## (issue #73).
+  ## Диагностика утилизации пайплайнов (issue #73, #385).
+  ##
+  ## При корректной работе всегда 0: backpressure (#385) не даёт хранилищу
+  ## утилизации переполниться, а сам RT-путь больше НЕ освобождает пайплайны.
+  ## Ненулевое значение — признак логической ошибки (счётчик «резервирований»
+  ## разошёлся с числом утилизаций), а не штатного режима.
   if engine == nil:
     return 0
 
-  engine.droppedRetirements
+  engine.droppedRetirements.load(moRelaxed)
+
+
+proc retirementBacklog*(engine: ptr AudioEngine): int32 =
+  ## Сколько смен графа сейчас «в полёте»: опубликовано (`postGraphUpdate`),
+  ## но ещё не утилизировано/применено. Control-path: по нему хост видит
+  ## близость к backpressure-порогу (issue #385).
+  if engine == nil:
+    return 0
+
+  engine.retireBacklog.load(moAcquire)
