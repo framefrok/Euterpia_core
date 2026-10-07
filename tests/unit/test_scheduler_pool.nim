@@ -267,3 +267,95 @@ suite "dsp_scheduler: горячая смена расписания (issue #9)"
     check sched.scheduleSwaps() == 0'u64
     check sched.activeTaskCount() == 0
     deinitScheduler(sched)
+
+# ----------------------------------------------------------------------------
+# Гонка слота и готовность воркеров (issues #381, #382)
+# ----------------------------------------------------------------------------
+#
+# Реальные потоки: пока главный рендерит блоки, control-path меняет расписание.
+# Именно этот сценарий ловит use-after-free массивов слота (#381) и дедлок на
+# «пустой сессии -> своп с уровнями» (#382) под ASan/TSan.
+
+type
+  SchedStressCtx = object
+    sched: ptr DspScheduler
+    renderCtx: NodeProcessContext
+    stop: Atomic[bool]
+    renders: Atomic[int64]
+
+proc renderLoop(arg: pointer) {.thread.} =
+  ## Крутит renderBlock до сигнала остановки. Поток — audio-поток.
+  let c = cast[ptr SchedStressCtx](arg)
+  while not c.stop.load(moAcquire):
+    c.sched[].renderBlock(addr c.renderCtx)
+    discard c.renders.fetchAdd(1'i64, moRelaxed)
+
+suite "dsp_scheduler: гонка слота и готовность воркеров (#381, #382)":
+  test "#381: renderBlock против swapSchedule/reclaimRetired — без UAF":
+    ## Свопы и рендер идут ОДНОВРЕМЕННО. Без acquire/pin-протокола между
+    ## чтением `activeIndex` и пиннингом читателя возможен двойной своп
+    ## (A->B->A), при котором массивы слота освобождаются под ногами рендера —
+    ## ASan это ловит, а без него тест либо падает, либо зависает.
+    let descsA = mkDescs(2)
+    let descsB = mkDescs(8)
+
+    var sched: DspScheduler
+    check initScheduler(sched, descsA, workerCount = 2)
+
+    var c: SchedStressCtx
+    c.sched = addr sched
+    c.renderCtx = NodeProcessContext(sampleRate: 48000.0f, blockSize: 128)
+    c.stop.store(false, moRelaxed)
+
+    var th: Thread[pointer]
+    createThread(th, renderLoop, addr c)
+
+    for i in 0 ..< 20000:
+      if (i and 1) == 0:
+        discard swapSchedule(sched, descsB)
+      else:
+        discard swapSchedule(sched, descsA)
+      reclaimRetired(sched)
+
+    c.stop.store(true, moRelease)
+    joinThread(th)
+
+    check c.renders.load(moRelaxed) > 0'i64
+    check sched.inRenderCount() == 0'i32
+    check sched.abortedBlocks() == 0'u64
+    deinitScheduler(sched)
+
+  test "#382: пустая сессия -> своп с уровнями при активном рендере":
+    ## Первое расписание пустое: воркеры НЕ подняты, `workerProgress == nil`.
+    ## Первый непустой своп обязан поднять пул ДО публикации `activeIndex`,
+    ## иначе рендер увидит `levelCount > 0` и уйдёт в ожидание nil-прогресса.
+    var sched: DspScheduler
+    check initScheduler(sched, newSeq[TaskDesc](), workerCount = 2)
+
+    var c: SchedStressCtx
+    c.sched = addr sched
+    c.renderCtx = NodeProcessContext(sampleRate: 48000.0f, blockSize: 128)
+    c.stop.store(false, moRelaxed)
+
+    var th: Thread[pointer]
+    createThread(th, renderLoop, addr c)
+
+    # Переход «пусто -> есть уровни» на живой сессии.
+    check swapSchedule(sched, mkDescs(4))
+    # Дать рендеру поработать на новом расписании.
+    for _ in 0 ..< 2000:
+      dsp_scheduler.cpuRelax()
+    check sched.activeLevelCount() > 0
+
+    # Последующие свопы не должны ломать синхронизацию.
+    for _ in 0 ..< 50:
+      discard swapSchedule(sched, mkDescs(6))
+      discard swapSchedule(sched, mkDescs(3))
+
+    c.stop.store(true, moRelease)
+    joinThread(th)
+
+    check c.renders.load(moRelaxed) > 0'i64
+    check sched.inRenderCount() == 0'i32
+    check sched.abortedBlocks() == 0'u64
+    deinitScheduler(sched)

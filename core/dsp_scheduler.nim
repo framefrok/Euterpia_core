@@ -741,6 +741,21 @@ proc swapSchedule*(
   if not buildSchedule(descs, wc, built):
     return false
 
+  # Fix 16 (issue #382): исполнители обязаны быть ГОТОВЫ до публикации.
+  #
+  # `activeIndex.exchange` ниже — это точка, с которой `renderBlock` может
+  # увидеть новое расписание. Если у него `levelCount > 0` и `workerCount > 0`,
+  # рендер начнёт ждать прогресс воркеров и читать `workerProgress`, а он
+  # аллоцируется только в `ensureWorkers`. Публикация ДО подъёма пула давала
+  # либо вечный spin, либо разыменование nil — ровно на переходе «пустая
+  # сессия -> граф с уровнями» (потоки при пустом первом расписании не
+  # создавались, см. `initScheduler`).
+  #
+  # Порядок теперь строго: build schedule -> ensureWorkers -> publish.
+  if built.levelCount > 0 and wc > 0 and not s.running:
+    if not ensureWorkers(s):
+      return false
+
   # Кандидат — слот, который сейчас НЕ активен.
   let target = 1 - sh.activeIndex.load(moAcquire)
   if target < 0 or target > 1:
@@ -768,11 +783,7 @@ proc swapSchedule*(
   s.pendingRetire = old
   discard sh.swaps.fetchAdd(1'u64, moRelaxed)
 
-  # Первое непустое расписание может прийти на «пустой» сессии — воркеры
-  # тогда не были подняты. Поднимаем их здесь, а не в renderBlock.
-  if built.levelCount > 0 and wc > 0 and not s.running:
-    discard ensureWorkers(s)
-
+  # Воркеры уже подняты выше (issue #382) — до публикации, а не после.
   return true
 
 proc scheduleSwaps*(s: DspScheduler): uint64 =
@@ -899,31 +910,63 @@ proc renderBlock*(
   if sh.isNil:
     return
 
-  # Активный слот читается ОДИН раз на весь блок (issue #9). Своп расписания
-  # может произойти в любой момент, но блок обязан быть однородным: смешивание
-  # двух карт задач внутри одного блока нарушило бы порядок зависимостей.
-  let slot = sh.slots[sh.activeIndex.load(moAcquire)]
-  if slot.isNil or slot.levelCount == 0:
-    return
-
   # После запроса остановки новый блок не начинаем: воркеры уже выходят.
   if sh.stopFlag.load(moAcquire) != 0'u8:
     discard sh.abortedBlocks.fetchAdd(1'u64, moRelaxed)
     return
 
   # Realtime-guard (issue #11): главный поток исполняет уровни сам,
-  # поэтому он тоже audio-поток. Ранние `return` выше — до входа в scope.
+  # поэтому он тоже audio-поток.
   rtScope():
     # Инвариант владения: планировщик нельзя разбирать во время рендера.
     discard sh.inRender.fetchAdd(1'i32, moAcquireRelease)
-    # Главный поток — тоже читатель слота: пока мы здесь, control-path
-    # не освободит и не перезапишет его (важно для `swapSchedule`).
-    discard slot.readers.fetchAdd(1'i32, moAcquireRelease)
     defer:
-      discard slot.readers.fetchAdd(-1'i32, moAcquireRelease)
       discard sh.inRender.fetchAdd(-1'i32, moAcquireRelease)
 
+    # Fix 17 (issue #381): acquire/pin-протокол выбора слота.
+    #
+    # Раньше активный слот читался ДО пиннинга читателя:
+    #   slot = slots[activeIndex.load]
+    #   ... (окно) ...
+    #   slot.readers.fetchAdd(1)
+    # Между этими строками возможны ДВА свопа подряд (A->B->A): `reclaimRetired`
+    # освободит A (`readers == 0`, ведь мы ещё не пинились), а `publishSlot`
+    # перераспределит его массивы. Мы продолжили бы читать
+    # `slot.tasks/levelOffsets/flatTasks` по старому указателю — use-after-free.
+    #
+    # Теперь пин ставится ПЕРВЫМ, а `activeIndex` перечитывается ПОСЛЕ: пока
+    # держим `readers >= 1`, control-path не освободит и не перепишет слот
+    # (и `reclaimRetired`, и `awaitSlotFree` ждут `readers == 0`). Если между
+    # пиннингом и проверкой слот стал неактивным — снимаем пин и повторяем.
+    # Это настоящий acquire/pin, а не перестановка двух атомиков.
+    var slot: ptr ScheduleSlot = nil
+    while true:
+      let idx = sh.activeIndex.load(moAcquire)
+      if idx < 0 or idx > 1:
+        return
+      let cand = sh.slots[idx]
+      if cand.isNil:
+        return
+      # Пин ДО чтения полей слота: держим массив на время всего блока.
+      discard cand.readers.fetchAdd(1'i32, moAcquireRelease)
+      if sh.activeIndex.load(moAcquire) == idx:
+        slot = cand
+        break
+      # Слот сменился, пока пиннились: снимаем пин и пробуем снова.
+      discard cand.readers.fetchAdd(-1'i32, moAcquireRelease)
+      if sh.stopFlag.load(moAcquire) != 0'u8:
+        discard sh.abortedBlocks.fetchAdd(1'u64, moRelaxed)
+        return
+      cpuRelax()
+
+    defer:
+      # Главный поток — читатель слота: снимаем пин в любом выходе.
+      discard slot.readers.fetchAdd(-1'i32, moAcquireRelease)
+
     let levelCount = slot.levelCount
+    if levelCount == 0:
+      # Активное расписание пустое (граф без задач): рендерить нечего.
+      return
 
     # Уровень НЕ сбрасываем в -1: этот сентинел означает «блок закрыт», и
     # воркер, увидев его, немедленно вышел бы из только что начатого блока
