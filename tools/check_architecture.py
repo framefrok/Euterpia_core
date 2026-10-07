@@ -242,8 +242,11 @@ def report(violations: list[tuple[str, str, str]]) -> int:
 # «потом починим», а разделение по роли кода: валидатор проверяет целостность
 # ДОКУМЕНТА, а путь записи пишет в него — их предмет и есть файл. Список
 # намеренно короткий: новое исключение — отдельное решение с обоснованием,
-# а не строка, добавленная по привычке. Перевод этих путей в control-команды и
-# DTO ведётся отдельной задачей (#373).
+# а не строка, добавленная по привычке.
+#
+# После #373 здесь остались ТОЛЬКО пути ЗАПИСИ: валидаторы целостности
+# (`project validate`, `graph check`) переведены на Query API и DTO, поэтому
+# в списке их нет. Каждое оставшееся имя пишет документ, а не читает его.
 CLI_INTERNALS_DIR = "cli"
 
 DOCUMENT_ACCESS_RE = re.compile(
@@ -259,23 +262,14 @@ NIM_PROC_RE = re.compile(r"^proc\s+([A-Za-z_][A-Za-z0-9_]*)")
 
 DOCUMENT_ACCESS_ALLOWED: dict[str, dict[str, str]] = {
     "cli/cmd_project.nim": {
-        "setField": "запись полей метаданных (`project set`, `init`)",
-        "runProjectSet": "отметка `metadata.modified` — часть пути записи",
+        "setField": "запись полей метаданных (`transport tempo/meter`, `init`)",
         "runInit": "создание проекта: метаданные нового документа",
-        "validateGraph": "валидатор целостности документа (повторы id, висячие связи)",
-        "validateSequencer": "валидатор целостности документа (дорожки и клипы)",
-        "validatePlugins": "валидатор целостности документа (ссылки состояний плагинов)",
-    },
-    "cli/cmd_graph.nim": {
-        "nodeIndexById": "вход компилятора в `graph check`: связи адресуются id ноды",
-        "analyzeGraph": "`graph check` — проверка целостности документа",
-        "runGraphCheck": "`graph check` — сборка входа компилятора и отчёт",
     },
     "cli/cmd_notation.nim": {
-        "runNotationImport": "создание дорожки и клипа: путь записи (`notation import`)",
+        "runNotationImport": "путь записи `notation import`: отчёт читает созданный клип",
     },
     "cli/cmd_import.nim": {
-        "runImport": "создание аудиоресурса и audio-клипа: путь записи (`import`, #107)",
+        "runImport": "создание аудиоресурса и audio-клипа (`import`, #107)",
     },
     "cli/cmd_transport.nim": {
         "setProjectField": "запись темпа и размера в документ (`transport tempo/meter`, #257)",

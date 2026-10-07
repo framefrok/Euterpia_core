@@ -101,6 +101,11 @@ type
     params*: seq[ParamInfo]
       ## Параметры в порядке описателя; для незарегистрированного типа — только
       ## те, что лежат в файле.
+    fileParams*: seq[string]
+      ## Параметры, которые ЛЕЖАТ В ФАЙЛЕ, но отсутствуют в описателе типа
+      ## (issue #373). Валидатор графа и компилятор должны их видеть, не заходя
+      ## в `ProjectFormat` руками: `params` строится по описателю и такие ключи
+      ## в него не попадают. По имени, отсортировано (детерминизм, #139).
 
   ConnectionInfo* = object
     srcNodeId*, srcPortIdx*, dstNodeId*, dstPortIdx*: int
@@ -146,6 +151,9 @@ type
     nodeId*: int32
     paramId*: uint32
     points*: int
+    negativeTicks*: int
+      ## Сколько точек лежит до нуля (issue #373): валидатору нужен этот факт,
+      ## чтобы не тянуть сами точки (их может быть много) ради проверки.
 
   PluginStateInfo* = object
     ## Сохранённое состояние плагина: узел, идентификатор и размер.
@@ -354,6 +362,12 @@ proc nodeInfoOf*(doc: Document; index: int): NodeInfo =
       result.params.add doc.paramInfoOf(node.id, spec, i,
                                         (if has: node.parameters[name] else: 0.0f32),
                                         has)
+    # Параметры файла, которых нет в описателе типа (issue #373): их видит
+    # валидатор графа, не заглядывая в формат.
+    for key in node.parameters.keys:
+      if spec.paramIndexOf(key, -1) < 0:
+        result.fileParams.add key
+    result.fileParams.sort()
   else:
     var keys: seq[string] = @[]
     for key in node.parameters.keys:
@@ -597,8 +611,12 @@ proc queryAutomationLanes*(doc: Document): seq[AutomationLaneInfo] =
   ## Дорожки автоматизации в порядке файла: `project show` и `validate`
   ## перечисляют их, не заглядывая в модель.
   for lane in doc.proj.sequencer.automationLanes:
+    var neg = 0
+    for point in lane.points:
+      if point.tick < 0:
+        inc neg
     result.add AutomationLaneInfo(nodeId: lane.nodeId, paramId: lane.paramId,
-                                  points: lane.points.len)
+                                  points: lane.points.len, negativeTicks: neg)
 
 proc queryPluginStates*(doc: Document): seq[PluginStateInfo] =
   ## Сохранённые состояния плагинов: узел, идентификатор и размер. Само

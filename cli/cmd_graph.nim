@@ -1205,14 +1205,6 @@ proc runParamSet(ctx: var Ctx; scan: ArgScan): Report =
 # graph check
 # =============================================================================
 
-proc nodeIndexById(proj: ProjectFormat; id: int): int =
-  ## Индекс ноды по id или -1. Нужен там, где на входе id из связи, а не
-  ## ссылка пользователя (у `resolveNode` другая задача — разобрать текст).
-  for i in 0 ..< proj.graph.nodes.len:
-    if proj.graph.nodes[i].id == id:
-      return i
-  -1
-
 type
   GraphAnalysis = object
     sections: seq[Section]
@@ -1222,19 +1214,20 @@ type
     specs: seq[GraphNodeSpec]
     conns: seq[GraphConnSpec]
 
-proc analyzeGraph(proj: ProjectFormat; cat: seq[NodeTypeInfo]): GraphAnalysis =
+proc analyzeGraph(doc: Document; cat: seq[NodeTypeInfo]): GraphAnalysis =
   ## Структурный разбор графа: идентификаторы, типы, параметры, связи.
-  ## Он идёт до компиляции: компилятор не должен получать заведомо битые
-  ## данные (и не должен объяснять пользователю то, что видно из файла).
+  ## Читает через Query API (issue #373) — внутренности `ProjectFormat` не
+  ## трогает; идёт до компиляции, чтобы компилятор не получал битые данные.
+  let nodes = doc.queryNodes().nodes
   # --- идентификаторы --------------------------------------------------------
   var seen: seq[int] = @[]
   var duplicates: seq[int] = @[]
-  for node in proj.graph.nodes:
+  for node in nodes:
     if node.id in seen and node.id notin duplicates:
       duplicates.add node.id
     seen.add node.id
   var nodeSection = Section(id: "nodes", title: "graph: ноды")
-  var idLines: seq[string] = @["нод: " & $proj.graph.nodes.len]
+  var idLines: seq[string] = @["нод: " & $nodes.len]
   for id in duplicates:
     idLines.add "повтор id: " & $id
   nodeSection.checks.add mkCheck("node-ids", "идентификаторы нод уникальны",
@@ -1242,40 +1235,38 @@ proc analyzeGraph(proj: ProjectFormat; cat: seq[NodeTypeInfo]): GraphAnalysis =
     lines = idLines,
     advice = (if duplicates.len == 0: ""
               else: "повтор id делает ноду неразличимой для связей и автоматизации"),
-    body = %*{"nodes": proj.graph.nodes.len, "duplicates": %duplicates})
+    body = %*{"nodes": nodes.len, "duplicates": %duplicates})
   nodeSection.checks.add mkCheck("node-count", "в графе есть ноды",
-    (if proj.graph.nodes.len == 0: csWarn else: csOk),
-    lines = @["нод: " & $proj.graph.nodes.len],
-    advice = (if proj.graph.nodes.len == 0:
+    (if nodes.len == 0: csWarn else: csOk),
+    lines = @["нод: " & $nodes.len],
+    advice = (if nodes.len == 0:
                 "добавьте ноду: euterpia node add oscillator"
               else: ""),
-    body = %*{"nodes": proj.graph.nodes.len})
+    body = %*{"nodes": nodes.len})
 
   # --- типы и параметры ------------------------------------------------------
   var unknownTypes: seq[string] = @[]
   var portMismatch: seq[string] = @[]
   var unknownParams: seq[string] = @[]
   var outOfRangeParams: seq[string] = @[]
-  for node in proj.graph.nodes:
+  for node in nodes:
     let typeIdx = typeIndexOf(cat, node.nodeType)
     if typeIdx < 0:
       if node.nodeType notin unknownTypes:
         unknownTypes.add node.nodeType
       continue
     let info = cat[typeIdx]
-    if node.audioInCount != info.audioIn or node.audioOutCount != info.audioOut or
-       node.ctrlInCount != info.ctrlIn or node.ctrlOutCount != info.ctrlOut or
-       node.eventInCount != info.eventIn or node.eventOutCount != info.eventOut:
+    if node.audioIn != info.audioIn or node.audioOut != info.audioOut or
+       node.ctrlIn != info.ctrlIn or node.ctrlOut != info.ctrlOut or
+       node.eventIn != info.eventIn or node.eventOut != info.eventOut:
       portMismatch.add "#" & $node.id & " " & node.nodeType
-    for key in sortedParamKeys(node.parameters):
-      let paramIdx = findParam(info, key)
-      if paramIdx < 0:
-        unknownParams.add "#" & $node.id & "." & key
-      else:
-        let p = info.params[paramIdx]
-        let value = node.parameters[key]
-        if value < p.minValue or value > p.maxValue:
-          outOfRangeParams.add "#" & $node.id & "." & key & " = " & $value
+    # Параметры, которых нет в описателе типа (issue #373): DTO отдаёт их имена
+    # (`fileParams`), поэтому в формат заглядывать не нужно.
+    for key in node.fileParams:
+      unknownParams.add "#" & $node.id & "." & key
+    for p in node.params:
+      if p.fromFile and (p.value < p.minValue or p.value > p.maxValue):
+        outOfRangeParams.add "#" & $node.id & "." & p.name & " = " & $p.value
 
   var typeLines: seq[string] = @["известных типов в каталоге: " & $cat.len]
   for nodeType in unknownTypes:
@@ -1310,24 +1301,26 @@ proc analyzeGraph(proj: ProjectFormat; cat: seq[NodeTypeInfo]): GraphAnalysis =
   result.sections.add nodeSection
 
   # --- связи -----------------------------------------------------------------
+  var nodeById = initTable[int, NodeInfo]()
+  for node in nodes:
+    nodeById[node.id] = node
   var connSection = Section(id: "connections", title: "graph: связи")
   var dangling: seq[string] = @[]
   var outOfRange: seq[string] = @[]
   var kindMismatch: seq[string] = @[]
   var selfLoops: seq[string] = @[]
-  for conn in proj.graph.connections:
-    let srcIdx = nodeIndexById(proj, conn.srcNodeId)
-    let dstIdx = nodeIndexById(proj, conn.dstNodeId)
+  let conns = doc.queryConnections()
+  for conn in conns:
     let text = connectionText(conn)
-    if srcIdx < 0 or dstIdx < 0:
+    if conn.srcNodeId notin nodeById or conn.dstNodeId notin nodeById:
       dangling.add text
       continue
     if conn.sigType < 0 or conn.sigType > ord(PortKind.high):
       kindMismatch.add text
       continue
     let kind = cast[PortKind](conn.sigType)
-    let srcType = typeIndexOf(cat, proj.graph.nodes[srcIdx].nodeType)
-    let dstType = typeIndexOf(cat, proj.graph.nodes[dstIdx].nodeType)
+    let srcType = typeIndexOf(cat, nodeById[conn.srcNodeId].nodeType)
+    let dstType = typeIndexOf(cat, nodeById[conn.dstNodeId].nodeType)
     if srcType >= 0 and conn.srcPortIdx >= cat[srcType].portCount(kind, true):
       outOfRange.add text
     if dstType >= 0 and conn.dstPortIdx >= cat[dstType].portCount(kind, false):
@@ -1335,7 +1328,7 @@ proc analyzeGraph(proj: ProjectFormat; cat: seq[NodeTypeInfo]): GraphAnalysis =
     if conn.srcNodeId == conn.dstNodeId:
       selfLoops.add text
 
-  var connLines: seq[string] = @["связей: " & $proj.graph.connections.len]
+  var connLines: seq[string] = @["связей: " & $conns.len]
   for item in dangling:
     connLines.add "нет такой ноды: " & item
   for item in kindMismatch:
@@ -1353,7 +1346,7 @@ proc analyzeGraph(proj: ProjectFormat; cat: seq[NodeTypeInfo]): GraphAnalysis =
               elif selfLoops.len > 0:
                 "самосоединение компилируется только через ноду задержки"
               else: ""),
-    body = %*{"connections": proj.graph.connections.len,
+    body = %*{"connections": conns.len,
               "dangling": %dangling, "outOfRange": %outOfRange,
               "kindMismatch": %kindMismatch, "selfLoops": %selfLoops})
   result.sections.add connSection
@@ -1363,9 +1356,9 @@ proc analyzeGraph(proj: ProjectFormat; cat: seq[NodeTypeInfo]): GraphAnalysis =
   # Спецификации собираются тем же обходом данных, что и проверки: отдельного
   # «второго мнения» о графе нет, поэтому проверка и компиляция не разойдутся.
   if not result.structuralFails:
-    for node in proj.graph.nodes:
+    for node in nodes:
       result.specs.add GraphNodeSpec(id: node.id, nodeType: node.nodeType)
-    for conn in proj.graph.connections:
+    for conn in conns:
       result.conns.add GraphConnSpec(
         srcNodeId: conn.srcNodeId, srcPortIdx: conn.srcPortIdx,
         dstNodeId: conn.dstNodeId, dstPortIdx: conn.dstPortIdx,
@@ -1383,9 +1376,9 @@ proc runGraphCheck(ctx: var Ctx; scan: ArgScan): Report =
                       "например: euterpia graph check")
   let loaded = loadAt(scan.path)
   if not loaded.ok: return loaded.rep
-  let proj = loaded.proj
+  let doc = openDocument(scan.path, loaded.proj)
   let cat = catalog()
-  let analysis = analyzeGraph(proj, cat)
+  let analysis = analyzeGraph(doc, cat)
 
   var sections = analysis.sections
   var compileFacts: JsonNode
@@ -1426,13 +1419,14 @@ proc runGraphCheck(ctx: var Ctx; scan: ArgScan): Report =
     sectionsJson.add sectionJson(section)
   let total = counts(sections)
 
+  let summary = querySummary(doc)
   var body = newJObject()
   body["path"] = %scan.path
   body["compile"] = compileFacts
   body["sections"] = sectionsJson
   body["summary"] = summaryJson(sections)
-  body["nodes"] = %proj.graph.nodes.len
-  body["connections"] = %proj.graph.connections.len
+  body["nodes"] = %summary.nodes
+  body["connections"] = %summary.connections
 
   var lines: seq[string] = @[
     CliName & " graph check — проверка графа",

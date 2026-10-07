@@ -356,3 +356,14 @@ suite "query: сводка и коды":
     var second = filled()
     check $first.queryNodes().nodes == $second.queryNodes().nodes
     check $first.queryParams("1").params == $second.queryParams("1").params
+
+  test "fileParams: параметры файла, которых нет в описателе (#373)":
+    ## Валидатор графа и компилятор должны видеть «лишние» параметры файла,
+    ## не заходя в `ProjectFormat`: их имена отдаёт DTO.
+    var doc = filled()
+    doc.proj.graph.nodes[0].parameters["bogus"] = 2.0f32
+    let node = doc.queryNode("1").node
+    check "bogus" in node.fileParams
+    # Известный описателю параметр в fileParams не попадает.
+    check "gain" notin node.fileParams
+

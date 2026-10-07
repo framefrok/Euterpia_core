@@ -960,30 +960,29 @@ proc validateMetadata(meta: MetadataInfo): Section =
               "denominator": meta.tsDenominator,
               "problems": %problems})
 
-proc nodeIndex(nodes: seq[NodeFormat]; id: int): int =
-  ## Индекс ноды по id или -1. Свой поиск, а не `Table`: формат хранит
-  ## ноды списком, и порядок в файле — часть данных (граф компилируется
-  ## в этом порядке), поэтому превращать список в таблицу здесь незачем.
-  for i in 0 ..< nodes.len:
-    if nodes[i].id == id:
-      return i
-  -1
-
-proc validateGraph(proj: ProjectFormat): Section =
+proc validateGraph(doc: Document): Section =
   ## Секция «graph». Провал — только однозначная несогласованность: повтор
   ## id или связь с несуществующей нодой. Диапазон портов и самосоединение —
   ## предупреждение: счётчики портов есть не во всех файлах (формат
   ## дополнялся), а обратная связь допустима для ноды с явной задержкой.
+  ##
+  ## Чтение — через Query API (issue #373): валидатор не заходит в `ProjectFormat`.
   result.id = "graph"
   result.title = "graph: ноды и связи"
+  let nodes = doc.queryNodes().nodes
 
   var seen: seq[int] = @[]
   var duplicates: seq[int] = @[]
-  for node in proj.graph.nodes:
+  var outPorts = initTable[int, int]()
+  var inPorts = initTable[int, int]()
+  for node in nodes:
     if node.id in seen and node.id notin duplicates:
       duplicates.add node.id
     seen.add node.id
-  var duplicateLines: seq[string] = @["нод: " & $proj.graph.nodes.len]
+    outPorts[node.id] = node.audioOut + node.ctrlOut + node.eventOut
+    inPorts[node.id] = node.audioIn + node.ctrlIn + node.eventIn
+
+  var duplicateLines: seq[string] = @["нод: " & $nodes.len]
   if duplicates.len > 0:
     duplicateLines.add "повторяются id: " & joinInts(duplicates)
   result.checks.add mkCheck("node-ids", "идентификаторы нод уникальны",
@@ -991,31 +990,24 @@ proc validateGraph(proj: ProjectFormat): Section =
     lines = duplicateLines,
     advice = (if duplicates.len == 0: ""
               else: "повтор id делает выбор ноды неоднозначным"),
-    body = %*{"nodes": proj.graph.nodes.len, "duplicates": %duplicates})
+    body = %*{"nodes": nodes.len, "duplicates": %duplicates})
 
+  let conns = doc.queryConnections()
   var dangling: seq[string] = @[]
   var outOfRange: seq[string] = @[]
   var selfLoops: seq[string] = @[]
-  for conn in proj.graph.connections:
-    let src = nodeIndex(proj.graph.nodes, conn.srcNodeId)
-    let dst = nodeIndex(proj.graph.nodes, conn.dstNodeId)
-    if src < 0 or dst < 0:
+  for conn in conns:
+    if conn.srcNodeId notin outPorts or conn.dstNodeId notin outPorts:
       dangling.add $conn.srcNodeId & "→" & $conn.dstNodeId
       continue
-    let srcNode = proj.graph.nodes[src]
-    let dstNode = proj.graph.nodes[dst]
-    if conn.srcPortIdx < 0 or
-       conn.srcPortIdx >= srcNode.audioOutCount + srcNode.ctrlOutCount +
-                          srcNode.eventOutCount:
+    if conn.srcPortIdx < 0 or conn.srcPortIdx >= outPorts[conn.srcNodeId]:
       outOfRange.add $conn.srcNodeId & ":" & $conn.srcPortIdx
-    if conn.dstPortIdx < 0 or
-       conn.dstPortIdx >= dstNode.audioInCount + dstNode.ctrlInCount +
-                          dstNode.eventInCount:
+    if conn.dstPortIdx < 0 or conn.dstPortIdx >= inPorts[conn.dstNodeId]:
       outOfRange.add $conn.dstNodeId & ":" & $conn.dstPortIdx
-    if src == dst and conn.srcPortIdx == conn.dstPortIdx:
+    if conn.srcNodeId == conn.dstNodeId and conn.srcPortIdx == conn.dstPortIdx:
       selfLoops.add $conn.srcNodeId & ":" & $conn.srcPortIdx
 
-  var connLines: seq[string] = @["связей: " & $proj.graph.connections.len]
+  var connLines: seq[string] = @["связей: " & $conns.len]
   for item in dangling:
     connLines.add "нет такой ноды: " & item
   for item in outOfRange:
@@ -1033,28 +1025,29 @@ proc validateGraph(proj: ProjectFormat): Section =
               elif outOfRange.len > 0 or selfLoops.len > 0:
                 "проверьте порты: в старых файлах счётчиков портов могло не быть"
               else: ""),
-    body = %*{"connections": proj.graph.connections.len,
+    body = %*{"connections": conns.len,
               "dangling": %dangling, "outOfRange": %outOfRange,
               "selfLoops": %selfLoops})
 
-proc validateSequencer(proj: ProjectFormat): Section =
-  ## Секция «sequencer»: треки, клипы, ноты, автоматизация. Проверяются
-  ## значения, которые ломают проигрывание: отрицательные тики, нулевая
-  ## длина, pitch за пределами MIDI. Нота, вылезающая за клип, — только
-  ## предупреждение: она прозвучит, но короче, чем записана.
+proc validateSequencer(doc: Document): Section =
+  ## Секция «sequencer»: треки, клипы, ноты, автоматизация (issue #373 —
+  ## через Query API). Проверяются значения, которые ломают проигрывание:
+  ## отрицательные тики, нулевая длина, pitch за пределами MIDI. Нота за
+  ## границей клипа — предупреждение: прозвучит, но короче записанной.
   result.id = "sequencer"
   result.title = "sequencer: треки, клипы, автоматизация"
 
+  let tracks = doc.queryTracks()
   var trackIds: seq[int32] = @[]
   var duplicateTracks: seq[int32] = @[]
-  for track in proj.sequencer.tracks:
+  for track in tracks:
     if track.id in trackIds and track.id notin duplicateTracks:
       duplicateTracks.add track.id
     trackIds.add track.id
   var duplicateJson = newJArray()
   for id in duplicateTracks:
     duplicateJson.add %int(id)
-  var trackLines: seq[string] = @["треков: " & $proj.sequencer.tracks.len]
+  var trackLines: seq[string] = @["треков: " & $tracks.len]
   if duplicateTracks.len > 0:
     trackLines.add "повторяются id: " & joinInts(duplicateTracks)
   result.checks.add mkCheck("track-ids", "идентификаторы треков уникальны",
@@ -1062,15 +1055,15 @@ proc validateSequencer(proj: ProjectFormat): Section =
     lines = trackLines,
     advice = (if duplicateTracks.len == 0: ""
               else: "повтор id делает выбор трека неоднозначным"),
-    body = %*{"tracks": proj.sequencer.tracks.len,
-              "duplicates": duplicateJson})
+    body = %*{"tracks": tracks.len, "duplicates": duplicateJson})
 
   var problems: seq[string] = @[]
   var clips = 0
   var notes = 0
   var outsideClip = 0
-  for track in proj.sequencer.tracks:
-    for clip in track.clips:
+  for track in tracks:
+    for c in 0 ..< track.clips.len:
+      let clip = track.clips[c]
       inc clips
       if clip.startTick < 0:
         problems.add "клип " & $clip.id & " трека " & $track.id &
@@ -1078,7 +1071,8 @@ proc validateSequencer(proj: ProjectFormat): Section =
       if clip.lengthTicks <= 0:
         problems.add "клип " & $clip.id & " трека " & $track.id &
                      ": lengthTicks ≤ 0"
-      for note in clip.notes:
+      let qn = doc.queryNotes(track.id, c)
+      for note in qn.notes:
         inc notes
         if int(note.pitch) > 127:
           problems.add "клип " & $clip.id & ": pitch " & $note.pitch & " > 127"
@@ -1102,21 +1096,23 @@ proc validateSequencer(proj: ProjectFormat): Section =
     body = %*{"clips": clips, "notes": notes, "outsideClip": outsideClip,
               "problems": %problems})
 
+  let lanes = doc.queryAutomationLanes()
+  var nodeIds: seq[int] = @[]
+  for node in doc.queryNodes().nodes:
+    nodeIds.add node.id
   var points = 0
   var negativeTicks = 0
   var unknownLanes: seq[int32] = @[]
-  for lane in proj.sequencer.automationLanes:
-    for point in lane.points:
-      inc points
-      if point.tick < 0: inc negativeTicks
-    if nodeIndex(proj.graph.nodes, int(lane.nodeId)) < 0 and
-       lane.nodeId notin unknownLanes:
+  for lane in lanes:
+    points += lane.points
+    negativeTicks += lane.negativeTicks
+    if int(lane.nodeId) notin nodeIds and lane.nodeId notin unknownLanes:
       unknownLanes.add lane.nodeId
   var unknownLanesJson = newJArray()
   for id in unknownLanes:
     unknownLanesJson.add %int(id)
   var autoLines: seq[string] = @[
-    "дорожек: " & $proj.sequencer.automationLanes.len,
+    "дорожек: " & $lanes.len,
     "точек: " & $points,
   ]
   for id in unknownLanes:
@@ -1129,32 +1125,35 @@ proc validateSequencer(proj: ProjectFormat): Section =
     advice = (if unknownLanes.len > 0 or negativeTicks > 0:
                 "такая дорожка не проиграется: ноды нет или тик вне таймлайна"
               else: ""),
-    body = %*{"automationLanes": proj.sequencer.automationLanes.len,
+    body = %*{"automationLanes": lanes.len,
               "points": points, "negativeTicks": negativeTicks,
               "unknownNodes": unknownLanesJson})
 
-proc validatePlugins(proj: ProjectFormat): Section =
-  ## Секция «plugins». Состояние — непрозрачные байты (Core не знает форматов
-  ## плагинов, §29/§40), поэтому проверяется только связь с нодой и наличие
-  ## данных. Два состояния одной ноды — провал: непонятно, какое
-  ## восстанавливать.
+proc validatePlugins(doc: Document): Section =
+  ## Секция «plugins» (issue #373 — через Query API). Состояние — непрозрачные
+  ## байты (Core не знает форматов плагинов, §29/§40), поэтому проверяется
+  ## только связь с нодой и наличие данных. Два состояния одной ноды — провал:
+  ## непонятно, какое восстанавливать.
   result.id = "plugins"
   result.title = "plugins: состояния плагинов"
 
+  let states = doc.queryPluginStates()
+  var nodeIds: seq[int] = @[]
+  for node in doc.queryNodes().nodes:
+    nodeIds.add node.id
   var seen: seq[int] = @[]
   var duplicates: seq[int] = @[]
   var unknown: seq[int] = @[]
   var empty = 0
-  for state in proj.pluginStates:
+  for state in states:
     if state.nodeId in seen and state.nodeId notin duplicates:
       duplicates.add state.nodeId
     seen.add state.nodeId
-    if nodeIndex(proj.graph.nodes, state.nodeId) < 0 and
-       state.nodeId notin unknown:
+    if state.nodeId notin nodeIds and state.nodeId notin unknown:
       unknown.add state.nodeId
-    if state.state.len == 0: inc empty
+    if state.bytes == 0: inc empty
 
-  var refLines: seq[string] = @["состояний: " & $proj.pluginStates.len]
+  var refLines: seq[string] = @["состояний: " & $states.len]
   for id in duplicates:
     refLines.add "два состояния для ноды " & $id
   for id in unknown:
@@ -1168,7 +1167,7 @@ proc validatePlugins(proj: ProjectFormat): Section =
               elif unknown.len > 0:
                 "нода удалена или лежит в субграфе: состояние всё равно сохранится"
               else: ""),
-    body = %*{"pluginStates": proj.pluginStates.len,
+    body = %*{"pluginStates": states.len,
               "duplicates": %duplicates, "unknownNodes": %unknown})
 
   result.checks.add mkCheck("payload", "состояния не пусты",
@@ -1236,18 +1235,18 @@ proc runProjectValidate*(ctx: var Ctx; args: seq[string]): Report =
       body = validateBody(target.path, broken))
 
   let proj = loaded.proj
-  # Метаданные проверяются по DTO Query API (#336), а разделы про граф,
-  # автоматизацию и плагины читают формат намеренно: `validate` — это проверка
-  # целостности ДОКУМЕНТА, и её предмет — сам файл (см. guard в
-  # `tools/check_architecture.py`).
-  let meta = queryMetadata(openDocument(target.path, proj))
+  # Все разделы читают модель через Query API (issue #336, #373): `validate` —
+  # проверка целостности ДОКУМЕНТА, но и её предмет отдаётся DTO, а не
+  # внутренностями `ProjectFormat`. Исключений в archGuard больше нет.
+  let doc = openDocument(target.path, proj)
+  let meta = queryMetadata(doc)
   let sections = @[
     validateFile(target.path),
     validateFormat(proj),
     validateMetadata(meta),
-    validateGraph(proj),
-    validateSequencer(proj),
-    validatePlugins(proj),
+    validateGraph(doc),
+    validateSequencer(doc),
+    validatePlugins(doc),
   ]
   let total = counts(sections)
   let lines = renderValidate(sections, target.path, ctx.verbose)

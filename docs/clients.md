@@ -14,8 +14,8 @@ CLI и Editor — **равноправные клиенты Core** (MANIFEST §6
 - Чтение модели клиент ведёт через **Query API** (`core/control/query.nim`,
   #336): неизменяемые DTO, устойчивый порядок, один и тот же ответ у CLI и
   Editor. Обход коллекций документа запрещён проверкой
-  `tools/check_architecture.py` (`nimble archGuard`): в ней поимённо
-  перечислены лишь валидаторы целостности и пути записи.
+  `tools/check_architecture.py` (`nimble archGuard`): после #373 поимённо
+  перечислены лишь пути ЗАПИСИ — валидаторы целостности тоже читают через DTO.
 - Проверка паритета — `nimble cliSmoke`, suite «паритет клиентов» в
   `tests/cli_test.nim` (issue [#148](https://github.com/framefrok/Euterpia_core/issues/148)).
 - Справочник по CLI: [cli.md](cli.md). Встраивание ядра в чужой хост:
