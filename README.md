@@ -21,7 +21,7 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Входной тракт и запись | ✅ вход → ноды/рекордер, RT-кольцо → worker → WAV |
 | Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
 | DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + **17 инструментов** (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`, `strings`, `bell`, `harp`, `harpsichord`, `recorder`, `brass`, `timpani`, `choir`, `ukulele`, `accordion`, `harmonica`) + нотный секвенсор `notes`; всего 28 типов, полный каталог с параметрами — [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md); C-ядра с SIMD-дисплеями (#274, #301, #303, #321) |
-| Кодеки | 🟡 WAV 16/24/32-бит, Standard MIDI File; FLAC/OGG/MP3/AIFF — заглушки (#10) |
+| Кодеки | ✅ WAV 16/24/32-бит, FLAC, MP3, OGG Vorbis (чтение), AIFF/AIFC (чтение и запись), Standard MIDI File (#10) |
 | Тесты | ✅ 300+ unit-проверок + интеграционный набор; Core/Commons/инструменты покрыты (#57, #274, #290) |
 | CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258) и транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; живой `play` на устройстве, запись и плагины — впереди; справочник команд и JSON-схем — **[docs/cli.md](docs/cli.md)** |
 | Инспектор аудио | 🟡 пассивный анализ WAV: клиппинг, DC, щелчки, провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость; отчёт с локализацией (#290); позже — помощник в v0.7 (#178) |
@@ -890,7 +890,8 @@ callback» (`rtScope`/`rtEnter`), а точки риска — `rtAssertNoAlloc`
   (`clap_istream`/`clap_ostream` были склеены в одну структуру, поля
   `clap_audio_port_info` переставлены);
 - #8 — нет ресемплинга при несовпадении SR устройства и проекта;
-- #10 — FLAC/OGG/MP3/AIFF — заглушки;
+- #10 — закрыто: FLAC/MP3/OGG читаются (dr_flac/dr_mp3/stb_vorbis), AIFF/AIFC
+  читаются и пишутся; сжатие в FLAC/MP3/OGG (энкодеров нет) — вне ядра;
 - у miniaudio 0.11.25 нет публичного статуса драйвера/xrun-счётчика:
   `xrunCount` считается C-шимом как вызов рендера, не уложившийся в
   длительность блока, плюс `interruption_began`, а адаптер превращает

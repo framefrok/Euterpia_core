@@ -8,10 +8,11 @@
 Версия пакета — единственная константа `euterpia_version.nim`, поэтому
 `euterpia --version`, поле `version` пакета и имя тега совпадают.
 
-## [Unreleased]
+## [0.3.2] — Импорт аудио, клип-плеер, история, транспорт, кодеки и реальное время
 
-Версия пакета — `0.3.2`: шаг линии **v0.3.2** («критическое и архитектурное»)
-закрыт (см. `docs/versions.md` §1 — версия растёт на последнем закрытом шаге).
+Версия пакета — `0.3.2` (релиз). Шаг линии **v0.3.2** («критическое и
+архитектурное») закрыт (см. `docs/versions.md` §1 — версия растёт на последнем
+закрытом шаге).
 
 ### Добавлено
 - `import` — **импорт аудиофайла в проект** как audio-клипа трека (issue #107):
@@ -183,9 +184,51 @@
   отказ на постороннее расширение и на два файла проекта в одной команде
   ([#370](https://github.com/framefrok/Euterpia_core/issues/370)).
 
-## [0.3.2] — Незакрытое
+### Исправлено
+- Планировщик DSP: acquire/pin-протокол выбора слота в `renderBlock` (пин ДО
+  чтения `activeIndex`) — устранён use-after-free массивов слота при двойном
+  свопе A→B→A
+  ([#381](https://github.com/framefrok/Euterpia_core/issues/381)).
+- Планировщик DSP: `swapSchedule` поднимает воркеры ДО публикации расписания —
+  нет spin/nil-разыменования `workerProgress` на переходе «пустая сессия →
+  уровни» ([#382](https://github.com/framefrok/Euterpia_core/issues/382)).
+- Входной тракт: `inputStatusFlags` копится через OR (был `fetchAdd` по битмаску);
+  stride 4-канального входа — по ИСХОДНОМУ числу каналов
+  ([#383](https://github.com/framefrok/Euterpia_core/issues/383)).
+- Диагностика движка: `frameSnapshot`/`droppedMetrics`/`droppedRetirements`
+  атомарные — нет гонки данных RT↔control
+  ([#384](https://github.com/framefrok/Euterpia_core/issues/384)).
+- Утилизация пайплайнов: audio-поток больше НЕ освобождает память; backpressure
+  `postGraphUpdate` держит хранилище ниже ёмкости, `droppedRetirementsCount()`==0
+  ([#385](https://github.com/framefrok/Euterpia_core/issues/385)).
+- Сглаживание параметров: нода больше не применяет значение конца блока ко всему
+  блоку — пер-сэмпловое сглаживание (`ParamRamp`/`beginRamp`), переход не зависит
+  от blockSize во всех нодах
+  ([#386](https://github.com/framefrok/Euterpia_core/issues/386)).
+- Транспорт: единый time/state контракт — `TransportSnapshot.state`, общий
+  `positionFromSeconds` (bar/beat/quarter/tick со знаменателем), цикл в долях,
+  команда `postSetMeter`
+  ([#387](https://github.com/framefrok/Euterpia_core/issues/387)).
+
+### Изменено
+- Остатки прямого доступа CLI к документу убраны (#373): `project set` пишет
+  метаданные командой `ccSetProjectInfo`, `notation import` — последовательность
+  control-команд (`addTrack`/`addClip`/`setClip`) с откатом через историю;
+  валидаторы `project validate` и `graph check` читают через Query API, DTO
+  расширены (`NodeInfo.fileParams`, тики автоматизации), а в
+  `DOCUMENT_ACCESS_ALLOWED` остались только пути ЗАПИСИ.
+- WAV: общий писатель ядра (#356) — `audio_recorder` пишет через `wav_codec`
+  (дублирующая RIFF-шапка удалена), фасад `audio_file_io` получил
+  `readAllAudioFile`/`seekAudioFile`, `cmd_analyze` и `offline_render` ходят
+  через фасад.
 
 ### Добавлено
+- Реальные кодеки аудио (#10): чтение **FLAC, MP3, OGG Vorbis** (вендорены
+  dr_flac.h, dr_mp3.h, stb_vorbis.c; плоский C-ABI в `commons/codecs`) и
+  **AIFF/AIFC** чтение и запись (`commons/codecs/aiff`). Фасад `audio_file_io`
+  декодирует их целиком, `euterpia import` принимает эти форматы. Encode — WAV
+  и AIFF (у названных библиотек энкодеров нет).
+- `euterpia render`: индикатор прогресса в stderr — проценты,
 - `euterpia render`: индикатор прогресса в stderr — проценты,
   отрендерено/всего, прошло, осталось и скорость (×REALTIME) с
   «вращающейся палочкой»; `--progress`/`--no-progress`, `-q` отключает,
