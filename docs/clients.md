@@ -87,6 +87,7 @@ Input → Command → Core → State update → Render
 | `graph.connect` | соединить ноды | `edit` | `graph.connect` | `connect` | целиком |
 | `graph.disconnect` | разъединить ноды | `edit` | `graph.disconnect` | `disconnect` | целиком |
 | `param.set` | задать параметр | `edit` | `param.set` | `param` | целиком |
+| `project.setInfo` | задать метаданные проекта | `edit` | `project.set-info` | `project` | целиком |
 | `view.graph` | граф: ноды и связи | `view` | — | `node` | целиком |
 | `view.graphCheck` | проверка графа и компиляции | `view` | — | `graph` | целиком |
 | `transport.set` | темп, размер, петля | `edit` | `transport.set` | `transport` | #257 |

@@ -140,6 +140,8 @@ proc clientActions*(): seq[ClientAction] =
     editAction("graph.disconnect", "Разъединить ноды", ccDisconnect,
                "disconnect"),
     editAction("param.set", "Задать параметр", ccSetParameter, "param"),
+    editAction("project.setInfo", "Задать метаданные проекта",
+               ccSetProjectInfo, "project"),
     viewAction("view.graph", "Показать граф: ноды и связи", "node"),
     viewAction("view.graphCheck", "Проверить граф и компиляцию", "graph"),
 

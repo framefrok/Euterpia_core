@@ -406,6 +406,45 @@ proc applyRestoreNodeState(doc: var Document;
   doc.refreshHandles()
   okFrame()
 
+proc applySetProjectInfo(doc: var Document; cmd: ControlCommand): ErrorFrame =
+  ## Запись метаданных проекта (issue #373). Проверки границ переехали сюда из
+  ## CLI: одно правило для CLI, Editor и скриптов. Меняются только поля из
+  ## `projectMask` — иначе «не задано» не отличить от «поставить ноль».
+  if (cmd.projectMask and ProjectFieldSampleRate) != 0:
+    if not (cmd.projectSampleRate > 0.0f and
+            cmd.projectSampleRate <= 1_000_000.0f):
+      return errFrame(ecOutOfRange,
+        "sample-rate = " & $cmd.projectSampleRate & " вне диапазона 0…1000000",
+        "частота дискретизации должна быть положительной")
+  if (cmd.projectMask and ProjectFieldTempo) != 0:
+    if not (cmd.projectTempo > 0.0f and cmd.projectTempo <= 1000.0f):
+      return errFrame(ecOutOfRange,
+        "tempo = " & $cmd.projectTempo & " вне диапазона 0…1000",
+        "темп должен быть положительным")
+  if (cmd.projectMask and ProjectFieldTimeSignature) != 0:
+    if cmd.tsNum < 1:
+      return errFrame(ecOutOfRange, "числитель размера < 1",
+        "размер вида N/M, N ≥ 1")
+    if cmd.tsDen notin [1'i32, 2'i32, 4'i32, 8'i32, 16'i32, 32'i32]:
+      return errFrame(ecOutOfRange,
+        "знаменатель размера " & $cmd.tsDen & " не степень двойки",
+        "допустимо: 1, 2, 4, 8, 16, 32")
+
+  if (cmd.projectMask and ProjectFieldName) != 0:
+    doc.proj.metadata.name = cmd.projectName
+  if (cmd.projectMask and ProjectFieldAuthor) != 0:
+    doc.proj.metadata.author = cmd.projectAuthor
+  if (cmd.projectMask and ProjectFieldSampleRate) != 0:
+    doc.proj.metadata.sampleRate = cmd.projectSampleRate
+  if (cmd.projectMask and ProjectFieldTempo) != 0:
+    doc.proj.metadata.tempo = cmd.projectTempo
+  if (cmd.projectMask and ProjectFieldTimeSignature) != 0:
+    doc.proj.metadata.timeSignature = TimeSignatureFormat(
+      numerator: cmd.tsNum, denominator: cmd.tsDen)
+  doc.stampModified()
+  doc.refreshHandles()
+  okFrame()
+
 proc applyCommand*(doc: var Document; cmd: ControlCommand): ErrorFrame =
   ## ЕДИНАЯ точка исполнения операций над документом (§65): её зовут CLI,
   ## Editor, тесты и скрипты — и все получают один и тот же результат.
@@ -425,6 +464,7 @@ proc applyCommand*(doc: var Document; cmd: ControlCommand): ErrorFrame =
   of ccDisconnect: doc.applyDisconnect(cmd)
   of ccSetParameter: doc.applySetParameter(cmd)
   of ccRestoreNodeState: doc.applyRestoreNodeState(cmd)
+  of ccSetProjectInfo: doc.applySetProjectInfo(cmd)
   else:
     errFrame(ecUnsupportedCommand,
              "команда " & commandName(cmd.kind) & " объявлена, но ещё не реализована",
@@ -542,6 +582,16 @@ proc applyCommandRecording*(doc: var Document; cmd: ControlCommand):
           return (frame, @[])
         return (frame, @[setParameter(cmd.nodeId, old, cmd.paramName, cmd.paramIndex)])
     (doc.applyCommand(cmd), @[])
+  of ccSetProjectInfo:
+    # Обратная команда — те же поля с прежними значениями (issue #373).
+    let m = doc.proj.metadata
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, @[setProjectInfo(cmd.projectMask, m.name, m.author,
+                             m.sampleRate, m.tempo,
+                             m.timeSignature.numerator,
+                             m.timeSignature.denominator)])
   else:
     # Команда не реализована или её откат не определён: применяем как обычно,
     # но откат не обещаем.

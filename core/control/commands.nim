@@ -32,6 +32,13 @@ const
     ## Версия control-API. Повышается, только если меняется смысл полей
     ## команды; получатель с другой версией отказывает, а не гадает.
 
+  # Битмаск полей `ccSetProjectInfo` (issue #373): какие метаданные менять.
+  ProjectFieldName* = 1'u32
+  ProjectFieldAuthor* = 2'u32
+  ProjectFieldSampleRate* = 4'u32
+  ProjectFieldTempo* = 8'u32
+  ProjectFieldTimeSignature* = 16'u32
+
 type
   ControlCommandKind* = enum
     ## Перечень операций документа (MANIFEST §65). Значения стабильны: по ним
@@ -57,6 +64,13 @@ type
       ## ОТКАТА (`deleteNode` в обратную сторону), и она объявлена в том же
       ## контракте, что и остальные, — иначе откат был бы «магией», которую
       ## нельзя ни показать, ни записать в историю.
+    ccSetProjectInfo
+      ## Запись метаданных проекта (issue #373): имя, автор, sample rate,
+      ## темп и размер. Раньше эти поля писал сам CLI (`setField`), из-за чего
+      ## отметка `metadata.modified` и проверки границ жили в клиенте и
+      ## повторялись бы в Editor. Теперь это операция документа (как `param.set`),
+      ## отменяемая через историю. Значения по умолчанию (0/пусто) означают
+      ## «не задано» и данное поле не трогается.
 
   ControlPortKind* = enum
     ## Вид сигнала в команде. Порядковые значения совпадают с `SignalType`
@@ -106,6 +120,17 @@ type
       lanes*: seq[AutomationLaneFormat]
       states*: seq[PluginStateFormat]
         ## Что было привязано к ноде до удаления.
+    of ccSetProjectInfo:
+      projectMask*: uint32
+        ## Битмаск «какие поля менять» (см. `ProjectField*`): позволяет
+        ## явно поставить и пустое имя, и числовой ноль — «не задано» через
+        ## значение не отличишь от «поставить 0».
+      projectName*: string
+      projectAuthor*: string
+      projectSampleRate*: float32
+      projectTempo*: float32
+      tsNum*: int32
+      tsDen*: int32
     else:
       discard
 
@@ -126,12 +151,14 @@ proc commandName*(kind: ControlCommandKind): string =
   of ccSetTransport: "transport.set"
   of ccLoadResource: "resource.load"
   of ccRestoreNodeState: "node.restoreState"
+  of ccSetProjectInfo: "project.set-info"
 
 proc isImplemented*(kind: ControlCommandKind): bool {.inline.} =
   ## Реализована ли команда в этом подэтапе. Клиент может спросить заранее,
   ## вместо того чтобы отправлять команду и получать отказ.
   case kind
   of ccCreateNode, ccDeleteNode, ccConnect, ccDisconnect, ccSetParameter: true
+  of ccSetProjectInfo: true
   else: false
 
 # =============================================================================
@@ -187,6 +214,22 @@ proc restoreNodeState*(nodeId: int32; lanes: seq[AutomationLaneFormat];
   result.lanes = lanes
   result.states = states
 
+proc setProjectInfo*(mask: uint32; name: string = ""; author: string = "";
+                     sampleRate: float32 = 0.0f; tempo: float32 = 0.0f;
+                     tsNum: int32 = 0; tsDen: int32 = 0;
+                     id: uint32 = 0'u32): ControlCommand =
+  ## Запись метаданных проекта (issue #373). `mask` — какие поля менять
+  ## (`ProjectField*`); остальные игнорируются. Явный битмаск нужен, чтобы
+  ## отличать «не задано» от «поставить ноль/пусто».
+  result = newCommand(ccSetProjectInfo, id)
+  result.projectMask = mask
+  result.projectName = name
+  result.projectAuthor = author
+  result.projectSampleRate = sampleRate
+  result.projectTempo = tempo
+  result.tsNum = tsNum
+  result.tsDen = tsDen
+
 # =============================================================================
 # Контракт на проводе: команда в JSON
 # =============================================================================
@@ -238,6 +281,19 @@ proc toJson*(cmd: ControlCommand): JsonNode =
     for st in cmd.states:
       states.add %*{"nodeId": st.nodeId, "pluginId": st.pluginId}
     result["states"] = states
+  of ccSetProjectInfo:
+    result["mask"] = %cmd.projectMask
+    if (cmd.projectMask and ProjectFieldName) != 0:
+      result["name"] = %cmd.projectName
+    if (cmd.projectMask and ProjectFieldAuthor) != 0:
+      result["author"] = %cmd.projectAuthor
+    if (cmd.projectMask and ProjectFieldSampleRate) != 0:
+      result["sampleRate"] = %cmd.projectSampleRate
+    if (cmd.projectMask and ProjectFieldTempo) != 0:
+      result["tempo"] = %cmd.projectTempo
+    if (cmd.projectMask and ProjectFieldTimeSignature) != 0:
+      result["tsNum"] = %cmd.tsNum
+      result["tsDen"] = %cmd.tsDen
   else:
     discard
 
@@ -309,6 +365,16 @@ proc fromJson*(node: JsonNode; cmd: var ControlCommand): bool =
           nodeId: int(field(st, "nodeId", newJInt(0)).getInt),
           pluginId: field(st, "pluginId", newJString("")).getStr)
     cmd = restoreNodeState(int32(node["nodeId"].getInt), lanes, states, id)
+  of ccSetProjectInfo:
+    cmd = setProjectInfo(
+      uint32(field(node, "mask", newJInt(0)).getInt),
+      field(node, "name", newJString("")).getStr,
+      field(node, "author", newJString("")).getStr,
+      float32(field(node, "sampleRate", newJFloat(0.0)).getFloat),
+      float32(field(node, "tempo", newJFloat(0.0)).getFloat),
+      int32(field(node, "tsNum", newJInt(0)).getInt),
+      int32(field(node, "tsDen", newJInt(0)).getInt),
+      id)
   else:
     return false
   cmd.apiVersion = api

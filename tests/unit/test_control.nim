@@ -272,3 +272,57 @@ suite "control: один путь исполнения":
     initDocument(noClock, emptyProject(), TestDocId, fakeProvider, nil)
     discard noClock.applyCommand(createNode("test.gain"))
     check noClock.proj.metadata.modified == ""
+
+# =============================================================================
+# Метаданные проекта (issue #373)
+# =============================================================================
+
+suite "control: метаданные проекта (#373)":
+  test "меняются только поля из маски, отметка modified ставится":
+    var doc = newDoc()
+    let srBefore = doc.proj.metadata.sampleRate   # пустой проект: не задан
+    check doc.applyCommand(
+      setProjectInfo(ProjectFieldName or ProjectFieldTempo,
+                     name = "Song", tempo = 140.0f)).isOk()
+    check doc.proj.metadata.name == "Song"
+    check abs(doc.proj.metadata.tempo - 140.0f) < 1e-4f
+    # Sample rate не трогали — остался прежним.
+    check doc.proj.metadata.sampleRate == srBefore
+    check doc.proj.metadata.modified == FixedStamp
+
+  test "границы проверяет ЯДРО, а не CLI":
+    var doc = newDoc()
+    let before = snapshotWithoutStamp(doc)
+    check doc.applyCommand(
+      setProjectInfo(ProjectFieldTempo, tempo = 0.0f)).code == ecOutOfRange
+    check doc.applyCommand(
+      setProjectInfo(ProjectFieldSampleRate,
+                     sampleRate = 0.0f)).code == ecOutOfRange
+    check doc.applyCommand(
+      setProjectInfo(ProjectFieldTimeSignature,
+                     tsNum = 4, tsDen = 3)).code == ecOutOfRange
+    check doc.applyCommand(
+      setProjectInfo(ProjectFieldTimeSignature,
+                     tsNum = 0, tsDen = 4)).code == ecOutOfRange
+    # Отказ не оставил изменений.
+    check snapshotWithoutStamp(doc) == before
+
+  test "JSON round-trip сохраняет маску и значения":
+    let cmd = setProjectInfo(ProjectFieldName or ProjectFieldSampleRate,
+                             name = "X", sampleRate = 44100.0f)
+    var back: ControlCommand
+    check cmd.toJson.fromJson(back)
+    check back.kind == ccSetProjectInfo
+    check back.projectMask == (ProjectFieldName or ProjectFieldSampleRate)
+    check back.projectName == "X"
+    check abs(back.projectSampleRate - 44100.0f) < 1e-3f
+
+  test "транзакция отменяема: откат возвращает прежние метаданные":
+    var doc = newDoc()
+    let plan = doc.applyTransaction(
+      @[setProjectInfo(ProjectFieldName, name = "New")], "rename")
+    check plan.frame.isOk()
+    check doc.proj.metadata.name == "New"
+    let undone = doc.applyTransaction(plan.undo, "undo")
+    check undone.frame.isOk()
+    check doc.proj.metadata.name == ""    # было пусто

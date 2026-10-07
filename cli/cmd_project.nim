@@ -37,8 +37,11 @@ import cli_spec
 import stamp
 import control/query
 import control/document
+import control/commands
+import control/history
 import control/error_frame
 import control_bridge
+import history_file
 
 # Формат отметки и часы живут в `cli/stamp.nim` (там же объяснение, почему не
 # здесь): команды получают их через этот модуль — он их и создаёт.
@@ -786,29 +789,62 @@ proc runProjectSet*(ctx: var Ctx; args: seq[string]): Report =
 
   let loaded = loadAt(path)
   if not loaded.ok: return loaded.rep
-  var proj = loaded.proj
 
-  let docBefore = openDocument(path, proj)
+  # Аргумент превращается в КОМАНДУ (issue #373): запись метаданных и проверки
+  # границ делает control-слой, а CLI только переводит текст в типизированное
+  # значение. Разбор формата (число? размер N/M?) остаётся за CLI — это разбор
+  # аргумента, а не правило модели.
+  var cmd: ControlCommand
+  case field
+  of "name":
+    cmd = setProjectInfo(ProjectFieldName, name = value)
+  of "author":
+    cmd = setProjectInfo(ProjectFieldAuthor, author = value)
+  of "tempo":
+    let parsed = parseNumber(value, "tempo", MaxTempo)
+    if not parsed.ok:
+      return usageError(parsed.message, "поля: " & ProjectFields.join(", "))
+    cmd = setProjectInfo(ProjectFieldTempo, tempo = float32(parsed.number))
+  of "sample-rate":
+    let parsed = parseNumber(value, "sample-rate", MaxSampleRate)
+    if not parsed.ok:
+      return usageError(parsed.message, "поля: " & ProjectFields.join(", "))
+    cmd = setProjectInfo(ProjectFieldSampleRate,
+                         sampleRate = float32(parsed.number))
+  of "time-signature":
+    let parsed = parseTimeSignature(value)
+    if not parsed.ok:
+      return usageError(parsed.message, "поля: " & ProjectFields.join(", "))
+    cmd = setProjectInfo(ProjectFieldTimeSignature,
+                         tsNum = parsed.numerator, tsDen = parsed.denominator)
+  else:
+    return usageError("неизвестное поле проекта: " & field,
+                      "поля: " & ProjectFields.join(", "))
+
+  let docBefore = openDocument(path, loaded.proj)
   let before = readField(queryMetadata(docBefore), field)
-  let applied = setField(proj, field, value)
-  if not applied.ok:
-    return usageError(applied.message, "поля: " & ProjectFields.join(", "))
-  var doc = openDocument(path, proj)
-  let after = readField(queryMetadata(doc), field)
+
+  # Проба на КОПИИ: каким станет поле. Идемпотентность (`set` на то же
+  # значение не трогает файл) сохраняется без записи.
+  var probe = openDocument(path, loaded.proj)
+  discard probe.applyCommand(cmd)
+  let after = readField(queryMetadata(probe), field)
 
   if before == after:
     # Значение уже такое: файл НЕ трогаем. Иначе идемпотентный `set`
     # переписывал бы проект и поднимал `metadata.modified` на ровном месте.
+    let doc = openDocument(path, loaded.proj)
     var body = projectBody(doc, path)
     body["change"] = %*{"field": field, "before": before, "after": after,
                         "applied": false}
     return okReport(body = body,
                     lines = @[path & ": без изменений", field & ": " & after])
 
-  # Отметка изменения ставится ДО сборки машинного ответа: `--json` обязан
-  # показывать то состояние, которое записывается, а не прежнее.
-  proj.metadata.modified = nowStamp()
-  doc = openDocument(path, proj)
+  # Транзакцией: она же даёт обратные команды для истории (#331), а отметку
+  # `metadata.modified` ставит control-слой — не CLI.
+  var doc = openDocument(path, loaded.proj)
+  let plan = doc.applyTransaction(@[cmd], "project set " & field)
+  if not plan.frame.isOk(): return frameReport(plan.frame)
 
   var body = projectBody(doc, path)
   body["change"] = %*{"field": field, "before": before, "after": after,
@@ -824,9 +860,14 @@ proc runProjectSet*(ctx: var Ctx; args: seq[string]): Report =
     lines.add "не записан: " & path & " (--dry-run)"
     return okReport(body = body, lines = lines)
 
-  let saved = writeAtomic(path, proj)
+  let saved = writeAtomic(path, doc.proj)
   if not saved.success:
     return saveError(saved, path)
+  let entry = HistoryEntry(redo: plan.redo, undo: plan.undo,
+                           description: plan.description)
+  let recorded = recordEntry(path, entry)
+  if not recorded.isOk():
+    return frameReport(recorded)
   lines.add "записан: " & path
   okReport(body = body, lines = lines)
 
