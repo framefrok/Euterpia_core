@@ -2582,6 +2582,36 @@ suite "CLI: транспорт — tempo/meter/position/seek/loop/state (#257)":
   test "tempo без проекта — ошибка использования":
     check runCliIn(dir, ["transport", "tempo", "140"]).code == 1
 
+  test "tempo + render: длительность задаётся темпом, а не «на слух» (#257)":
+    # Критерий приёмки issue: `transport tempo 140` + `render` дают файл,
+    # длительность которого соответствует темпу. Проверяем ЧИСЛОМ: длина
+    # партитуры в тиках не меняется, а перевод в секунды — меняется ровно во
+    # столько раз, во сколько раз изменился темп.
+    check runCliIn(dir, ["init", "r.eproj", "--tempo", "60"]).code == 0
+    check runCliIn(dir, ["node", "add", "osc", "r.eproj"]).code == 0
+    check runCliIn(dir, ["node", "add", "gain", "r.eproj"]).code == 0
+    check runCliIn(dir, ["connect", "1:out", "2:in", "r.eproj"]).code == 0
+    check runCliIn(dir, ["node", "add", "notes", "r.eproj"]).code == 0
+    check runCliIn(dir, ["connect", "3:event:0", "1:event:0", "r.eproj"]).code == 0
+    writeFile(dir / "r.notes", "c4/4 d e f\n")
+    check runCliIn(dir, ["notation", "import", "r.notes", "--file",
+                         "r.eproj"]).code == 0
+
+    # `--tail 0`: длительность = ровно партитура, без хвоста инструмента.
+    let slow = jrun(["render", "r.eproj", dir / "slow.wav", "--tail", "0"])
+    check slow["ok"].getBool
+    let ticks = slow["songEndTick"].getInt
+    let slowSeconds = slow["seconds"].getFloat
+    check slow["tempo"].getFloat == 60.0
+
+    # Удваиваем темп через транспорт: та же партитура звучит вдвое короче.
+    check runCliIn(dir, ["transport", "tempo", "120", "r.eproj"]).code == 0
+    let fast = jrun(["render", "r.eproj", dir / "fast.wav", "--tail", "0"])
+    check fast["ok"].getBool
+    check fast["songEndTick"].getInt == ticks          # число тактов то же
+    check fast["tempo"].getFloat == 120.0
+    check abs(fast["seconds"].getFloat * 2.0 - slowSeconds) < 0.01
+
   test "state без проекта работает с умолчаниями ядра (offline)":
     let r = runCliIn(dir, @["--json", "transport", "state"])
     check r.code == 0
