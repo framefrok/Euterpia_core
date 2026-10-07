@@ -16,6 +16,7 @@
 
 import std/[unittest, os, tables, atomics]
 import signal_types
+import transport
 import node_interface
 import graph_compiler
 import audio_engine
@@ -505,3 +506,123 @@ suite "input path: диагностика входа и позиции (#383, #3
 
     destroyAudioEngine(engine)
     rig.destroyInputRig()
+
+# ==============================================================================
+# Единый time-coordinate contract: ctx.transport == TransportSnapshot (#387)
+# ==============================================================================
+
+type
+  TransportProbeState = object
+    captured: bool
+    info: TransportInfo
+
+var
+  tpDesc: NodeDesc
+  tpFactory: NodeFactory
+  tpReady = false
+
+proc tpCreate(desc: ptr NodeDesc; userData: pointer): pointer
+    {.cdecl, raises: [], gcsafe.} =
+  discard desc
+  discard userData
+  allocShared0(sizeof(TransportProbeState))
+
+proc tpDestroy(state: pointer) {.cdecl, raises: [], gcsafe.} =
+  if state.isNil:
+    return
+  deallocShared(state)
+
+proc tpProcess(
+    ctx: ptr NodeProcessContext,
+    audio: ptr NodeAudioPorts,
+    ctrl: ptr NodeControlPorts,
+    events: ptr NodeEventPorts,
+    userData: pointer
+) {.cdecl, raises: [], gcsafe.} =
+  discard audio
+  discard ctrl
+  discard events
+  let st = cast[ptr TransportProbeState](userData)
+  if st.isNil or ctx.isNil:
+    return
+  st.captured = true
+  st.info = ctx.transport
+
+proc initTransportProbe() =
+  tpDesc = NodeDesc(
+    id: fixedId("test.transportprobe"),
+    name: fixedName("TransportProbe"),
+    category: fixedName("test"),
+    audioInCount: 1, audioOutCount: 1,
+    maxChannels: 2
+  )
+  tpFactory = NodeFactory(
+    create: tpCreate, destroy: tpDestroy, process: tpProcess
+  )
+
+proc ensureTransportProbe() =
+  if not tpReady:
+    initTransportProbe()
+    tpReady = true
+
+suite "transport: ctx BBT согласован со snapshot (#387)":
+  test "BBT из ctx.transport совпадает со snapshot на 4/4, 6/8, 3/4, 7/8":
+    ensureTransportProbe()
+
+    let cases = [(4, 4), (6, 8), (3, 4), (7, 8)]
+    let posSamples = 36000'i64   # 0.75 c при 48 кГц
+
+    for (num, den) in cases:
+      var reg = initNodeRegistry()
+      check registerBuiltinNodes(reg) == BuiltinCount
+      check reg.registerNodeType(addr tpDesc, addr tpFactory)
+
+      var inputNode, probeNode: EditorNode
+      check reg.instantiateNode("euterpia.input", 1, inputNode)
+      check reg.instantiateNode("test.transportprobe", 2, probeNode)
+
+      var g: NodeGraph
+      g.nodes[1] = inputNode
+      g.nodes[2] = probeNode
+      g.connections.add EditorConnection(
+        srcNodeId: 1, srcPortIdx: 0,
+        dstNodeId: 2, dstPortIdx: 0,
+        sigType: sigAudio
+      )
+
+      var cr: CompileResult
+      var binding: ptr PipelineBinding
+      check buildPipeline(reg, g, 2, cr, binding)
+
+      let engine = createAudioEngine(
+        sampleRate = 48000.0f, blockSize = int32(BlockSize)
+      )
+      check engine != nil
+      check engine.postSetMeter(int32(num), int32(den))
+      check engine.postSetTempo(120.0)
+      check engine.postGraphUpdate(cr.pipeline)
+      check engine.postSeekSamples(posSamples)
+      check engine.postPlay()
+
+      var outBuf: array[BlockSize * 2, float32]
+      let pout = cast[ptr UncheckedArray[float32]](addr outBuf[0])
+      engine.renderBlock(pout)
+
+      let st = cast[ptr TransportProbeState](probeNode.userData)
+      check st.captured
+
+      # Control-plane snapshot с теми же входными данными.
+      var t = initTransport(48000.0f)
+      t.tempo.store(120.0f, moRelaxed)
+      t.timeSignature = TimeSignature(numerator: int32(num), denominator: int32(den))
+      t.samplePosition.store(posSamples, moRelaxed)
+      let snap = t.getSnapshot()
+
+      check abs(st.info.barPosition - snap.barPosition) < 1e-6
+      check abs(st.info.beatPosition - snap.beatPosition) < 1e-6
+      check abs(st.info.quarterNotePosition - snap.quarterNotePosition) < 1e-6
+      check st.info.tickPosition == snap.tickPosition
+
+      destroyAudioEngine(engine)
+      destroyNodeState(reg.findNodeType("euterpia.input"), inputNode.userData)
+      destroyNodeState(reg.findNodeType("test.transportprobe"), probeNode.userData)

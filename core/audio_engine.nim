@@ -10,6 +10,11 @@ import
   audio_recorder,
   rt_guard
 
+# Единый расчёт музыкальной позиции (issue #387). Импортируем ТОЛЬКО функцию и
+# её тип: `transport.TransportState` конфликтует по имени с `ipc_bus.TransportState`
+# (это два представления одного состояния, а не одно имя), а движку второе не нужно.
+from transport import positionFromSeconds, TransportPosition
+
 ## Прагма realtime-пути: собрана из двух требований контракта (MANIFEST §9/§10).
 ## `raises: []` — никаких исключений в audio-потоке;
 ## `gcsafe` — никаких обращений к глобальному GC-состоянию (issue #16).
@@ -44,9 +49,8 @@ const
   ## используют стерео-ноды (maxChannels = 2 в descriptor'ах).
   MaxInputChannels* = 2
 
-  # Должно совпадать с твоим секвенсором/хостом.
-  PpqResolution = 960.0
-
+  # Разрешение PPQ (тиков на четверть) теперь живёт в `transport`
+  # (`PpqTicksPerQuarter`) — единый источник для RT-контекста и UI (#387).
 
 type
   TransportRuntime = object
@@ -492,6 +496,13 @@ proc applyCommands(engine: ptr AudioEngine) {.rt.} =
       engine.transport.loopStartFrame = cmd.loopStart
       engine.transport.loopEndFrame = cmd.loopEnd
 
+    of cmdTransportSetMeter:
+      # Размер такта задаёт единицу доли для BBT (#387). Некорректные
+      # значения игнорируем: audio-поток не должен получить размер с нулём.
+      if cmd.meterNum > 0 and cmd.meterDen > 0:
+        engine.transport.timeSigNum = cmd.meterNum
+        engine.transport.timeSigDen = cmd.meterDen
+
     of cmdSetTempo:
       if cmd.transportValue > 0.0:
         engine.transport.tempo = cmd.transportValue
@@ -583,25 +594,34 @@ proc setupContext(
   ctx.transport.timeSigNum = engine.transport.timeSigNum
   ctx.transport.timeSigDen = engine.transport.timeSigDen
 
-  let beats =
-    if engine.transport.tempo > 0.0:
-      ctx.timeInSeconds * engine.transport.tempo / 60.0
-    else:
-      0.0
+  # Музыкальная позиция — ЕДИНЫЙ контракт с `TransportSnapshot` (#387):
+  # одна арифметика `transport.positionFromSeconds`. Раньше здесь `barPosition`
+  # делила на числитель, игнорируя знаменатель (в 6/8 такт считался неверно),
+  # `beatPosition` была в PPQ, а цикл — в секундах.
+  let pos = positionFromSeconds(
+    ctx.timeInSeconds,
+    engine.transport.tempo,
+    engine.transport.timeSigNum,
+    engine.transport.timeSigDen
+  )
+  ctx.transport.barPosition = pos.barPosition
+  ctx.transport.beatPosition = pos.beatPosition
+  ctx.transport.quarterNotePosition = pos.quarterNotePosition
+  ctx.transport.tickPosition = pos.tickPosition
 
-  # beatPosition — в PPQ.
-  # barPosition — в барах.
-  ctx.transport.beatPosition = beats * PpqResolution
-
-  if engine.transport.timeSigNum > 0:
-    ctx.transport.barPosition = beats / float64(engine.transport.timeSigNum)
-  else:
-    ctx.transport.barPosition = 0.0
-
+  # Цикл — в ДОЛЯХ (та же единица, что beatPosition, #387).
   if engine.transport.loopEnabled and engine.transport.sampleRate > 0.0f:
     let sr = float64(engine.transport.sampleRate)
-    ctx.transport.cycleStart = float64(engine.transport.loopStartFrame) / sr
-    ctx.transport.cycleEnd = float64(engine.transport.loopEndFrame) / sr
+    let num = engine.transport.timeSigNum
+    let den = if engine.transport.timeSigDen > 0: engine.transport.timeSigDen else: 4'i32
+    let startPos = positionFromSeconds(
+      float64(engine.transport.loopStartFrame) / sr,
+      engine.transport.tempo, num, den)
+    let endPos = positionFromSeconds(
+      float64(engine.transport.loopEndFrame) / sr,
+      engine.transport.tempo, num, den)
+    ctx.transport.cycleStart = startPos.beatPosition
+    ctx.transport.cycleEnd = endPos.beatPosition
   else:
     ctx.transport.cycleStart = 0.0
     ctx.transport.cycleEnd = 0.0
@@ -1179,6 +1199,24 @@ proc postSetTempo*(engine: ptr AudioEngine; bpm: float64): bool =
     EngineCommand(
       kind: cmdSetTempo,
       transportValue: bpm
+    )
+  )
+
+
+proc postSetMeter*(engine: ptr AudioEngine; numerator, denominator: int32): bool =
+  ## Задаёт размер такта в audio-потоке (#387). Единица доли для BBT берётся
+  ## из знаменателя (в 6/8 доля — восьмая). Некорректный размер отвергается
+  ## до очереди: audio-поток не должен увидеть нулевой знаменатель.
+  if engine == nil:
+    return false
+  if numerator <= 0 or denominator <= 0:
+    return false
+
+  engine.toAudio.push(
+    EngineCommand(
+      kind: cmdTransportSetMeter,
+      meterNum: numerator,
+      meterDen: denominator
     )
   )
 

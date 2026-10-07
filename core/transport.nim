@@ -20,7 +20,7 @@
 ##   setLoop(...)         -> postSetLoop(...)     (cmdTransportSetLoop)
 ## ============================================================================
 
-import std/[atomics, json]
+import std/[atomics, json, math]
 
 type
   TransportState* = enum
@@ -37,6 +37,29 @@ type
     numerator*: int32
     denominator*: int32
 
+  ## Музыкальная позиция в согласованных единицах (issue #387).
+  ##
+  ## Единый time-coordinate contract EUTERPIA. Одно значение — одно имя во
+  ## всех API (`TransportSnapshot`, `NodeProcessContext.transport`):
+  ##
+  ##   * `samplePosition` — абсолютный НОМЕР сэмпла (int64), база всех расчётов;
+  ##   * `quarterNotePosition` — абсолютная позиция в ЧЕТВЕРТНЫХ нотах (float),
+  ##                             где 1.0 = одна четверть (основа PPQ);
+  ##   * `beatPosition` — абсолютная позиция в ДОЛЯХ, где доля = знаменатель
+  ##                      размера (в 6/8 доля — восьмая): `quarter * den / 4`;
+  ##   * `barPosition` — абсолютная (0-базная, дробная) позиция в ТАКТАХ:
+  ##                     `beat / num`;
+  ##   * `tickPosition` — тик ВНУТРИ текущей доли при разрешении
+  ##                      `PpqTicksPerQuarter` (960 на четверть).
+  ##
+  ## Ни одна из величин не «PPQ-позиция такта» и не секунды: раньше
+  ## `beatPosition` означала то PPQ, то номер доли в разных API (#387).
+  TransportPosition* = object
+    barPosition*: float64
+    beatPosition*: float64
+    quarterNotePosition*: float64
+    tickPosition*: int32
+
   ## Снимок состояния транспорта для UI, визуализаторов и фоновых задач.
   ## НЕ используется внутри RT Audio Callback.
   TransportSnapshot* = object
@@ -50,6 +73,11 @@ type
     quarterNotePosition*: float64
     barsToSeconds*: float64
     secondsToBars*: float64
+    ## Состояние транспорта (issue #387): stopped/playing/paused/recording.
+    ## Раньше был только `isPlaying: bool`, который не различал паузу и стоп
+    ## и не выражал запись. `isPlaying` оставлен производным (playing|recording)
+    ## для совместимости.
+    state*: TransportState
     isPlaying*: bool
 
   ## Transport — control-plane объект.
@@ -96,10 +124,11 @@ proc initTransport*(sampleRate: float32 = 48000.0f): Transport =
 
 const
   PpqTicksPerQuarter* = 960'i32
-    ## Тиков на четверть — разрешение, в котором говорят про время и
-    ## нотные секвенсоры ядра. Совпадает с `PpqResolution` audio-движка
-    ## (`core/audio_engine.nim`): нода, считающая тики сама (например,
-    ## `euterpia.notes`), использует ту же шкалу и не нуждается в пересчёте.
+    ## Тиков на четверть — ЕДИНСТВЕННЫЙ источник разрешения PPQ для всего ядра
+    ## (issue #387): и control-plane (`positionFromSeconds`, `TransportSnapshot`),
+    ## и RT-контекст (`ctx.transport.tickPosition`), и ноды, считающие тики сами
+    ## (например, `euterpia.notes`), используют эту шкалу. Дублирующей константы
+    ## в `audio_engine` больше нет.
 
 # ============================================================================
 # Time helpers (Control Thread / Offline math)
@@ -249,33 +278,70 @@ proc isPlaying*(t: var Transport): bool {.inline.} =
 # Snapshot — срез состояния для UI и фоновых задач (Control-Plane)
 # ============================================================================
 
+proc positionFromSeconds*(
+  seconds: float64;
+  tempo: float64;
+  timeSigNum, timeSigDen: int32
+): TransportPosition =
+  ## Единый расчёт музыкальной позиции из секунд (issue #387).
+  ##
+  ## Одна арифметика для RT-контекста (`ctx.transport`) и control-plane
+  ## (`TransportSnapshot`): без общей функции два представления «одной позиции»
+  ## расходятся на знаменателе размера, как это было с `barPosition`.
+  ##
+  ## Единицы — как в контракте `TransportPosition` (четверти/доли/такты).
+  var quarters = 0.0
+  if tempo > 0.0:
+    quarters = seconds * tempo / 60.0
+
+  let den = if timeSigDen > 0: timeSigDen else: 4'i32
+  let num = if timeSigNum > 0: timeSigNum else: 1'i32
+
+  # Доля = знаменатель размера (в 6/8 доля — восьмая). Четверть = den/4 долей,
+  # поэтому долей = четверти * den / 4 (в 6/8 — вдвое больше, чем четвертей).
+  let beats = quarters * float64(den) / 4.0
+
+  result.quarterNotePosition = quarters
+
+  result.beatPosition = beats
+  result.barPosition = beats / float64(num)
+
+  var ticksPerBeat = PpqTicksPerQuarter * 4'i32 div den
+  if ticksPerBeat <= 0:
+    ticksPerBeat = PpqTicksPerQuarter
+  var frac = beats - floor(beats)
+  if frac < 0.0:
+    frac = 0.0
+  result.tickPosition = int32(frac * float64(ticksPerBeat))
+
 proc getSnapshot*(t: var Transport): TransportSnapshot =
   ## Создаёт снимок текущего состояния транспорта для UI, отрисовки таймлайна
   ## и фоновых задач. НЕ вызывать из Real-Time Audio Callback (DSP thread).
+  ##
+  ## Музыкальная позиция считается общей `positionFromSeconds` (issue #387),
+  ## поэтому снимок и `ctx.transport` в RT всегда согласованы.
   let pos = t.samplePosition.load(moRelaxed)
   let bpm = t.tempo.load(moRelaxed)
-  let spQuarter = t.samplesPerQuarter()
   let spBar = t.samplesPerBar()
-  let tpb = t.ticksPerBeat()
-  # Долей в такте = числитель размера: `beat` из sampleToBarBeatTick уже в
-  # единицах знаменателя, поэтому делить на что-то другое нельзя (#58).
-  let beatsPerBar =
-    if t.timeSignature.numerator > 0: float64(t.timeSignature.numerator) else: 1.0
 
   result.sampleRate = t.sampleRate
   result.tempo = bpm
   result.timeSignature = t.timeSignature
   result.samplePosition = pos
-  result.isPlaying = t.isPlaying()
+  # `state` читаем напрямую: `currentState` объявлен ниже (после строкового
+  # имени состояния), а порядок объявлений в модуле менять не хочется.
+  result.state = t.state.load(moAcquire)
+  result.isPlaying = result.state == tsPlaying or result.state == tsRecording
 
-  let (bar, beat, tick) = t.sampleToBarBeatTick(pos)
-  let beatFraction =
-    if tpb > 0: float64(tick) / float64(tpb) else: 0.0
-  let beatsSinceBarStart = float64(beat - 1) + beatFraction
-  result.barPosition = float64(bar - 1) + beatsSinceBarStart / beatsPerBar
-  result.beatPosition = float64(bar - 1) * beatsPerBar + beatsSinceBarStart
-  result.tickPosition = tick
-  result.quarterNotePosition = if spQuarter > 0.0: float64(pos) / spQuarter else: 0.0
+  let seconds =
+    if t.sampleRate > 0.0f: float64(pos) / float64(t.sampleRate) else: 0.0
+  let p = positionFromSeconds(
+    seconds, float64(bpm), t.timeSignature.numerator, t.timeSignature.denominator
+  )
+  result.barPosition = p.barPosition
+  result.beatPosition = p.beatPosition
+  result.tickPosition = p.tickPosition
+  result.quarterNotePosition = p.quarterNotePosition
   
   result.barsToSeconds = if spBar > 0.0 and t.sampleRate > 0.0: 
     spBar / float64(t.sampleRate) else: 0.0

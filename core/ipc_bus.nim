@@ -30,6 +30,7 @@ type
     cmdTransportStop,
     cmdTransportPause,
     cmdTransportSetLoop,
+    cmdTransportSetMeter,
     cmdSetTempo,
     cmdSetPlayhead,
     cmdMidiNoteOn,
@@ -61,6 +62,12 @@ type
       loopEnabled*: bool
       loopStart*: int64
       loopEnd*: int64
+    of cmdTransportSetMeter:
+      ## Размер такта в audio-потоке (#387). Нужен, чтобы `ctx.transport`
+      ## (BBT) считался с знаменателем: в 6/8 доля — восьмая, и все
+      ## музыкальные позиции обязаны это учитывать.
+      meterNum*: int32
+      meterDen*: int32
     of cmdAutomationBlock, cmdGraphUpdate, cmdLoadResource:
       sharedBufferId*: int32
       dataSize*: uint32

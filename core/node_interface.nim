@@ -17,15 +17,30 @@ type
     pfLastBlock        # Last block in session
     pfTransportPlaying # Transport is currently playing
 
-  # Transport information - полная информация о таймлайне
+  # Transport information - полная информация о таймлайне.
+  #
+  # ЕДИНЫЙ time-coordinate contract (issue #387), тот же, что у
+  # `transport.TransportSnapshot`. Одно значение — одно имя во всех API:
+  #
+  #   * barPosition        — позиция в ТАКТАХ (0-базная, дробная);
+  #   * beatPosition       — позиция в ДОЛЯХ, где доля = знаменатель размера
+  #                          (в 6/8 доля — восьмая, а не четверть);
+  #   * quarterNotePosition— позиция в ЧЕТВЕРТНЫХ нотах (1.0 = четверть, PPQ-основа);
+  #   * tickPosition       — тик ВНУТРИ текущей доли при 960 PPQ на четверть;
+  #   * cycleStart/cycleEnd— границы цикла в ДОЛЯХ (та же единица, что beatPosition).
+  #
+  # Раньше `beatPosition` здесь была в PPQ, а в snapshot — номером доли; цикл
+  # приходил в секундах. Всё это сведено к одному контракту.
   TransportInfo* = object
     tempo*: float64           # BPM
     timeSigNum*: int32        # Time signature numerator (e.g., 4 for 4/4)
     timeSigDen*: int32        # Time signature denominator (e.g., 4 for 4/4)
-    barPosition*: float64     # Position in bars (PPQ - pulses per quarter)
-    beatPosition*: float64    # Position in beats (PPQ)
-    cycleStart*: float64      # Cycle/loop start position (PPQ)
-    cycleEnd*: float64        # Cycle/loop end position (PPQ)
+    barPosition*: float64     # Позиция в тактах (0-базная, дробная)
+    beatPosition*: float64    # Позиция в долях (доля = знаменатель размера)
+    quarterNotePosition*: float64  # Позиция в четвертных нотах
+    tickPosition*: int32      # Тик внутри текущей доли (960 PPQ на четверть)
+    cycleStart*: float64      # Начало цикла (в долях, как beatPosition)
+    cycleEnd*: float64        # Конец цикла (в долях)
     flags*: set[ProcessingFlags]
 
   # Node processing context - минимальная общая информация для всех нод

@@ -51,7 +51,7 @@ const
   NotesTypeId* = "euterpia.notes"
 
   ## Разрешение паттерна. Совпадает с PPQ транспорта ядра
-  ## (`PpqResolution` в `core/audio_engine.nim`), поэтому позицию блока
+  ## (`transport.PpqTicksPerQuarter`, issue #387), поэтому позицию блока
   ## можно считать без пересчёта шкал.
   TicksPerQuarter* = 960'i32
 
