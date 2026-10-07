@@ -18,6 +18,7 @@
 import std/[strutils, tables, unittest]
 
 import project
+import sequencer
 import handles
 import control/error_frame
 import control/commands
@@ -196,9 +197,9 @@ suite "control: конверт команды":
     unversioned.apiVersion = 0
     check doc.applyCommand(unversioned).isOk()
 
-    var unsupported = newCommand(ccAddTrack)
+    var unsupported = newCommand(ccSetTransport)
     check doc.applyCommand(unsupported).code == ecUnsupportedCommand
-    check not isImplemented(ccAddTrack)
+    check not isImplemented(ccSetTransport)
     check isImplemented(ccCreateNode)
 
   test "имена команд стабильны и не пусты":
@@ -326,3 +327,50 @@ suite "control: метаданные проекта (#373)":
     let undone = doc.applyTransaction(plan.undo, "undo")
     check undone.frame.isOk()
     check doc.proj.metadata.name == ""    # было пусто
+
+suite "control: дорожки и клипы (#373)":
+  test "addTrack/addClip/setClip и откат транзакции возвращают пустой проект":
+    var doc = newDoc()
+    let plan = doc.applyTransaction(@[
+      addTrack("", int32(ord(ttMidi))),
+      addClip(0, int32(ord(ctMidi)), "", 0'i32, 960'i32, false, 0xFF6B6B'u32),
+      setClip(0, 0, @[NoteFormat(startTick: 0, duration: 480, pitch: 60,
+                                 velocity: 100, channel: 0)], 960, false,
+              "lead", true)
+    ], "notation import")
+    check plan.frame.isOk()
+    check doc.proj.sequencer.tracks.len == 1
+    check doc.proj.sequencer.tracks[0].name == "Track 1"
+    check doc.proj.sequencer.tracks[0].clips.len == 1
+    check doc.proj.sequencer.tracks[0].clips[0].name == "lead"
+    check doc.proj.sequencer.tracks[0].clips[0].notes.len == 1
+
+    # Откат — обратные команды (в т.ч. restoreTrack/restoreClip): проект пуст.
+    let undone = doc.applyTransaction(plan.undo, "undo")
+    check undone.frame.isOk()
+    check doc.proj.sequencer.tracks.len == 0
+
+    # Повтор исходными командами снова даёт тот же результат.
+    let redone = doc.applyTransaction(plan.redo, "redo")
+    check redone.frame.isOk()
+    check doc.proj.sequencer.tracks.len == 1
+    check doc.proj.sequencer.tracks[0].clips[0].notes.len == 1
+
+  test "removeTrack/deleteClip обратимы снимком":
+    var doc = newDoc()
+    discard doc.applyCommand(addTrack("A", int32(ord(ttMidi))))
+    discard doc.applyCommand(addClip(0, int32(ord(ctMidi)), "C",
+                                     0'i32, 480'i32, false, 0'u32))
+    var plan = doc.applyTransaction(@[deleteClip(0, 0)], "delete clip")
+    check plan.frame.isOk()
+    check doc.proj.sequencer.tracks[0].clips.len == 0
+    let back = doc.applyTransaction(plan.undo, "undo clip")
+    check back.frame.isOk()
+    check doc.proj.sequencer.tracks[0].clips.len == 1
+    check doc.proj.sequencer.tracks[0].clips[0].name == "C"
+
+    # JSON round-trip команд восстановления (история пишется в файл).
+    var back2: ControlCommand
+    check plan.undo[0].toJson.fromJson(back2)
+    check back2.kind == ccRestoreClip
+    check back2.restoreClipData.name == "C"

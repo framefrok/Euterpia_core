@@ -66,7 +66,7 @@ suite "control: транзакции":
   test "пустая транзакция и неоткатываемая команда отвергаются":
     var doc = newDoc()
     check doc.applyTransaction(@[], "пусто").frame.code == ecInvalidArgument
-    let plan = doc.applyTransaction(@[newCommand(ccAddTrack)], "не реализовано")
+    let plan = doc.applyTransaction(@[newCommand(ccSetTransport)], "не реализовано")
     check plan.frame.code == ecUnsupportedCommand
 
 suite "control: история":

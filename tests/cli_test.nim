@@ -1923,7 +1923,7 @@ suite "CLI: паритет клиентов — действие интерфе�
   test "каждая реализованная команда документа доступна из интерфейса":
     # Исключение одно: откат удаления ноды. Он приходит из истории (#109), а
     # не из палитры, и действием клиента не является.
-    const InternalKinds = [ccRestoreNodeState]
+    const InternalKinds = [ccRestoreNodeState, ccRestoreTrack, ccRestoreClip]
     for kind in ControlCommandKind.low .. ControlCommandKind.high:
       if not isImplemented(kind) or kind in InternalKinds:
         continue
@@ -1953,7 +1953,8 @@ suite "CLI: паритет клиентов — действие интерфе�
     for id in docIds:
       check findAction(clientList, id) >= 0
     for kind in ControlCommandKind.low .. ControlCommandKind.high:
-      if not isImplemented(kind) or kind in [ccRestoreNodeState]:
+      if not isImplemented(kind) or
+         kind in [ccRestoreNodeState, ccRestoreTrack, ccRestoreClip]:
         continue
       check ("`" & commandName(kind) & "`") in doc
 

@@ -178,6 +178,7 @@ proc clientActions*(): seq[ClientAction] =
                issue = 87),
     editAction("clip.add", "Добавить клип", ccAddClip, "", issue = 87),
     editAction("clip.delete", "Удалить клип", ccDeleteClip, "", issue = 87),
+    editAction("clip.set", "Задать содержимое клипа", ccSetClip, "notation"),
     editAction("note.add", "Добавить ноту", ccAddNote, "", issue = 87),
     editAction("note.delete", "Удалить ноту", ccDeleteNote, "", issue = 87),
     viewAction("view.timeline", "Показать таймлайн и клипы", "project"),

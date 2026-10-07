@@ -39,6 +39,11 @@ import sequencer
 import context
 import cmd_project
 import cli_spec
+import control/document
+import control/commands
+import control/history
+import control_bridge
+import history_file
 
 const
   NotationSubcommands* = @["check", "import"]
@@ -478,24 +483,6 @@ proc runNotationCheck(scan: NotationScan): Report =
 # notation import
 # =============================================================================
 
-proc nextTrackId(tracks: seq[TrackFormat]): int32 =
-  ## id новой дорожки — «на единицу больше максимального». Именно максимум,
-  ## а не «число дорожек»: после удаления дорожки счётчик длины выдал бы
-  ## повтор id, и две дорожки стали бы неразличимы для автоматизации.
-  for track in tracks:
-    if track.id + 1 > result:
-      result = track.id + 1
-  if result < 1:
-    result = 1
-
-proc nextClipId(clips: seq[ClipFormat]): int32 =
-  ## То же правило, что у дорожек: id клипа уникален внутри дорожки.
-  for clip in clips:
-    if clip.id + 1 > result:
-      result = clip.id + 1
-  if result < 1:
-    result = 1
-
 proc roundUpToBar(ticks: int32; scan: NotationScan): int32 =
   ## Длина клипа — целое число тактов: клип, оборванный посреди такта, не
   ## совпадает с сеткой, и следующий клип «поехал» бы относительно него.
@@ -551,38 +538,27 @@ proc runNotationImport(ctx: var Ctx; scan: NotationScan): Report =
   let loaded = loadAt(scan.projectPath)
   if not loaded.ok:
     return loaded.rep
-  var proj = loaded.proj
+  var doc = openDocument(scan.projectPath, loaded.proj)
 
-  # --- дорожка --------------------------------------------------------------
   # Создавать можно только следующую дорожку: «дырка» в нумерации сделала бы
   # индексы в отчёте неотличимыми от опечатки.
-  if scan.track > proj.sequencer.tracks.len:
+  let trackCountBefore = doc.proj.sequencer.tracks.len
+  if scan.track > trackCountBefore:
     return usageError("дорожка #" & $scan.track & " недостижима: в проекте " &
-      $proj.sequencer.tracks.len & " дорожек",
+      $trackCountBefore & " дорожек",
       "дорожки создаются по порядку: следующий доступный индекс — " &
-      $proj.sequencer.tracks.len)
+      $trackCountBefore)
 
-  var createdTrack = false
-  while proj.sequencer.tracks.len <= scan.track:
-    let id = nextTrackId(proj.sequencer.tracks)
-    proj.sequencer.tracks.add TrackFormat(
-      id: id,
-      name: "Track " & $id,
-      trackType: ord(ttMidi),
-      volume: 1.0'f32,
-      pan: 0.0'f32,
-      inputChannel: 0,
-      outputBus: 0
-    )
-    createdTrack = true
-
-  # --- клип ----------------------------------------------------------------
-  if scan.clip > proj.sequencer.tracks[scan.track].clips.len:
+  let createdTrack = trackCountBefore <= scan.track
+  # Дорожки ещё может не быть (её создадут команды ниже) — тогда у неё 0 клипов.
+  let clipCountBefore =
+    if createdTrack: 0
+    else: doc.proj.sequencer.tracks[scan.track].clips.len
+  if scan.clip > clipCountBefore:
     return usageError("клип #" & $scan.clip & " недостижим: в дорожке #" &
-      $scan.track & " клипов " &
-      $proj.sequencer.tracks[scan.track].clips.len,
+      $scan.track & " клипов " & $clipCountBefore,
       "клипы создаются по порядку: следующий доступный индекс — " &
-      $proj.sequencer.tracks[scan.track].clips.len)
+      $clipCountBefore)
 
   let notes = toNoteFormats(parsed.notes)
   let contentTicks = notationLengthTicks(parsed.notes)
@@ -594,46 +570,43 @@ proc runNotationImport(ctx: var Ctx; scan: NotationScan): Report =
       $contentTicks & " тиков)",
       "ноты не поместились бы в клип: увеличьте --length или уберите ключ")
 
-  var createdClip = false
-  if scan.clip == proj.sequencer.tracks[scan.track].clips.len:
-    let id = nextClipId(proj.sequencer.tracks[scan.track].clips)
-    proj.sequencer.tracks[scan.track].clips.add ClipFormat(
-      id: id,
-      clipType: ord(ctMidi),
-      name: "Clip " & $id,
-      startTick: 0,
-      lengthTicks: lengthTicks,
-      loopEnabled: false,
-      audioBufferId: -1,
-      resourceId: -1,
-      color: 0xFF6B6B'u32
-    )
-    createdClip = true
+  let createdClip = clipCountBefore <= scan.clip
 
-  # Файл задаёт клип целиком: ноты, длина, имя и повтор. `startTick` клипа
-  # сохраняется — импорт одной партитуры не двигает остальные клипы дорожки.
-  block:
-    let clip = addr proj.sequencer.tracks[scan.track].clips[scan.clip]
-    clip[].notes = notes
-    clip[].lengthTicks = lengthTicks
-    clip[].loopEnabled = scan.loop
-    if scan.haveName:
-      clip[].name = scan.name
-    elif createdClip and scan.name.len == 0:
-      # Имя из имени файла — подпись, по которой клип узнаётся: `lead.notes`
-      # даёт клип «lead». Это лучше, чем «Clip 7» без подсказки о содержимом.
-      let stem = extractFilename(scan.path).changeFileExt("")
-      if stem.len > 0:
-        clip[].name = stem
+  # Файл задаёт клип целиком: `--name` сильнее; при СОЗДАНИИ клипа без `--name`
+  # подписью становится имя файла (`lead.notes` → «lead»), у существующего клипа
+  # имя не трогается.
+  var clipName = ""
+  var nameSpecified = false
+  if scan.haveName:
+    clipName = scan.name
+    nameSpecified = true
+  elif createdClip:
+    clipName = extractFilename(scan.path).changeFileExt("")
+    nameSpecified = true
 
-  proj.metadata.modified = nowStamp()
+  # Импорт — ПОСЛЕДОВАТЕЛЬНОСТЬ control-команд (issue #373): та же операция, что
+  # у Editor, и она попадает в историю (одна `undo` возвращает проект до импорта).
+  var cmds: seq[ControlCommand] = @[]
+  var t = trackCountBefore
+  while t <= scan.track:
+    cmds.add addTrack("", int32(ord(ttMidi)))
+    inc t
+  if createdClip:
+    cmds.add addClip(int32(scan.track), int32(ord(ctMidi)), "",
+                     0'i32, lengthTicks, false, 0xFF6B6B'u32)
+  cmds.add setClip(int32(scan.track), int32(scan.clip), notes, lengthTicks,
+                   scan.loop, clipName, nameSpecified)
 
-  let clipRef = proj.sequencer.tracks[scan.track].clips[scan.clip]
+  let plan = doc.applyTransaction(cmds, "notation import " & scan.path)
+  if not plan.frame.isOk():
+    return frameReport(plan.frame)
+
+  let clipRef = doc.proj.sequencer.tracks[scan.track].clips[scan.clip]
   var body = %*{
     "path": scan.path,
     "project": scan.projectPath,
     "track": scan.track,
-    "trackName": proj.sequencer.tracks[scan.track].name,
+    "trackName": doc.proj.sequencer.tracks[scan.track].name,
     "createdTrack": createdTrack,
     "clip": scan.clip,
     "clipName": clipRef.name,
@@ -650,7 +623,8 @@ proc runNotationImport(ctx: var Ctx; scan: NotationScan): Report =
     CliName & " notation import — партитура в проект",
     "файл: " & scan.path & " (" & $clipRef.notes.len & " нот)",
     "проект: " & scan.projectPath,
-    "дорожка: #" & $scan.track & " «" & proj.sequencer.tracks[scan.track].name &
+    "дорожка: #" & $scan.track & " «" &
+      doc.proj.sequencer.tracks[scan.track].name &
       "»" & (if createdTrack: " (создана)" else: ""),
     "клип: #" & $scan.clip & " «" & clipRef.name & "»" &
       (if createdClip: " (создан)" else: ""),
@@ -664,9 +638,14 @@ proc runNotationImport(ctx: var Ctx; scan: NotationScan): Report =
                     lines = lines & @["не записан: " & scan.projectPath &
                                       " (--dry-run)"])
 
-  let saved = writeAtomic(scan.projectPath, proj)
+  let saved = writeAtomic(scan.projectPath, doc.proj)
   if not saved.success:
     return saveError(saved, scan.projectPath)
+  let entry = HistoryEntry(redo: plan.redo, undo: plan.undo,
+                           description: plan.description)
+  let recorded = recordEntry(scan.projectPath, entry)
+  if not recorded.isOk():
+    return frameReport(recorded)
   okReport(body = body, lines = lines & @["записан: " & scan.projectPath])
 
 # =============================================================================

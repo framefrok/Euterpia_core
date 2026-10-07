@@ -102,6 +102,7 @@ Input → Command → Core → State update → Render
 | `track.delete` | удалить дорожку | `edit` | `track.delete` | — | #87 |
 | `clip.add` | добавить клип | `edit` | `clip.add` | — | #87 |
 | `clip.delete` | удалить клип | `edit` | `clip.delete` | — | #87 |
+| `clip.set` | задать содержимое клипа | `edit` | `clip.set` | `notation` | целиком |
 | `note.add` | добавить ноту | `edit` | `note.add` | — | #87 |
 | `note.delete` | удалить ноту | `edit` | `note.delete` | — | #87 |
 | `view.timeline` | таймлайн и клипы | `view` | — | `project` | целиком |

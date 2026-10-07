@@ -445,6 +445,113 @@ proc applySetProjectInfo(doc: var Document; cmd: ControlCommand): ErrorFrame =
   doc.refreshHandles()
   okFrame()
 
+proc nextTrackId(tracks: seq[TrackFormat]): int32 =
+  ## «Максимум + 1» (issue #373): после удаления дорожки счётчик длины выдал бы
+  ## повтор id, и две дорожки стали бы неразличимы для автоматизации.
+  for track in tracks:
+    if track.id + 1 > result:
+      result = track.id + 1
+  if result < 1:
+    result = 1
+
+proc nextClipId(clips: seq[ClipFormat]): int32 =
+  for clip in clips:
+    if clip.id + 1 > result:
+      result = clip.id + 1
+  if result < 1:
+    result = 1
+
+proc applyAddTrack(doc: var Document; cmd: ControlCommand): ErrorFrame =
+  ## Добавить дорожку в конец (issue #373). Умолчания формата — здесь, а не в
+  ## клиенте: один источник для CLI, Editor и скриптов.
+  let id = nextTrackId(doc.proj.sequencer.tracks)
+  let name = if cmd.trackName.len > 0: cmd.trackName else: "Track " & $id
+  doc.proj.sequencer.tracks.add TrackFormat(
+    id: id, name: name, trackType: int(cmd.trackType),
+    volume: 1.0'f32, pan: 0.0'f32, inputChannel: 0, outputBus: 0)
+  doc.stampModified()
+  doc.refreshHandles()
+  okFrame()
+
+proc applyRemoveTrack(doc: var Document; cmd: ControlCommand): ErrorFrame =
+  let t = int(cmd.removeTrackIndex)
+  if t < 0 or t >= doc.proj.sequencer.tracks.len:
+    return errFrame(ecNotFound, "нет дорожки #" & $t,
+                    "дорожки проекта показывает: euterpia project show")
+  doc.proj.sequencer.tracks.delete(t)
+  doc.stampModified()
+  doc.refreshHandles()
+  okFrame()
+
+proc applyAddClip(doc: var Document; cmd: ControlCommand): ErrorFrame =
+  let t = int(cmd.addClipTrackIndex)
+  if t < 0 or t >= doc.proj.sequencer.tracks.len:
+    return errFrame(ecNotFound, "нет дорожки #" & $t, "")
+  let id = nextClipId(doc.proj.sequencer.tracks[t].clips)
+  let name = if cmd.addClipName.len > 0: cmd.addClipName else: "Clip " & $id
+  doc.proj.sequencer.tracks[t].clips.add ClipFormat(
+    id: id, clipType: int(cmd.addClipType), name: name,
+    startTick: cmd.addClipStartTick, lengthTicks: cmd.addClipLengthTicks,
+    loopEnabled: cmd.addClipLoopEnabled, audioBufferId: -1, resourceId: -1,
+    offsetFrames: 0, color: cmd.addClipColor)
+  doc.stampModified()
+  doc.refreshHandles()
+  okFrame()
+
+proc applyDeleteClip(doc: var Document; cmd: ControlCommand): ErrorFrame =
+  let t = int(cmd.delClipTrackIndex)
+  if t < 0 or t >= doc.proj.sequencer.tracks.len:
+    return errFrame(ecNotFound, "нет дорожки #" & $t, "")
+  let c = int(cmd.delClipIndex)
+  if c < 0 or c >= doc.proj.sequencer.tracks[t].clips.len:
+    return errFrame(ecNotFound, "нет клипа #" & $c, "")
+  doc.proj.sequencer.tracks[t].clips.delete(c)
+  doc.stampModified()
+  doc.refreshHandles()
+  okFrame()
+
+proc applySetClip(doc: var Document; cmd: ControlCommand): ErrorFrame =
+  ## SetClip content wholesale (issue #373): notes, length, loop, optionally name.
+  let t = int(cmd.setClipTrackIndex)
+  if t < 0 or t >= doc.proj.sequencer.tracks.len:
+    return errFrame(ecNotFound, "нет дорожки #" & $t, "")
+  let c = int(cmd.setClipIndex)
+  if c < 0 or c >= doc.proj.sequencer.tracks[t].clips.len:
+    return errFrame(ecNotFound, "нет клипа #" & $c, "")
+  let clip = addr doc.proj.sequencer.tracks[t].clips[c]
+  clip[].notes = cmd.setClipNotes
+  clip[].lengthTicks = cmd.setClipLengthTicks
+  clip[].loopEnabled = cmd.setClipLoopEnabled
+  if cmd.setClipNameSpecified:
+    clip[].name = cmd.setClipName
+  doc.stampModified()
+  doc.refreshHandles()
+  okFrame()
+
+proc applyRestoreTrack(doc: var Document; cmd: ControlCommand): ErrorFrame =
+  ## Вставить дорожку на её прежнее место (issue #373).
+  let t = int(cmd.restoreTrackIndex)
+  if t < 0 or t > doc.proj.sequencer.tracks.len:
+    return errFrame(ecInvalidArgument, "позиция восстановления дорожки вне диапазона",
+                    "")
+  doc.proj.sequencer.tracks.insert(cmd.restoreTrackData, t)
+  doc.stampModified()
+  doc.refreshHandles()
+  okFrame()
+
+proc applyRestoreClip(doc: var Document; cmd: ControlCommand): ErrorFrame =
+  let t = int(cmd.restoreClipTrackIndex)
+  if t < 0 or t >= doc.proj.sequencer.tracks.len:
+    return errFrame(ecNotFound, "нет дорожки #" & $t, "")
+  let c = int(cmd.restoreClipIndex)
+  if c < 0 or c > doc.proj.sequencer.tracks[t].clips.len:
+    return errFrame(ecInvalidArgument, "позиция восстановления клипа вне диапазона",
+                    "")
+  doc.proj.sequencer.tracks[t].clips.insert(cmd.restoreClipData, c)
+  doc.stampModified()
+  doc.refreshHandles()
+  okFrame()
+
 proc applyCommand*(doc: var Document; cmd: ControlCommand): ErrorFrame =
   ## ЕДИНАЯ точка исполнения операций над документом (§65): её зовут CLI,
   ## Editor, тесты и скрипты — и все получают один и тот же результат.
@@ -465,6 +572,13 @@ proc applyCommand*(doc: var Document; cmd: ControlCommand): ErrorFrame =
   of ccSetParameter: doc.applySetParameter(cmd)
   of ccRestoreNodeState: doc.applyRestoreNodeState(cmd)
   of ccSetProjectInfo: doc.applySetProjectInfo(cmd)
+  of ccAddTrack: doc.applyAddTrack(cmd)
+  of ccRemoveTrack: doc.applyRemoveTrack(cmd)
+  of ccAddClip: doc.applyAddClip(cmd)
+  of ccDeleteClip: doc.applyDeleteClip(cmd)
+  of ccSetClip: doc.applySetClip(cmd)
+  of ccRestoreTrack: doc.applyRestoreTrack(cmd)
+  of ccRestoreClip: doc.applyRestoreClip(cmd)
   else:
     errFrame(ecUnsupportedCommand,
              "команда " & commandName(cmd.kind) & " объявлена, но ещё не реализована",
@@ -592,6 +706,64 @@ proc applyCommandRecording*(doc: var Document; cmd: ControlCommand):
                              m.sampleRate, m.tempo,
                              m.timeSignature.numerator,
                              m.timeSignature.denominator)])
+  of ccAddTrack:
+    let indexBefore = doc.proj.sequencer.tracks.len
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, @[removeTrack(int32(indexBefore))])
+  of ccAddClip:
+    let trackIndex = int(cmd.addClipTrackIndex)
+    if trackIndex < 0 or trackIndex >= doc.proj.sequencer.tracks.len:
+      return (doc.applyCommand(cmd), @[])
+    let clipIndexBefore = doc.proj.sequencer.tracks[trackIndex].clips.len
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, @[deleteClip(int32(trackIndex), int32(clipIndexBefore))])
+  of ccSetClip:
+    let t = int(cmd.setClipTrackIndex)
+    let c = int(cmd.setClipIndex)
+    if t < 0 or t >= doc.proj.sequencer.tracks.len or
+       c < 0 or c >= doc.proj.sequencer.tracks[t].clips.len:
+      return (doc.applyCommand(cmd), @[])
+    let prev = doc.proj.sequencer.tracks[t].clips[c]
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, @[setClip(int32(t), int32(c), prev.notes, prev.lengthTicks,
+                      prev.loopEnabled, prev.name, true)])
+  of ccRemoveTrack:
+    # Снимок ДО удаления — им восстанавливается дорожка со всеми клипами.
+    let t = int(cmd.removeTrackIndex)
+    if t < 0 or t >= doc.proj.sequencer.tracks.len:
+      return (doc.applyCommand(cmd), @[])
+    let snap = doc.proj.sequencer.tracks[t]
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, @[restoreTrack(int32(t), snap)])
+  of ccDeleteClip:
+    let t = int(cmd.delClipTrackIndex)
+    let c = int(cmd.delClipIndex)
+    if t < 0 or t >= doc.proj.sequencer.tracks.len or
+       c < 0 or c >= doc.proj.sequencer.tracks[t].clips.len:
+      return (doc.applyCommand(cmd), @[])
+    let snap = doc.proj.sequencer.tracks[t].clips[c]
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, @[restoreClip(int32(t), int32(c), snap)])
+  of ccRestoreTrack:
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, @[removeTrack(cmd.restoreTrackIndex)])
+  of ccRestoreClip:
+    let frame = doc.applyCommand(cmd)
+    if not frame.isOk():
+      return (frame, @[])
+    (frame, @[deleteClip(cmd.restoreClipTrackIndex, cmd.restoreClipIndex)])
   else:
     # Команда не реализована или её откат не определён: применяем как обычно,
     # но откат не обещаем.
