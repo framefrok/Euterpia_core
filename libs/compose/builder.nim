@@ -64,6 +64,20 @@ proc paramNames*(reg: NodeRegistry; typeId: string): seq[string] =
   for k in 0 ..< int(d.paramCount):
     result.add readFixed(d.params[k].name)
 
+proc paramIdByName*(reg: NodeRegistry; typeId, name: string): int =
+  ## Числовой id параметра по имени или -1 (нет типа/параметра). Резолв — по
+  ## дескриптору, как в `scene_loader` (`params[idx].id`), а не по зашитой
+  ## таблице: поэтому автоматизация Compose попадает ровно в тот параметр,
+  ## который читает нода (#COMPOSE-011).
+  let entry = reg.findNodeType(typeId)
+  if entry.isNil:
+    return -1
+  let d = entry.desc
+  for k in 0 ..< int(d.paramCount):
+    if readFixed(d.params[k].name) == name:
+      return int(d.params[k].id)
+  -1
+
 proc nodeProblems*(reg: NodeRegistry; typeId, name: string;
                    overrides: openArray[(string, float32)] = []): seq[string] =
   ## Что не так с нодой ДО сборки проекта. Пустой список — всё в порядке.

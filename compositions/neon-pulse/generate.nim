@@ -149,7 +149,18 @@ discard song.setParam("bell", "level", -10.0'f32)
 discard song.play("arp", arp, roleArp, nodeType = "euterpia.piano").during("verse", "drop")
 discard song.setParam("arp", "tone", 0.6'f32)
 discard song.setParam("arp", "decay", 1.4'f32)
-discard song.setParam("arp", "level", -13.0'f32)
+discard song.gain("arp", -13.0'f32)     # production-команда: level ноды (COMPOSE-012)
+discard song.pan("arp", 0.25'f32)       # чуть вправо — не спорит с колоколом
+
+# ============================================================================
+# Автоматизация (COMPOSE-011): точки в тактах, значения — в единицах параметра
+# ============================================================================
+
+# Пад вплывает в intro (мягкая кривая), сумматор поднимается к дропу.
+discard song.automate(ramp("pad", "level", 0.0, 8.bars, -32.0, -13.0,
+                           curveSmooth))
+discard song.automate(ramp(MixTrack, "level", 32.0, 4.bars, -8.0, -6.0,
+                           curveLinear))
 
 # ============================================================================
 # Компиляция: проверка, партитуры, проект, MIDI, звук

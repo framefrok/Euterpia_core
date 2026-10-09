@@ -16,6 +16,8 @@
 import compose/form
 import compose/arrangement
   # Piece/Voice/Play/Section — музыкальная модель пьесы.
+import compose/automation
+  # AutoLane/MixTrack — проверка дорожек автоматизации.
 
 {.push raises: [].}
 
@@ -70,5 +72,23 @@ proc validate*(c: Piece): seq[string] =
           if not c.song.hasSection(name):
             result.add where & ": ошибка: секции «" & name &
                        "» нет в форме (опечатка?)"
+
+  # Автоматизация: дорожка должна существовать (в пьесе или быть «@mix»),
+  # иначе дорожка исчезнет при компиляции (#COMPOSE-011).
+  for lane in c.automation:
+    if lane.track == MixTrack:
+      continue
+    var found = false
+    for v in c.voices:
+      if v.trackName == lane.track:
+        found = true
+        break
+    if not found:
+      result.add "automation («" & lane.track & "».«" & lane.param &
+                 "»): ошибка: дорожки «" & lane.track &
+                 "» нет в пьесе (допустимо «" & MixTrack & "» для сумматора)"
+    if lane.points.len == 0:
+      result.add "automation («" & lane.track & "».«" & lane.param &
+                 "»): внимание: пустая дорожка"
 
 {.pop.}

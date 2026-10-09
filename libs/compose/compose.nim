@@ -38,6 +38,7 @@ import compose/random
 import compose/form
 import compose/melody
 import compose/variation
+import compose/automation
 import compose/arrangement
 import compose/validate
 import compose/generators/drums
@@ -63,6 +64,7 @@ export random
 export form
 export melody
 export variation
+export automation
 export arrangement
 export validate
 export drums

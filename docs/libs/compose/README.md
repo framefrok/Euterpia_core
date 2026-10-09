@@ -94,6 +94,7 @@ nim c -r --nimcache:build/nc_my_song --out:build/my_song my_song.nim
 | `compose/random` | детерминированный RNG: `musicRandom(seed)` |
 | `compose/form` | секции песни: intro/verse/chorus/drop/outro |
 | `compose/variation` | развитие мотива: инверсия, ретроград, фрагмент, регистр |
+| `compose/automation` | автоматизация: `autom`/`ramp`/`fadeIn`, точки в тактах |
 | `compose/arrangement` | пьеса: `play`/`during`/`harmony`/`build`/`toArrangement` |
 | `compose/generators/drums` | киты и филлы: `trapKit`, `backbeatSnare`, `fill` |
 | `compose/generators/bass` | фигуры баса: `bassLine(bsRoot/bsWalking/…)` |
@@ -233,6 +234,36 @@ discard song.setParam("bass", "level", -8.0'f32)
 
 Голоса можно собирать и вручную (`voice(...)` + `v.play(...)` + `c.add v`) —
 тогда доступно несколько размещений на голос.
+
+### Автоматизация и микс (COMPOSE-011/012)
+
+Точки — в тактах, значения — в единицах параметра (`level` — дБ, `pan` —
+[-1, 1]). Своего движка нет: всё компилируется в `AutomationLaneFormat` Core,
+поэтому офлайн-рендер проигрывает автоматизацию как обычно.
+
+```nim
+discard song.automate(ramp("pad", "level", 0.0, 8.bars, -32.0, -13.0,
+                           curveSmooth))        # вплывание пада
+discard song.automate(autom("bell", "pan", 0.0, -0.6).at(24.0, 0.6))
+discard song.automate(ramp(MixTrack, "level", 32.0, 4.bars, -8.0, -6.0))
+```
+
+Кривые: `curveLinear`, `curveStep`, `curveSmooth`, `curveBezier` — ординалы
+совпадают с `AutomationCurve` ядра (это стережёт тест). `MixTrack` (`"@mix"`)
+адресует сумматор. `fadeIn`/`fadeOut` — те же `ramp` с осмысленным именем.
+
+Микс-команды:
+
+```nim
+discard song.gain("bass", -8.0f32)     # level ноды (дБ)
+discard song.pan("arp", 0.25f32)       # панорама [-1, 1]
+discard song.mute("drums")             # дорожка молчит, ноты остаются
+discard song.unmute("drums")
+discard song.solo("bell")              # остальные выключаются (через mute)
+```
+
+Неизвестная дорожка или параметр автоматизации — ошибка `validate(arr)` **до**
+сборки, а не молчаливое исчезновение дорожки.
 
 ### Детерминизм
 

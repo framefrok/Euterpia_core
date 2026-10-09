@@ -32,6 +32,7 @@ import compose/harmony
 import compose/scale
 import compose/melody
 import compose/variation
+import compose/automation
 import compose/song
   # song.Instrument/Arrangement/add — единый формат проекта ядра.
 
@@ -76,12 +77,14 @@ type
     ## Голос: инструмент + несколько размещений пьес. Несколько `play`
     ## позволяют одной дорожке звучать разными паттернами в разных секциях
     ## (например, бас: паттерн в verse, филл в drop). `params` — переопределения
-    ## параметров ноды (level, tone, …), уходят в `song.Instrument`.
+    ## параметров ноды (level, tone, …), уходят в `song.Instrument`;
+    ## `mute` — выключенная дорожка (COMPOSE-012).
     trackName*: string
     nodeType*: string
     notesName*: string
     program*: int
     params*: seq[tuple[name: string; value: float32]]
+    mute*: bool
     plays*: seq[Play]
 
   Piece* = object
@@ -95,6 +98,9 @@ type
     key*: Scale
       ## Тональность — ступени мелодий (`degree`); по умолчанию C major,
       ## задаётся вместе с гармонией: `song.harmony(prog, minorScale("A"))`.
+    automation*: seq[AutoLane]
+      ## Дорожки автоматизации (COMPOSE-011): точки в тактах, компилируются
+      ## в `AutomationLaneFormat` при `toArrangement`.
 
 # ============================================================================
 # Голоса
@@ -286,6 +292,58 @@ proc setParam*(c: var Piece; trackName: string; name: string;
   c.voices[i].params.add (name, value)
   c
 
+# ============================================================================
+# Production-команды (#COMPOSE-012)
+# ============================================================================
+#
+# Громкость и панорама идут параметрами ноды (`level`/`pan`) — это тот путь,
+# который гарантированно применяется в рендере (у каждого инструмента есть
+# эти параметры). Mute — свойство дорожки Core (`TrackFormat.mute`), его
+# понимает секвенсор. Solo offline-рендер не знает, поэтому выражается через
+# mute остальных (честный результат, а не флаг, который никто не читает).
+# Ошибки имён параметров ловит `validate(arr)` — то же правило, что #311.
+
+proc gain*(c: var Piece; trackName: string; db: float32): var Piece {.discardable.} =
+  ## Уровень дорожки в дБ: `song.gain("bass", -9.0f32)`.
+  c.setParam(trackName, "level", db)
+  c
+
+proc pan*(c: var Piece; trackName: string; value: float32): var Piece {.discardable.} =
+  ## Панорама [-1, 1]: `song.pan("bell", 0.4f32)`.
+  c.setParam(trackName, "pan", value)
+  c
+
+proc mute*(c: var Piece; trackName: string): var Piece {.discardable.} =
+  ## Выключить дорожку (ноты остаются в проекте — их видно и можно вернуть).
+  for v in c.voices.mitems:
+    if v.trackName == trackName:
+      v.mute = true
+      break
+  c
+
+proc unmute*(c: var Piece; trackName: string): var Piece {.discardable.} =
+  ## Вернуть дорожку в микс.
+  for v in c.voices.mitems:
+    if v.trackName == trackName:
+      v.mute = false
+      break
+  c
+
+proc solo*(c: var Piece; trackName: string): var Piece {.discardable.} =
+  ## Оставить только эту дорожку: остальные выключаются. Выражается через
+  ## mute — offline-рендер Core «solo» не читает, а mute читает.
+  for v in c.voices.mitems:
+    v.mute = v.trackName != trackName
+  c
+
+proc automate*(c: var Piece; lane: AutoLane): var Piece {.discardable.} =
+  ## Добавить дорожку автоматизации (#COMPOSE-011): точки в тактах, значения —
+  ## в единицах параметра (`level` — дБ, `pan` — [-1, 1], `cutoff` — Гц).
+  ## Дорожка попадёт в проект, когда `toArrangement`/`buildProject` найдут
+  ## дорожку по имени; `@mix` адресует сумматор.
+  c.automation.add lane
+  c
+
 
 # ============================================================================
 # Компиляция: секции + пьесы → такты формы (#COMPOSE-008/024/033/047)
@@ -440,7 +498,10 @@ proc toArrangement*(c: Piece; sampleRate: float32 = 48000.0f32): song.Arrangemen
     var inst = song.instrument(v.nodeType, v.trackName, v.notesName)
     for pv in v.params:
       inst.params.add pv
-    result.add(inst, p)
+    result.add(inst, p, mute = v.mute)
+  # Автоматизация: точки и параметры компилирует `buildProject` (там известны
+  # имена→id и такты→тики), поэтому здесь только переносим замысел.
+  result.automation = c.automation
 
 proc sectionCount*(c: Piece): int =
   ## Число секций формы.
