@@ -29,6 +29,7 @@ import compose/harmony
 import compose/pattern
 import compose/form
 import compose/melody
+import compose/arrangement
 import compose/song
 import compose/engine
 import compose/progress
@@ -45,6 +46,7 @@ export harmony
 export pattern
 export form
 export melody
+export arrangement
 export song
 export engine
 export progress
