@@ -41,6 +41,7 @@ import compose/variation
 import compose/automation
 import compose/arrangement
 import compose/validate
+import compose/analyze
 import compose/generators/drums
 import compose/generators/bass
 import compose/generators/melody as melodyGen
@@ -67,6 +68,7 @@ export variation
 export automation
 export arrangement
 export validate
+export analyze
 export drums
 export bass
 export melodyGen

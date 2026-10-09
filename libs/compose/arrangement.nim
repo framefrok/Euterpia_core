@@ -111,6 +111,24 @@ proc voice*(trackName, nodeType, notesName: string; program: int = 0): Voice =
   Voice(trackName: trackName, nodeType: nodeType, notesName: notesName,
         program: program)
 
+proc roleName*(role: TrackRole): string =
+  ## Человеческое имя роли — для отчётов анализатора и отладки.
+  case role
+  of roleDrums: "drums"
+  of roleBass: "bass"
+  of roleSubBass: "sub-bass"
+  of roleLead: "lead"
+  of roleCounterLead: "counter-lead"
+  of rolePad: "pad"
+  of roleChord: "chord"
+  of roleArp: "arp"
+  of roleMelody: "melody"
+  of roleTexture: "texture"
+  of roleFx: "fx"
+  of roleVocal: "vocal"
+  of rolePercussion: "percussion"
+  of roleCustom: "custom"
+
 # Размещения пьес мутируют `var Voice`/`var Piece` и возвращают ту же
 # переменную: цепочка `bell.play("theme", theme).during("intro")` работает
 # через проки `var` (возврат `var T` сохраняет привязку к исходной
