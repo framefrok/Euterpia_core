@@ -33,6 +33,8 @@ import compose/scale
 import compose/melody
 import compose/variation
 import compose/automation
+import compose/ir
+import compose/compiler
 import compose/song
   # song.Instrument/Arrangement/add — единый формат проекта ядра.
 
@@ -245,8 +247,9 @@ proc harmony*(c: var Piece; p: Progression; s: Scale): var Piece {.discardable.}
 # `seq` протух бы при следующем `add`, а сама переменная пьесы живёт у
 # вызывающего.
 
-proc ensureVoice(c: var Piece; trackName: string; nodeType: string): int =
+proc ensureVoice*(c: var Piece; trackName: string; nodeType: string): int =
   ## Индекс голоса: существующий по имени или созданный с нодой `nodeType`.
+  ## Нужен и `play`, и пресетам (`compose/preset`), и ручной сборке голосов.
   for i, v in c.voices:
     if v.trackName == trackName:
       return i
@@ -472,14 +475,25 @@ proc composePart(v: Voice; frm: Song; prog: Progression; key: Scale;
         continue
       let bars = composeSection(pl, s, sectionBars, prog, key, beatsPerBar)
       for i in 0 ..< min(sectionBars, bars.len):
+        # Холст секции — такты-паузы (velocity 100 по умолчанию). Если в нём
+        # ещё нет нот, velocity берём из пьесы: иначе `max` с холстом всегда
+        # давал бы 100 и терял бы гуманизацию (вниз). Когда ноты уже есть
+        # (несколько пьес в секции) — громче выигрывает.
+        var canvasHasNotes = false
+        for ev in collected[i].events:
+          if ev.pitches.len > 0:
+            canvasHasNotes = true
+            break
+        let vel = if canvasHasNotes: max(collected[i].vel, bars[i].vel)
+                  else: bars[i].vel
         collected[i] = Bar(
           events: mergeEvents(collected[i].events, bars[i].events, beatsPerBar),
-          vel: max(collected[i].vel, bars[i].vel))
+          vel: vel)
     for b in collected:
       result.add b
 
 # ============================================================================
-# Компиляция композиции: build (абсолютные ноты) и toArrangement (#COMPOSE-024)
+# Компиляция композиции: resolve → IR, build и toArrangement (#COMPOSE-024/047)
 # ============================================================================
 
 proc hasSoundNotes(p: Part): bool =
@@ -490,36 +504,47 @@ proc hasSoundNotes(p: Part): bool =
         return true
   false
 
-proc build*(c: Piece): seq[NoteFormat] =
-  ## Ноты всей пьесы с абсолютными позициями: `startTick` отсчитывается от
-  ## начала песни (молчащие секции — паузы), канал = индекс голоса. Это тот
-  ## же результат, что попадёт в клипы Core, но без построения проекта —
-  ## проверить аранжировку до генерации `ProjectFormat` (#COMPOSE-008/046).
+proc resolve*(c: Piece; sampleRate: float32 = 48000.0f32): CompositionIR =
+  ## Резолвер (COMPOSE-047): высокоуровневая пьеса → `CompositionIR` с
+  ## абсолютными тиками. Единственный источник истины для `build` и
+  ## `toArrangement`: и ноты, и раскладка считаются отсюда, поэтому они не
+  ## могут разойтись. Молчащие голоса (нет ни одной звучащей ноты) в IR не
+  ## попадают — как и в раскладку.
+  result.title = c.song.title
+  result.tempo = float32(c.song.tempo)
+  result.sampleRate = sampleRate
+  result.beatsPerBar = float32(c.song.beatsPerBar)
+  result.key = $c.key
+  for s in c.song.sections:
+    result.sections.add SectionIR(name: s.name, kind: kindName(s.kind),
+                                  startBar: s.startBar, lengthBars: s.lengthBars)
   var channel = 0
   for v in c.voices:
     let p = composePart(v, c.song, c.prog, c.key, c.song.beatsPerBar)
-    let notes = p.toNotes(channel = channel mod 16)
-    if notes.len > 0:
-      result.add notes
+    if p.hasSoundNotes:
+      var role = roleCustom
+      for pl in v.plays:
+        if pl.role != roleCustom:
+          role = pl.role
+          break
+      var track = TrackIR(name: v.trackName, nodeType: v.nodeType,
+                          notesName: v.notesName, role: roleName(role),
+                          params: v.params, mute: v.mute)
+      track.events = eventsFrom(p, channel mod 16)
+      result.tracks.add track
     inc channel
+  result.automation = c.automation
+
+proc build*(c: Piece): seq[NoteFormat] =
+  ## Ноты всей пьесы с абсолютными позициями: `startTick` отсчитывается от
+  ## начала песни (молчащие секции — паузы), канал = индекс голоса. Это
+  ## результат резолвера (`resolve`) — тот же, что попадёт в клипы Core.
+  c.resolve().irNotes()
 
 proc toArrangement*(c: Piece; sampleRate: float32 = 48000.0f32): song.Arrangement =
   ## Скомпилировать композицию в `song.Arrangement` (готовый к `writeProject`
-  ## /`toJson`/`validate`/`render`). Имя/темп — из формы. Клип каждой дорожки
-  ## покрывает всю песню, поэтому все ноты лежат внутри клипа и их позиции
-  ## совпадают с `build`. Голос без звука не даёт дорожки.
-  result = song.arrangement(c.song.title, float32(c.song.tempo), sampleRate)
-  for v in c.voices:
-    let p = composePart(v, c.song, c.prog, c.key, c.song.beatsPerBar)
-    if not p.hasSoundNotes:
-      continue
-    var inst = song.instrument(v.nodeType, v.trackName, v.notesName)
-    for pv in v.params:
-      inst.params.add pv
-    result.add(inst, p, mute = v.mute)
-  # Автоматизация: точки и параметры компилирует `buildProject` (там известны
-  # имена→id и такты→тики), поэтому здесь только переносим замысел.
-  result.automation = c.automation
+  ## /`toJson`/`validate`/`render`). Путь: `resolve` (IR) → `compile`.
+  compile(c.resolve(sampleRate), sampleRate)
 
 proc sectionCount*(c: Piece): int =
   ## Число секций формы.

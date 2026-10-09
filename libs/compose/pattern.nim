@@ -154,15 +154,15 @@ proc quantize*(p: Pattern; grid: float): Pattern =
   for i in 1 ..< st.len:
     newStart.add round(st[i] / grid) * grid
   # Пересобираем длительности как разницу соседних стартов. Последнее
-  # событие сохраняет свою длину (его конец не квантуем — иначе паттерн
-  ## «поплывёт» по длине).
+  # событие тянется ровно до конца фигуры: иначе сдвинутый старт «вынес бы»
+  # хвост за длину паттерна — такт перебегал бы сетку (дрейф в клипах).
   var evs: seq[NoteEvent]
   for i, e in p.events:
     var dur: float
     if i + 1 < newStart.len:
       dur = max(0.0, newStart[i + 1] - newStart[i])
     else:
-      dur = e.beats
+      dur = max(0.0, p.lengthBeats - newStart[i])
     var ne = e
     ne.beats = dur
     evs.add ne
@@ -240,7 +240,9 @@ proc humanize*(p: Pattern; timing: float; velocity: int; rngSeed: int = 12345): 
     if i + 1 < newStart.len:
       dur = max(0.0, newStart[i + 1] - newStart[i])
     else:
-      dur = e.beats
+      # Хвост — до конца фигуры: гуманизация не должна удлинять паттерн
+      # (иначе такты «уезжают» и клип перебегает сетку).
+      dur = max(0.0, p.lengthBeats - newStart[i])
     var ne = e
     ne.beats = dur
     evs.add ne
@@ -370,7 +372,8 @@ proc swing*(p: Pattern; amount: float32; grid: float = 0.5): Pattern =
     if i + 1 < newStart.len:
       dur = max(0.0, newStart[i + 1] - newStart[i])
     else:
-      dur = e.beats
+      # Хвост — до конца фигуры: свинг не удлиняет паттерн.
+      dur = max(0.0, p.lengthBeats - newStart[i])
     var ne = e
     ne.beats = dur
     evs.add ne
