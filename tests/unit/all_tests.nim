@@ -67,5 +67,6 @@ import test_graph_check
 import test_render_progress
 import test_compose_diagnostics
 import test_compose_musical
+import test_compose_production
 import test_docs_instruments
 import test_docs_embedding

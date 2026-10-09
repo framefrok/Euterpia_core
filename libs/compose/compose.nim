@@ -39,9 +39,14 @@ import compose/form
 import compose/melody
 import compose/variation
 import compose/automation
+import compose/ir
+import compose/compiler
 import compose/arrangement
 import compose/validate
 import compose/analyze
+import compose/preset
+import compose/graph
+import compose/sound
 import compose/generators/drums
 import compose/generators/bass
 import compose/generators/melody as melodyGen
@@ -66,9 +71,14 @@ export form
 export melody
 export variation
 export automation
+export ir
+export compiler
 export arrangement
 export validate
 export analyze
+export preset
+export graph
+export sound
 export drums
 export bass
 export melodyGen
