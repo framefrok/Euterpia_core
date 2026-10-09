@@ -13,7 +13,7 @@
 #   * паттерны: `repeat`/`reverse`/`transpose`/`truncate`/`toMotif` и
 #     детерминированный `humanize` (один seed — один результат) (#COMPOSE-003).
 
-import std/unittest
+import std/[unittest, strutils]
 
 import transport
 
@@ -250,6 +250,9 @@ import compose/song
 import compose/rhythm
 import compose/random
 import compose/generators/drums
+import compose/validate
+import compose/generators/bass
+import compose/generators/melody as genMelody
 
 suite "Compose arrangement (COMPOSE-008, COMPOSE-024)":
   test "bell.play(theme).during(intro) компилируется в Part со стартом":
@@ -538,3 +541,139 @@ suite "Compose determinism (COMPOSE-041)":
       check a[i].velocity == b[i].velocity
       check a[i].duration == b[i].duration
       check a[i].channel == b[i].channel
+
+suite "Compose musical validator (COMPOSE-029)":
+  test "пустая форма — ошибка":
+    let s = piece("X", 120.0)
+    check hasErrors(validate(s))
+
+  test "корректная пьеса — ни ошибок, ни предупреждений":
+    var s = piece("X", 120.0)
+    discard s.section("intro", 4.bars)
+    discard s.harmony(progression(@["Am"]), minorScale("A"))
+    let m = melody("m", chordTone(1, 4.0))
+    discard s.play("bell", m, roleLead).during("intro")
+    check validate(s).len == 0
+
+  test "мелодия без гармонии — предупреждение, не ошибка":
+    var s = piece("X", 120.0)
+    discard s.section("intro", 4.bars)
+    let m = melody("m", chordTone(1, 4.0))
+    discard s.play("bell", m, roleLead).during("intro")
+    let pr = validate(s)
+    check not hasErrors(pr)
+    var found = false
+    for p in pr:
+      if p.find("гармони") >= 0:
+        found = true
+    check found
+
+  test "размещение в несуществующей секции — ошибка":
+    var s = piece("X", 120.0)
+    discard s.section("intro", 4.bars)
+    let pat = pattern("p", n(60, 4.0))
+    discard s.play("x", pat, roleLead).during("typo")
+    check hasErrors(validate(s))
+
+  test "дубли имён дорожек — ошибка":
+    var s = piece("X", 120.0)
+    discard s.section("intro", 4.bars)
+    let pat = pattern("p", n(60, 4.0))
+    var v1 = voice("a", "euterpia.osc", "n1")
+    v1.play("p", pat).during("intro")
+    var v2 = voice("a", "euterpia.osc", "n2")
+    v2.play("p", pat).during("intro")
+    s.add v1
+    s.add v2
+    check hasErrors(validate(s))
+
+  test "пустое размещение — ошибка":
+    var s = piece("X", 120.0)
+    discard s.section("intro", 4.bars)
+    var v = voice("a", "euterpia.osc", "n1")
+    v.plays.add Play(partName: "empty")     # ни паттерна, ни мелодии
+    v.plays[0].sections = @["intro"]
+    s.add v
+    check hasErrors(validate(s))
+
+suite "Compose bass generators (COMPOSE-017)":
+  let prog = progression(@["Am", "F"])
+  let key = minorScale("A")
+
+  test "root-бас: корень аккорда, транспонированный вниз":
+    let e = bassLine(bsRoot).transpose(-24).render(prog, key)
+    check e.len == 2
+    check e[0].pitches == @[45'u8]      # A2 (Am)
+    check e[1].pitches.len == 0         # дыхание в конце такта
+    # второй такт — корень следующего аккорда прогрессии:
+    let e2 = melody("r", chordTone(1, 4.0)).transpose(-24).render(
+      prog, key, startBar = 1)
+    check e2[0].pitches == @[41'u8]     # F2 (F)
+
+  test "octave-бас: корень и октава":
+    let e = bassLine(bsOctave).transpose(-24).render(prog, key)
+    check e[0].pitches == @[45'u8]
+    check e[1].pitches == @[57'u8]   # A2 + октава
+
+  test "walking-бас идёт по аккордовым тонам":
+    let e = bassLine(bsWalking).render(prog, key)
+    check e.len == 4
+    check e[0].pitches == @[69'u8]   # корень Am
+    check e[1].pitches == @[72'u8]   # терция Am
+
+  test "pedal-бас держит тонику лада, а не аккорд":
+    let e = bassLine(bsPedal).render(prog, key)
+    check e.len == 1
+    check e[0].pitches == @[69'u8]   # A, хотя прогрессия начинается с Am
+    check e[0].beats == 4.0
+
+  test "doubledBass даёт пару нота + октава":
+    let e = doubledBass(bassLine(bsRoot)).render(prog, key)
+    check e[0].pitches == @[69'u8, 81'u8]
+
+suite "Compose melody generator (COMPOSE-018)":
+  let prog = progression(@["Am", "F", "C", "G"])
+  let key = minorScale("A")
+
+  test "один seed — одна мелодия":
+    let a = generateMelody(prog, key, seed = 42, bars = 2)
+    let b = generateMelody(prog, key, seed = 42, bars = 2)
+    check a.steps.len == b.steps.len
+    var same = true
+    for i in 0 ..< a.steps.len:
+      if a.steps[i].tone != b.steps[i].tone: same = false
+      if a.steps[i].beats != b.steps[i].beats: same = false
+      if a.steps[i].degree != b.steps[i].degree: same = false
+      if a.steps[i].chordDegree != b.steps[i].chordDegree: same = false
+    check same
+
+  test "разные seed — разные мелодии":
+    let a = generateMelody(prog, key, seed = 1, bars = 4)
+    let b = generateMelody(prog, key, seed = 2, bars = 4)
+    var diff = false
+    for i in 0 ..< min(a.steps.len, b.steps.len):
+      if a.steps[i].tone != b.steps[i].tone:
+        diff = true
+    check diff
+
+  test "коридор удерживает регистр":
+    let m = generateMelody(prog, key, seed = 7, bars = 2, center = 72, range = 5)
+    let e = m.render(prog, key)
+    check e.len == m.steps.len
+    for ev in e:
+      for p in ev.pitches:
+        check p >= 72 - 5 and p <= 72 + 5
+
+  test "density 0 — одни паузы":
+    let m = generateMelody(prog, key, seed = 3, bars = 1, density = 0.0)
+    for s in m.steps:
+      check s.tone == mtRest
+
+  test "respond зеркалит вторую половину шагов":
+    let m = melody("m", chordTone(1), chordTone(2), chordTone(3), degree(1))
+    let r = respond(m)
+    check r.steps.len == 4
+    check r.steps[0].chordDegree == 1
+    check r.steps[1].chordDegree == 2
+    check r.steps[2].tone == mtDegree   # последний шаг вызова — первым в ответе
+    check r.steps[3].chordDegree == 3

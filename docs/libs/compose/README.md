@@ -96,6 +96,9 @@ nim c -r --nimcache:build/nc_my_song --out:build/my_song my_song.nim
 | `compose/variation` | развитие мотива: инверсия, ретроград, фрагмент, регистр |
 | `compose/arrangement` | пьеса: `play`/`during`/`harmony`/`build`/`toArrangement` |
 | `compose/generators/drums` | киты и филлы: `trapKit`, `backbeatSnare`, `fill` |
+| `compose/generators/bass` | фигуры баса: `bassLine(bsRoot/bsWalking/…)` |
+| `compose/generators/melody` | генератор мелодии: `generateMelody(seed)`, `respond` |
+| `compose/validate` | музыкальная проверка пьесы (до компиляции) |
 | `compose/song` | раскладка: «инструмент + партия», запись `.eproj`/`.notes` |
 | `compose/engine` | рендер проекта в WAV (`loadScene` + `renderToWav`) |
 | `compose/midi` | Standard MIDI File: `writeMidi`, `writeMidiTracks` |
@@ -184,6 +187,27 @@ bass.groove(0.54, seed = 42)               # свинг + гуманизация
 `offbeat`, `tresillo`, `clave`, `trap16`. Барабаны: `kick`, `snare`, `hats`,
 `clap`, `backbeatSnare`, `trapKick`, `trapHats`, `trapKit`, `boomBapKit`,
 `fill(seed)`, `roll`, `rollTo`.
+
+### Генераторы (алгоритмический материал)
+
+Бас — фигурой, мелодия — из seed'а; оба выдают **мелодии**, а не питчи, и
+поэтому автоматически следуют `harmony`:
+
+```nim
+discard song.play("bass", bassLine(bsWalking).transpose(-24), roleBass,
+                  nodeType = "euterpia.organ").during("verse", "drop")
+
+let lead = generateMelody(prog, key, seed = 12345, bars = 4,
+                          center = 72, range = 7, density = 0.6)
+discard song.play("lead", lead, roleLead, nodeType = "euterpia.bell").during("chorus")
+
+let answer = respond(lead)      # call & response: вторая половина — зеркало
+```
+
+Фигуры баса: `bsRoot`, `bsOctave`, `bsWalking`, `bsArp`, `bsSyncopated`,
+`bsPedal`; плюс `doubledBass` (нота + октава одним шагом). У `generateMelody`
+коридор `center ± range` держит регистр, `density` — плотность, `seed` —
+полная воспроизводимость.
 
 ### Размещение по секциям
 
@@ -448,6 +472,18 @@ ok=false
 ```nim
 for problem in validate(arr):
   echo problem
+```
+
+- **Музыкальная проверка идёт раньше технической**: `validate(song)` для
+  `Piece` ловит замысел — пустую форму, размещение в несуществующей секции,
+  мелодию без гармонии, пустой паттерн, дубли имён дорожек (#COMPOSE-029);
+  строки те же («ошибка:»/«внимание:»), поэтому `hasErrors(problems)` работает
+  и там:
+
+```nim
+let problems = validate(song)     # Piece: форма/голоса/размещения/гармония
+if hasErrors(problems):
+  for p in problems: echo p
 ```
 
 - Свой файловый/проектный путь: `writeProjectChecked(arr, path, problems)`

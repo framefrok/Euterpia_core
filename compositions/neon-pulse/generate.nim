@@ -76,11 +76,9 @@ let bass808 = melody("bass808",
 # Пад: трезвучие текущего такта, само меняется вместе с прогрессией.
 let pad = melody("neonPad", stack([1, 3, 5], 4.0))
 
-# Арпеджио восьмыми по ступеням аккорда (октавой ниже колокола).
-let arp = melody("neonArp",
-  chordTone(1, 0.5), chordTone(2, 0.5), chordTone(3, 0.5), chordTone(2, 0.5),
-  chordTone(1, 0.5), chordTone(2, 0.5), chordTone(3, 0.5),
-  chordTone(2, 0.5)).transpose(-12)
+# Арпеджио восьмыми по ступеням аккорда (октавой ниже колокола) — фигурой
+# генератора баса: `bsArp` = вверх-вниз по аккордовым тонам (COMPOSE-017).
+let arp = bassLine(bsArp).transpose(-12)
 
 # Колокольные «метки» для break: корень аккорда на весь такт.
 let bellHit = melody("bellHit", chordTone(1, 4.0))
@@ -162,10 +160,15 @@ let notes = song.build()
 echo "Neon Pulse: ", song.endBar, " тактов, ", BPM, " BPM, нот: ", notes.len
 echo "Форма: ", song.song
 
+# Музыкальная проверка ЗАМЫСЛА до компиляции (COMPOSE-029): форма, размещения,
+# гармония под мелодии. Потом — техническая проверка раскладки.
+for p in validate(song):
+  echo p
+
 var arr = song.toArrangement()
 arr.mixLevel = -6.0'f32   # запас от суммы пяти дорожек — без клиппинга
 
-# Проверка раскладки до генерации проекта (ERROR/WARNING/INFO).
+# Проверка раскладки (имена нод, параметры) до генерации проекта.
 let problems = validate(arr)
 for p in problems:
   echo p

@@ -47,7 +47,11 @@ song.harmony(prog, key)
 | bass | `euterpia.organ` | roleBass | корень аккорда −2 октавы, входит с verse |
 | pad | `euterpia.strings` | rolePad | трезвучие по такту (intro/chorus/break/outro) |
 | bell | `euterpia.bell` | roleLead | тема «вопрос–ответ» и её вариации |
-| arp | `euterpia.piano` | roleArp | арпеджио восьмыми (verse, drop) |
+| arp | `euterpia.piano` | roleArp | `bassLine(bsArp)` — арпеджио восьмыми (verse, drop) |
+
+Партии — генераторы и мелодии (`compose/generators/bass`, `compose/melody`),
+форм-контроль — `validate(song)` (замысел) и `validate(arr)` (раскладка).
+Оба валидатора в этом примере молчат: проблем нет.
 
 ## Детерминизм
 
