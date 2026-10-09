@@ -85,8 +85,10 @@ proc rest*(beats: float = 1.0): MelodyStep =
 
 proc stack*(degrees: openArray[int] = [1, 3, 5]; beats: float = 4.0): MelodyStep =
   ## Стак ступеней аккорда одновременно — пад/аккомпанемент поверх гармонии:
-  ## `stack([1, 3, 5], 4.0)` звучит как аккорд текущего такта, сам меняясь
+  ## `stack([1, 3, 5], 4.0)` звучит как трезвучие текущего такта, само меняясь
   ## вместе с прогрессией (COMPOSE-010/011: слои без ручного пересчёта).
+  ## Ступени — теоретические (1/3/5/7): они переводятся в n-ю ноту аккорда
+  ## (`chordTone`), потому что аккорд — это терции, и 3-я ступень = 2-я нота.
   MelodyStep(tone: mtChord, beats: beats, degrees: @degrees)
 
 proc melody*(name: string; steps: varargs[MelodyStep]): Melody =
@@ -121,8 +123,10 @@ proc tonePitches(step: MelodyStep; chord: Chord; scale: Scale;
   of mtChordTone:
     return @[chord.chordTone(step.chordDegree)]
   of mtChord:
+    # Теоретические ступени (1/3/5/7) → n-я нота аккорда: аккорд — это
+    # терции, поэтому 3-я ступень = 2-я нота, 5-я = 3-я, 7-я = 4-я.
     for d in step.degrees:
-      result.add chord.chordTone(d)
+      result.add chord.chordTone(max(1, (d + 1) div 2))
   of mtPassing:
     # Проходящий: аккордовая нота ± 1 ступень лада, выбираем ближнюю к
     # предыдущей высоте (минимальный скачок).
