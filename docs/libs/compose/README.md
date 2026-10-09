@@ -1,14 +1,27 @@
 # libs/compose — как писать музыку кодом
 
 `libs/compose` — наша библиотека «композиция как код» (#285, #300). Ею пьеса
-описывается на Nim, а на выход идут партитуры (`.notes`), проект (`.eproj`) и
-звук (`.wav`) — без Editor и без внешних скриптов.
+описывается на Nim, а на выход идут партитуры (`.notes`), проект (`.eproj`),
+MIDI (`.mid`) и звук (`.wav`) — без Editor и без внешних скриптов.
 
-Документация разбита на две части:
+Библиотека двухуровневая:
 
-- **этот файл** — как писать (быстрый старт, шаги, примеры, команда компиляции);
+- **музыкальный слой** — время (`4.bars`), секции формы (`intro`/`verse`/
+  `drop`), гармония (`progression(@"Am F C G")`), лады (`minorScale("A")`),
+  мелодия поверх аккордов (`chordTone`/`degree`/`stack`), паттерны и ритмы
+  (`trapKit`/`fill`/`swing`), вариации темы, детерминированный RNG. Им пьеса
+  пишется как партитура;
+- **низкий слой** — `score` (события/такты/мотивы), `song` (раскладка и
+  проект Core), `builder` (произвольный граф). Он остаётся низкоуровневым:
+  музыкальная семантика живёт **выше** (#COMPOSE-045).
+
+Документация разбита на части:
+
+- **этот файл** — как писать (быстрый старт, музыкальный слой, примеры, команды);
 - **[instruments.md](instruments.md)** — все инструменты и ноды «из коробки» с
-  параметрами, диапазонами и значениями по умолчанию.
+  параметрами, диапазонами и значениями по умолчанию;
+- `compositions/neon-pulse/` — живой пример: современный трэп-бит целиком на
+  музыкальном слое (форма, гармония, филлы, вариации, экспорт).
 
 ## Быстрый старт
 
@@ -66,34 +79,171 @@ nim c -r --nimcache:build/nc_my_song --out:build/my_song my_song.nim
 
 ## Как это устроено
 
-Четыре модуля, каждый можно использовать отдельно:
+Модули библиотеки (каждый можно брать отдельно; `compose/compose` собирает
+музыкальный слой в один импорт):
 
 | модуль | что делает |
 |---|---|
-| `compose/score` | музыкальная модель: события, такты, мотивы; вывод в нотацию и в ноты проекта |
-| `compose/song` | высокая раскладка: «инструмент + партия», сумматор, запись `.eproj`/`.notes` |
+| `compose/time` | музыкальное время: `4.bars`, `barAt`, `secondsAt`, тики ядра |
+| `compose/score` | модель: события, такты, мотивы; нотация и `NoteFormat` |
+| `compose/scale` | лады и ступени: `minorScale("A")`, `degree(1..7)` |
+| `compose/harmony` | аккорды и прогрессии: `chord("Am")`, `progression(...)` |
+| `compose/melody` | мелодия поверх гармонии: `chordTone`, `degree`, `stack` |
+| `compose/pattern` | ритмические фигуры: `repeat`, `overlay`, `swing`, `humanize` |
+| `compose/rhythm` | сетки: `quarter`, `tresillo`, `clave`, `rhythm("x . x .")` |
+| `compose/random` | детерминированный RNG: `musicRandom(seed)` |
+| `compose/form` | секции песни: intro/verse/chorus/drop/outro |
+| `compose/variation` | развитие мотива: инверсия, ретроград, фрагмент, регистр |
+| `compose/arrangement` | пьеса: `play`/`during`/`harmony`/`build`/`toArrangement` |
+| `compose/generators/drums` | киты и филлы: `trapKit`, `backbeatSnare`, `fill` |
+| `compose/song` | раскладка: «инструмент + партия», запись `.eproj`/`.notes` |
 | `compose/engine` | рендер проекта в WAV (`loadScene` + `renderToWav`) |
-| `compose/builder` | низкоуровневая сборка **произвольного** графа (нестандартные проекты) |
-| `compose/progress` | индикатор прогресса рендера для stderr (тот же, что в CLI) |
+| `compose/midi` | Standard MIDI File: `writeMidi`, `writeMidiTracks` |
+| `compose/builder` | низкоуровневая сборка **произвольного** графа |
+| `compose/progress` | индикатор прогресса рендера для stderr |
 
-Поток данных: **мотив → партия → раскладка (`Arrangement`) → проект
-(`ProjectFormat`) → звук (WAV)**.
+Поток данных: **музыкальный слой → `Piece` → `build`/`toArrangement` →
+раскладка (`Arrangement`) → проект (`ProjectFormat`) → звук (WAV/MIDI)**.
+`build` даёт абсолютные ноты ещё до сборки проекта — удобно для проверок и
+для будущего Compose Compiler (#COMPOSE-046/047).
+
+## Музыкальный слой
+
+### Время и форма
+
+```nim
+import compose/compose
+
+var song = piece("Dark Trap", 140.0)     # темп и размер — свойства пьесы
+discard song.section("intro", 8.bars)    # такты считает библиотека
+discard song.section("verse", 16.bars)
+discard song.section("chorus", 8.bars)
+discard song.section("break", 4.bars)
+discard song.section("drop", 8.bars)
+discard song.section("outro", 4.bars)
+
+song.find("chorus").startBar             # 24 — адресация по имени, не по числу
+song.endBar                              # 48
+```
+
+`4.bars`, `2.beats`, `1.bar`, `0.5.beat` — DSL времени; позиции —
+`barAt(8)`, `beatsAt(32)`, `secondsAt(9.0, 60.0)`. Разрешение — то же, что в
+ядре (`PpqTicksPerQuarter`), собственного транспорта у Compose нет.
+
+### Гармония и лад
+
+```nim
+let prog = progression(@["Am", "F", "C", "G"])   # аккорд на такт
+let key = minorScale("A")
+song.harmony(prog, key)
+
+chord("G7").notes()        # @[67, 71, 74, 77]
+prog.chordAt(5).root       # аккорд пятого такта (с зацикливанием)
+key.degree(3)              # ступень лада; сменишь key — мелодия переедет
+```
+
+### Мелодия поверх гармонии
+
+Высоты не пишутся руками — они считаются при компиляции по текущему аккорду:
+
+```nim
+let theme = melody("theme",
+  degree(1, 1.0),        # ступень лада (тоника A)
+  degree(5, 0.5),        # квинта
+  chordTone(2, 0.5),     # терция текущего аккорда
+  chordTone(1, 2.0))     # корень аккорда
+
+let bass = melody("bass",
+  chordTone(1, 1.5), rest(0.5), chordTone(1, 1.0), rest(0.5),
+  chordTone(1, 0.5)).transpose(-24)   # та же логика, но басом
+
+let pad = melody("pad", stack([1, 3, 5], 4.0))  # трезвучие на такт
+```
+
+Ещё роли шагов: `passingTone`, `approachTone`, `rest`. `chordTone(n)` — n-я
+нота аккорда (1 корень, 2 терция, 3 квинта, 4 септима); `stack([1,3,5])`
+берёт теоретические ступени.
+
+### Паттерны, ритмы, грув
+
+```nim
+let hats = rhythm("x . x . | . x . x")     # сетка из символов (x — удар)
+let fig  = tresillo().toPattern(Kick)      # готовая латинская фигура
+
+let bass = pattern("bass", n(45, 0.5), r(0.5), n(45, 0.5), n(48, 0.5))
+bass.repeat(4)                  # разворот нот (compile-time)
+bass.transpose(5).reverse()     # приёмы развития
+bass.overlay(other)             # слои: одновременные ноты → аккорд
+bar1 & bar2                     # склейка фигур подряд
+bass.swing(1.0'f32)             # свинг слабых долей (триольный feel)
+bass.humanize(0.01, 8, seed = 42)          # «живость»: время + velocity
+bass.groove(0.54, seed = 42)               # свинг + гуманизация
+```
+
+Ритмические фигуры: `quarter`, `eighth`, `sixteenth`, `triplet`, `dotted`,
+`offbeat`, `tresillo`, `clave`, `trap16`. Барабаны: `kick`, `snare`, `hats`,
+`clap`, `backbeatSnare`, `trapKick`, `trapHats`, `trapKit`, `boomBapKit`,
+`fill(seed)`, `roll`, `rollTo`.
+
+### Размещение по секциям
+
+```nim
+discard song.play("drums", trapKit(seed = 7), roleDrums,
+                  nodeType = "euterpia.drums").during("verse", "chorus")
+discard song.play("bass", bass, roleBass, nodeType = "euterpia.organ")
+              .during("verse", "chorus", "drop")
+discard song.play("bell", theme, roleLead, nodeType = "euterpia.bell")
+              .during("intro")
+discard song.play("bell", theme, roleLead).during("chorus").variant(1)
+
+discard song.setParam("bass", "level", -8.0'f32)
+```
+
+- голос создаётся при первом `play` (`nodeType` — тип ноды, роль —
+  `TrackRole`); `during` адресует секции, `also` добавляет, `variant(k)` даёт
+  независимую вариацию темы для секции (#COMPOSE-033);
+- **хард-кат** получается сам: секция, которую голос «не упомянул», — тишина
+  (так делается break перед дропом, #COMPOSE-013);
+- мелодия внутри секции реплицируется такт за тактом и **каждый раз
+  рендерится по аккорду своего такта** — бас идёт по прогрессии сам.
+
+Голоса можно собирать и вручную (`voice(...)` + `v.play(...)` + `c.add v`) —
+тогда доступно несколько размещений на голос.
+
+### Детерминизм
+
+```nim
+var rng = musicRandom(12345)     # splitmix64: один seed — одна музыка
+rng.randomChoice(@["Am", "F"])   # ровно та же нота при каждом запуске
+```
+
+`humanize`, `fill`, `rollTo` принимают seed и воспроизводимы; `build`
+дважды даёт идентичные ноты (тест `Compose determinism`).
 
 ## Алгоритм написания (по шагам)
 
-1. **Форма.** Разбейте пьесу на разделы (например, Dawn → March → Charge →
-   Finale) и решите, сколько тактов в каждом.
-2. **Гармония.** Прогрессия — это список аккордов (нот) по тактам.
-   `chordAt(bar)` возвращает ноты текущего такта.
-3. **Мотивы.** Мелодия, марш, плач — это `Motif` (последовательность тактов).
-   Такты строятся из `n` (нота), `ch` (аккорд), `r` (пауза).
-4. **Развитие.** `transpose` (октава/полутоны), `augment` (увеличение),
-   `cycle` (повтор до N тактов) — то, из чего делается форма.
-5. **Партии и инструменты.** Для каждой партии — `instrument(...)`, параметры
-   (`setParam`) и `arr.add(inst, part)`.
-6. **Сборка и звук.** `writeNotes` → `writeProject` → `render`.
-7. **Проверка.** `euterpia analyze song.wav` — инспектор (#290) найдёт клиппинг,
-   щелчки, жужжание и т.п.
+1. **Форма.** `piece("Name", bpm)` + `section("verse", 16.bars)` — секции идут
+   подряд, такты считает библиотека.
+2. **Гармония.** `progression(@["Am", "F", "C", "G"])` + `minorScale("A")`;
+   `song.harmony(prog, key)` — по ней будут рендериться мелодии.
+3. **Партии.** Мелодии — `melody("theme", chordTone(1), degree(5), …)`;
+   ритмические фигуры — `pattern(...)` из `n`/`ch`/`r` или готовых ритмов
+   (`trapKit`, `tresillo`, `fill`).
+4. **Развитие.** `repeat`/`transpose`/`reverse`/`overlay`/`swing`/`humanize` на
+   паттернах; `variant(k)` — независимые вариации темы по секциям.
+5. **Адресация.** `song.play("bell", theme, roleLead).during("intro")` — кто,
+   что и когда; молчащие секции дают хард-каты.
+6. **Сборка и звук.** `song.build()` (проверить ноты) → `song.toArrangement()`
+   → `writeNotes` → `writeProject` → `writeMidi` → `render`.
+7. **Проверка.** `validate(arr)` — до сборки; `euterpia analyze song.wav` —
+   инспектор (#290) найдёт клиппинг, щелчки, жужжание и т.п.
+
+## Низкий уровень: score, song, builder
+
+Музыкальный слой компилируется в те же низкоуровневые типы, что были раньше:
+`Part` (такты), `Arrangement` (партии + инструменты), `ProjectFormat` (проект
+Core). Поэтому низкий уровень всегда доступен — для нестандартной маршрутизации
+или полного контроля над тактами.
 
 ## Модель: ноты, такты, мотивы
 
@@ -118,39 +268,38 @@ let theme = motif(@[
 
 ## Гармония и форма (пример)
 
+Музыкальный слой делает это одной командой: секции — по именам, гармония —
+прогрессией, а `chordAt(bar)`/`notesAt(bar)` доступны мелодиям и генераторам.
+
 ```nim
-proc chord(name: string): seq[int] =
-  case name
-  of "Am": @[57, 60, 64]
-  of "F":  @[53, 57, 60]
-  of "C":  @[60, 64, 67]
-  of "G":  @[55, 59, 62]
-  else: @[57, 60, 64]
+var song = piece("Neon Pulse", 140.0)
+discard song.section("intro", 8.bars)
+discard song.section("verse", 16.bars)
+discard song.section("drop", 8.bars)
 
-const SECTIONS = [("A", 1, 16), ("B", 17, 32)]
+let prog = progression(@["Am", "F", "C", "G"])   # 4-тактовый оборот
+discard song.harmony(prog, minorScale("A"))
 
-proc sectionOf(b: int): string =
-  for s in SECTIONS:
-    if b >= s[1] and b <= s[2]: return s[0]
-  "A"
-
-proc chordAt(b: int): seq[int] =
-  chord(["Am", "F", "C", "G"][(b - 1) mod 4])   # 4-тактовый оборот
+prog.notesAt(0)      # @[69, 72, 76] — ноты Am
+prog.rootAt(1)       # 65 — корень F (для баса)
 ```
+
+Низкий слой никуда не делся — если нужен полный контроль, гармония пишется
+тактами вручную (см. раздел «Низкий уровень»).
 
 ## Партии и инструменты (пример)
 
-```nim
-proc genOrgan(): Part =
-  result = part("organ")
-  for b in 1 .. 32:
-    result.add bar(70, ch(chordAt(b), 4))       # целый аккорд на такт
+На музыкальном слое партия — это размещение мелодии/паттерна по секциям:
 
-var organ = instrument("euterpia.organ", "Organ", "organ")
-organ.setParam("level", -6.0f32)
-organ.setParam("bars", 0.6f32)
-arr.add(organ, genOrgan())
+```nim
+let pad = melody("pad", stack([1, 3, 5], 4.0))       # трезвучие на такт
+discard song.play("pad", pad, rolePad, nodeType = "euterpia.strings")
+              .during("intro", "chorus", "outro")
+discard song.setParam("pad", "level", -13.0'f32)
 ```
+
+Вручную дорожка собирается через `instrument(...)` + `arr.add(inst, part)`
+(раздел «Низкий уровень»): оба пути дают один и тот же `Arrangement`.
 
 Идентификаторы нод «из коробки» — **все 28** (10 DSP-нод, 17 инструментов
 и нотный секвенсор):
@@ -171,6 +320,8 @@ arr.add(organ, genOrgan())
 
 ## Развитие материала
 
+Два уровня: приёмы над `Motif` (низкий) и над `Pattern` (музыкальный слой).
+
 ```nim
 let theme = motif(@[ bar(n(62, 1), n(64, 1), n(65, 2)) ])
 
@@ -178,28 +329,39 @@ theme.transpose(12)          # на октаву выше (кульминаци�
 theme.augment(2.0)           # длительности ×2 (увеличение)
 cycle(theme, 16)             # повторить мотив до 16 тактов
 bar(n(62, 4)).sameVel(110)   # такт с другой velocity
+
+# Приёмы развития (compose/variation), чистые функции над Motif:
+theme.invert()               # зеркало интервалов (вопрос/ответ)
+theme.retrograde()           # такты задом наперёд
+theme.fragment(0, 1)         # обрывок темы
+theme.register(48)           # привести фразу к целевому регистру
+theme.diminish(2.0)          # сжать ритм
+
+# Пресеты вариантов по секциям — коротким номером:
+song.play("bell", tune).during("chorus").variant(1)   # кварта вверх
 ```
 
 ## Ударные (грув и «разгон»)
 
+Ритм пишется фигурами (`compose/rhythm`) и барабанными генераторами
+(`compose/generators/drums`) — GM-ноты подставляются сами:
+
 ```nim
-proc genDrums(): Part =
-  result = part("drums")
-  for b in 1 .. 32:
-    var evs: seq[NoteEvent]
-    if b <= 16:                # восьмые: бочка/малый + хэт
-      for nt in [@[36, 42], @[42], @[38, 42], @[42],
-                 @[36, 42], @[42], @[38, 42], @[42]]:
-        evs.add ch(nt, 0.5)
-    else:                      # шестнадцатые: «ускорение»
-      for i in 0 ..< 16:
-        let nt = if i mod 4 == 0: @[36] elif i mod 4 == 2: @[38] else: @[42]
-        evs.add ch(nt, 0.25)
-    result.add bar(104, evs)
+let kit = trapKit(seed = 7).humanize(0.01, 10, 7)   # кик + бэкбит + хэты
+let bar = (kit.repeat(3) & fill(seed = 20)).repeat(4)  # 3 такта + филл
+
+# одиночные слои, если нужен полный контроль:
+kick(tresillo())          # бочка по фигуре
+backbeatSnare()           # малый на 2 и 4 (готовая связка)
+hats(sixteenth())         # ровные шестнадцатые
+
+# переход в дроп: три такта тишины + ролл-разгон
+let roll = @[r(12.0)] & rollTo(Snare, HiMidTom, 16).events
 ```
 
 Ноты ударных — по GM-карте: 36 бочка, 38 малый, 42 закрытый хэт, 46 открытый
-хэт, 49 crash, 51 ride, 41/43/45/48 томы.
+хэт, 49 crash, 51 ride, 41/43/45/48 томы (константы `Kick`…`Ride` в
+`compose/generators/drums`).
 
 ## Произвольный граф (Builder)
 
@@ -240,9 +402,13 @@ build/euterpia analyze song.wav --json       # машинный отчёт
 build/euterpia analyze song.wav --fail-on warn
 ```
 
-Готовые примеры: `compositions/neo-romantic/generate.nim`,
-`compositions/dark-fantasy/generate.nim`; задача `nimble compose` собирает одну
-из пьес целиком.
+Готовые примеры:
+
+- `compositions/neon-pulse/generate.nim` — современный трэп-бит на
+  музыкальном слое (форма, гармония, филлы, вариации, экспорт всего разом);
+- `compositions/neo-romantic/generate.nim` и
+  `compositions/dark-fantasy/generate.nim` — пьесы на низком слое;
+- задача `nimble compose` собирает одну из пьес целиком.
 
 ## Ошибки и предупреждения
 
@@ -341,4 +507,18 @@ euterpia midi ensemble.eproj --split build/midi       # по файлу на и�
   регистрация в `builtin_registry` (см. #274, #301).
 - **Темп меняется по ходу пьесы?** Пока нет: rubato (карта темпа) — задача ядра
   #302. «Разгон» выражают плотностью (восьмые → шестнадцатые).
+- **Чем `melody` отличается от `pattern`?** `pattern` — фиксированные высоты
+  (ритм инструмента), `melody` — ступени и аккордовые тоны, которые считаются
+  при компиляции поверх `harmony`. Бас/пад/арп удобнее мелодией: смена
+  прогрессии переписывает их сама.
+- **Где вариации темы?** `.variant(k)` на размещении (`play(...).during(...)`)
+  или `compose/variation` напрямую (`invert`, `retrograde`, `fragment`, …).
+- **Как получить один и тот же трек дважды?** Все генераторы принимают seed
+  (`humanize(..., seed)`, `fill(seed)`, `musicRandom(seed)`); `build()` без
+  seed'ов пересобирается нота-в-ноту.
+- **Длинная нота за границей такта?** Не нужно: паттерн кладётся по тактам, а
+  такт всегда дополняется до сетки (`beatsPerBar`) — дрейфа нот нет.
+- **Сколько тактов в пьесе?** `song.endBar` — сумма секций; клип каждой дорожки
+  в проекте покрывает всю форму, поэтому абсолютные `startTick` совпадают с
+  `build()`.
 

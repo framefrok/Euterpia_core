@@ -330,6 +330,20 @@ proc overlay*(patterns: openArray[Pattern]): Pattern =
     evs = mergeEvents(evs, patterns[i].events, total)
   rawPattern(patterns[0].name, evs, total)
 
+proc concat*(a, b: Pattern): Pattern =
+  ## Последовательное соединение: фигура `a` сразу за фигурой `b`, длина —
+  ## сумма. Так из тактов собираются много тактовые паттерны: 7 тактов бита
+  ## `&` филл = готовый кит секции (#COMPOSE-025 — compile-time).
+  let name =
+    if a.name.len > 0 and b.name.len > 0: a.name & "+" & b.name
+    elif a.name.len > 0: a.name
+    else: b.name
+  rawPattern(name, a.events & b.events, a.lengthBeats + b.lengthBeats)
+
+proc `&`*(a, b: Pattern): Pattern =
+  ## Оператор для `a & b` — то же, что `concat`.
+  concat(a, b)
+
 proc swing*(p: Pattern; amount: float32; grid: float = 0.5): Pattern =
   ## Свинг: слабые доли (старты с фазой `grid` внутри пары `2 × grid` —
   ## «вторая» восьмая пары) сдвигаются вправо на `amount × grid / 3`.
