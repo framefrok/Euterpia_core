@@ -244,3 +244,55 @@ suite "Compose chord-aware melody (COMPOSE-006)":
     let m = melody("theme", chordTone(1), degree(3), chordTone(5))
     let p = m.toPattern(prog, am)
     check p.events.len == 3
+
+import compose/arrangement
+import compose/song
+
+suite "Compose arrangement (COMPOSE-008, COMPOSE-024)":
+  test "bell.play(theme).during(intro) компилируется в Part со стартом":
+    var c = piece("Dark Trap", 96.0)
+    discard c.section("intro", 8.bars)
+    discard c.section("verse", 16.bars)
+    discard c.section("chorus", 8.bars)
+
+    let bellTheme = pattern("theme", n(76, 1.0), n(79, 1.0), n(81, 2.0))  # 4 доли/такт
+    let bassPat = pattern("bass", n(45, 0.5), r(0.5), n(45, 0.5), n(48, 0.5))  # 2 доли/такт
+
+    var bell = voice("bell", "euterpia.osc", "bell_notes")
+    bell.play("theme", bellTheme).during("intro")
+    var bass = voice("bass", "euterpia.osc", "bass_notes")
+    bass.play("bassline", bassPat).during("verse", "chorus")
+    c.add bell
+    c.add bass
+
+    check not c.isEmpty
+    check bell.plays[0].sections == @["intro"]
+    check bass.plays[0].sections == @["verse", "chorus"]
+
+    let arr = c.toArrangement()
+    check arr.name == "Dark Trap"
+    check arr.tempo == 96.0
+    check arr.entries.len == 2
+    # bell: 8 тактов × 4 доли × 960 тиков
+    check arr.entries[0].part.lengthTicks == 8 * 4 * 960
+    # bass: 24 такта (verse+chorus) × 2 доли × 960 тиков
+    check arr.entries[1].part.lengthTicks == 24 * 2 * 960
+
+  test "пустая пьеса определяется как пустая":
+    var c = piece("Empty")
+    check c.isEmpty
+    discard c.section("intro", 4.bars)
+    check c.isEmpty  # есть секция, но нет голосов
+    var v = voice("x", "t", "n")
+    c.add v
+    check not c.isEmpty
+
+  test "неизвестная секция пропускается при резолве":
+    var c = piece("X")
+    discard c.section("intro", 4.bars)
+    let pat = pattern("p", n(60, 4.0))
+    var v = voice("x", "euterpia.osc", "n")
+    v.play("p", pat).during("nonexistent")
+    c.add v
+    let arr = c.toArrangement()
+    check arr.entries.len == 0  # нет валидных секций — нет дорожек
