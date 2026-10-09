@@ -10,6 +10,10 @@
 #
 # Что можно взять и откуда:
 #   * `compose/score`    — события, такты, мотивы, партии;
+#   * `compose/time`     — музыкальное время (4.bars, barAt, secondsAt);
+#   * `compose/scale`    — лады и ступени (minorScale, degree);
+#   * `compose/harmony`  — аккорды и прогрессии (chord("Am"), progression);
+#   * `compose/pattern`  — ритмические паттерны с приёмами (repeat, reverse);
 #   * `compose/song`     — раскладка, инструменты, проверка, запись;
 #   * `compose/engine`   — рендер в WAV;
 #   * `compose/progress` — индикатор прогресса;
@@ -17,6 +21,10 @@
 #     `Builder` — низкоуровневый инструмент, а не часть повседневного API).
 
 import compose/score
+import compose/time
+import compose/scale
+import compose/harmony
+import compose/pattern
 import compose/song
 import compose/engine
 import compose/progress
@@ -27,6 +35,10 @@ import compose/progress
 # «cannot export»).
 {.warning[UnusedImport]: off.}
 export score
+export time
+export scale
+export harmony
+export pattern
 export song
 export engine
 export progress
