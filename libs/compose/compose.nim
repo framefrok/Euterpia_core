@@ -13,9 +13,15 @@
 #   * `compose/time`     — музыкальное время (4.bars, barAt, secondsAt);
 #   * `compose/scale`    — лады и ступени (minorScale, degree);
 #   * `compose/harmony`  — аккорды и прогрессии (chord("Am"), progression);
-#   * `compose/pattern`  — ритмические паттерны с приёмами (repeat, reverse);
+#   * `compose/pattern`  — ритмические паттерны с приёмами (repeat, reverse,
+#                          overlay, swing, humanize);
+#   * `compose/rhythm`   — библиотека ритмов (tresillo, trap16, clave, DSL);
+#   * `compose/random`   — детерминированный RNG (musicRandom, seed);
 #   * `compose/form`     — секции и форма песни (intro/verse/chorus/drop);
 #   * `compose/melody`   — аккорд-осведомлённая мелодия (chordTone/passing);
+#   * `compose/variation` — развитие мотива (invert, retrograde, fragment);
+#   * `compose/arrangement` — пьеса: play/during/build/harmony (компиляция);
+#   * `compose/generators/drums` — барабанные связки и филлы (trapKit, fill);
 #   * `compose/song`     — раскладка, инструменты, проверка, запись;
 #   * `compose/engine`   — рендер в WAV;
 #   * `compose/progress` — индикатор прогресса;
@@ -27,10 +33,13 @@ import compose/time
 import compose/scale
 import compose/harmony
 import compose/pattern
+import compose/rhythm
+import compose/random
 import compose/form
 import compose/melody
 import compose/variation
 import compose/arrangement
+import compose/generators/drums
 import compose/song
 import compose/engine
 import compose/progress
@@ -45,10 +54,13 @@ export time
 export scale
 export harmony
 export pattern
+export rhythm
+export random
 export form
 export melody
 export variation
 export arrangement
+export drums
 export song
 export engine
 export progress

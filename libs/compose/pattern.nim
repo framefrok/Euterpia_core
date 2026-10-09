@@ -331,20 +331,21 @@ proc overlay*(patterns: openArray[Pattern]): Pattern =
   rawPattern(patterns[0].name, evs, total)
 
 proc swing*(p: Pattern; amount: float32; grid: float = 0.5): Pattern =
-  ## Свинг: слабые доли (вторая половина каждой `grid`-доли) сдвигаются
-  ## вправо на `amount * grid / 4`. `amount = 0` — ровно; `≈ 0.67` —
-  ## триольный feel (слабая восьмая встаёт на 2/3 доли); `1.0` — maximum.
-  ## Длительности пересобираются по новым стартам, границы не пересекаются —
-  ## ритм остаётся последовательностью событий (детерминировано, без RNG).
+  ## Свинг: слабые доли (старты с фазой `grid` внутри пары `2 × grid` —
+  ## «вторая» восьмая пары) сдвигаются вправо на `amount × grid / 3`.
+  ## `amount = 0` — ровно; `1.0` — триольный feel (слабая восьмая встаёт
+  ## на 2/3 доли); `1.5` — крайний (0.75). Длительности пересобираются по
+  ## новым стартам, границы не пересекаются — детерминированно, без RNG.
   if amount <= 0.0f32 or p.events.len < 2:
     return p
   let st = p.starts()
-  let shift = float(amount) * grid * 0.25
+  let period = grid * 2.0
+  let shift = float(amount) * grid / 3.0
   var newStart: seq[float] = @[0.0]
   for i in 1 ..< st.len:
-    let phase = st[i] - floor(st[i] / grid) * grid
+    let phase = st[i] - floor(st[i] / period) * period
     var ns = st[i]
-    if abs(phase - grid * 0.5) < 1e-6:
+    if abs(phase - grid) < 1e-6:
       ns = st[i] + shift
     let prev = newStart[^1]
     let nextBound = if i + 1 < st.len: st[i + 1] else: st[i] + p.events[i].beats

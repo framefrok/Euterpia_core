@@ -247,6 +247,9 @@ suite "Compose chord-aware melody (COMPOSE-006)":
 
 import compose/arrangement
 import compose/song
+import compose/rhythm
+import compose/random
+import compose/generators/drums
 
 suite "Compose arrangement (COMPOSE-008, COMPOSE-024)":
   test "bell.play(theme).during(intro) компилируется в Part со стартом":
@@ -342,3 +345,187 @@ suite "Compose arrangement (COMPOSE-002/024)":
     check notes[0].pitch == 69'u8   # A (Am root, такт 0)
     check notes[1].pitch == 76'u8   # E (Am 5th, такт 0)
     check notes[2].pitch == 64'u8   # E (Em root, такт 1)
+
+suite "Compose melody register and stacks (COMPOSE-006/017)":
+  let prog4 = progression(@["Am", "Em", "G", "G"])
+  let aMinor = minorScale("A")
+
+  test "transpose сдвигает регистр, не меняя шаги":
+    let m = melody("low", chordTone(1), chordTone(2)).transpose(-24)
+    let e = m.render(prog4, aMinor)
+    check e[0].pitches == @[45'u8]   # A2 вместо A4
+    check e[1].pitches == @[48'u8]   # C3 (терция Am)
+
+  test "stack даёт аккорд текущего такта":
+    let pad = melody("pad", stack([1, 3, 5], 4.0))
+    let e = pad.render(prog4, aMinor)
+    check e.len == 1
+    check e[0].pitches == @[69'u8, 72'u8, 76'u8]   # Am
+    let e2 = pad.render(prog4, aMinor, startBar = 1)
+    check e2[0].pitches == @[64'u8, 67'u8, 71'u8]  # Em
+
+suite "Compose rhythm library (COMPOSE-016)":
+  test "DSL сетки: удары, паузы, разделители":
+    let r = rhythm("x . x . | . x . x")
+    check r.steps.len == 8
+    check r.hitCount == 4
+    check r.length == 2.0          # 8 шагов × 0.25
+
+  test "фигуры одного такта 4/4":
+    check quarter().length == 4.0
+    check eighth().length == 4.0
+    check sixteenth().length == 4.0
+    check dotted().length == 4.0
+    check tresillo().length == 4.0
+    check offbeat().length == 4.0
+    check abs(triplet().length - 4.0) < 0.001
+    check clave().length == 8.0    # два такта
+    check tresillo().hitCount == 6
+
+  test "rhythm → pattern: удары становятся нотами":
+    let p = tresillo().toPattern(36)
+    check p.lengthBeats == 4.0
+    var sounded = 0
+    for e in p.events:
+      if e.pitches.len > 0:
+        inc sounded
+        check e.pitches == @[36'u8]
+    check sounded == 6
+
+  test "циклический сдвиг сетки":
+    let r = rhythm("x . . x", 1.0)
+    check r.transposeSteps(1).hits == @[false, false, true, true]
+
+suite "Compose deterministic random (COMPOSE-015)":
+  test "один seed — одна последовательность":
+    var a = musicRandom(12345)
+    var b = musicRandom(12345)
+    for _ in 0 ..< 32:
+      check a.nextFloat() == b.nextFloat()
+      check a.randInt(0, 100) == b.randInt(0, 100)
+
+  test "другой seed — другая последовательность":
+    var a = musicRandom(1)
+    var b = musicRandom(2)
+    var differs = false
+    for _ in 0 ..< 8:
+      if a.nextFloat() != b.nextFloat():
+        differs = true
+    check differs
+
+  test "randomVelocity в легальном диапазоне":
+    var rng = musicRandom(7)
+    for _ in 0 ..< 200:
+      let v = rng.randomVelocity(100, 30)
+      check v >= 1 and v <= 127
+
+  test "shuffle детерминирован":
+    var a = musicRandom(9)
+    var b = musicRandom(9)
+    var xs = @[1, 2, 3, 4, 5, 6, 7, 8]
+    var ys = xs
+    a.shuffle(xs)
+    b.shuffle(ys)
+    check xs == ys
+    check xs.len == 8
+
+suite "Compose groove and layers (COMPOSE-014)":
+  test "swing сдвигает слабые восьмые":
+    let p = eighth().toPattern(60)
+    let s = p.swing(1.0'f32)
+    # Слабая восьмая встала на 2/3 доли: первая восьмая растянулась до
+    # ≈0.6667, вторая сжалась до ≈0.3333 (триольный feel).
+    check abs(s.events[0].beats - 0.6667) < 0.01
+    check abs(s.events[1].beats - 0.3333) < 0.01
+    # Детерминированность и сохранность длины
+    let s2 = p.swing(1.0'f32)
+    check s.events[0].beats == s2.events[0].beats
+    check abs(s.lengthBeats - p.lengthBeats) < 1e-9
+
+  test "overlay склеивает одновременные ноты в аккорд":
+    let kickP = rhythm("x . . .", 1.0).toPattern(36)
+    let snareP = rhythm(". x . .", 1.0).toPattern(38)
+    let kit = overlay([kickP, snareP])
+    check kit.lengthBeats == 4.0
+    var hitsAt: seq[float]
+    var pos = 0.0
+    for e in kit.events:
+      if e.pitches.len > 0:
+        hitsAt.add pos
+        check e.pitches == (if pos < 0.5: @[36'u8] else: @[38'u8])
+      pos += e.beats
+    check hitsAt == @[0.0, 1.0]
+
+  test "groove детерминирован по seed":
+    let p = sixteenth().toPattern(42)
+    let g1 = p.groove(0.54, seed = 42)
+    let g2 = p.groove(0.54, seed = 42)
+    for i in 0 ..< g1.events.len:
+      check g1.events[i].beats == g2.events[i].beats
+
+suite "Compose drums generators (COMPOSE-019)":
+  test "бэкбит: два удара на 2 и 4":
+    let s = backbeatSnare()
+    check s.lengthBeats == 4.0
+    var pos = 0.0
+    var hits: seq[float]
+    for e in s.events:
+      if e.pitches.len > 0:
+        hits.add pos
+        check e.pitches == @[38'u8]
+      pos += e.beats
+    check hits == @[1.0, 3.0]
+
+  test "trapKit — кит из трёх слоёв, длина такта":
+    let kit = trapKit(7)
+    check kit.lengthBeats == 4.0
+    var sounded = 0
+    for e in kit.events:
+      if e.pitches.len > 0:
+        inc sounded
+    check sounded > 0
+
+  test "fill детерминирован по seed и меняется с seed":
+    let f1 = fill(42)
+    let f2 = fill(42)
+    let f3 = fill(43)
+    check f1.events.len == f2.events.len
+    var same = true
+    for i in 0 ..< f1.events.len:
+      if f1.events[i].pitches != f2.events[i].pitches:
+        same = false
+    check same
+    var diff = false
+    for i in 0 ..< min(f1.events.len, f3.events.len):
+      if f1.events[i].pitches != f3.events[i].pitches:
+        diff = true
+    check diff
+
+  test "rollTo поднимает высоты":
+    let rt = rollTo(36, 48, 8)
+    check rt.events.len == 8
+    check rt.events[0].pitches == @[36'u8]
+    check rt.events[^1].pitches == @[48'u8]
+
+suite "Compose determinism (COMPOSE-041)":
+  test "build воспроизводим: две сборки — идентичные ноты":
+    proc makeSong(): Piece =
+      var s = piece("Determinism", 140.0)
+      discard s.section("intro", 4.bars)
+      discard s.section("verse", 8.bars)
+      discard s.harmony(progression(@["Am", "F"]), minorScale("A"))
+      let kit = trapKit(7).humanize(0.01, 8, 99)
+      discard s.play("drums", kit, roleDrums, nodeType = "euterpia.drums").during("verse")
+      let bass = melody("b", chordTone(1, 2.0), rest(2.0)).transpose(-24)
+      discard s.play("bass", bass, roleBass).during("intro", "verse")
+      s
+    let a = makeSong().build()
+    let b = makeSong().build()
+    check a.len == b.len
+    check a.len > 0
+    for i in 0 ..< a.len:
+      check a[i].startTick == b[i].startTick
+      check a[i].pitch == b[i].pitch
+      check a[i].velocity == b[i].velocity
+      check a[i].duration == b[i].duration
+      check a[i].channel == b[i].channel
