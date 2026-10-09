@@ -273,10 +273,11 @@ suite "Compose arrangement (COMPOSE-008, COMPOSE-024)":
     check arr.name == "Dark Trap"
     check arr.tempo == 96.0
     check arr.entries.len == 2
-    # bell: 8 тактов × 4 доли × 960 тиков
-    check arr.entries[0].part.lengthTicks == 8 * 4 * 960
-    # bass: 24 такта (verse+chorus) × 2 доли × 960 тиков
-    check arr.entries[1].part.lengthTicks == 24 * 2 * 960
+    # Клип каждой дорожки покрывает всю форму (32 такта): молчащие секции —
+    # паузы внутри клипа, поэтому ноты позже лежат внутри границ клипа и
+    # `startTick` у них абсолютный (совпадает с build).
+    check arr.entries[0].part.lengthTicks == 32 * 4 * 960
+    check arr.entries[1].part.lengthTicks == 32 * 4 * 960
 
   test "пустая пьеса определяется как пустая":
     var c = piece("Empty")
@@ -296,3 +297,48 @@ suite "Compose arrangement (COMPOSE-008, COMPOSE-024)":
     c.add v
     let arr = c.toArrangement()
     check arr.entries.len == 0  # нет валидных секций — нет дорожек
+
+suite "Compose arrangement (COMPOSE-002/024)":
+  test "партии раскладываются по секциям автоматически":
+    var song = piece("Dark Trap", 96.0)
+    discard song.section("intro", 8.bars)
+    discard song.section("verse", 16.bars)
+    discard song.section("chorus", 8.bars)
+    let bell = pattern("bell", n(72, 1.0), n(76, 1.0))
+    let bass = pattern("bass", n(45, 0.5), n(45, 0.5))
+    discard song.play("bell", bell, roleLead).during("intro", "chorus")
+    discard song.play("bass", bass, roleBass).during("verse")
+    let notes = song.build()
+    # bell: intro (bar 0) + chorus (bar 24)
+    check song.find("intro").startBar == 0
+    check song.find("chorus").startBar == 24
+    # 1.5 такта на повтор * 4 повтора = 6 тактов в intro
+    doAssert notes.len > 0, "arrangement не должен быть пустым"
+
+  test "позиции нот в тиках корректны":
+    var song = piece("X", 120.0)
+    discard song.section("intro", 4.bars)
+    discard song.section("verse", 4.bars)
+    let p = pattern("p", n(60, 1.0))
+    discard song.play("voice", p, roleLead).during("verse")  # старт на bar 4
+    let notes = song.build()
+    doAssert notes.len > 0
+    # intro 4 такта пауз → первая нота verse на такте 4: 4 × 4 доли × 960
+    check notes[0].startTick == 4 * 4 * 960
+    check notes[0].pitch == 60'u8
+
+  test "партия с гармонией через мелодию":
+    var song = piece("X", 120.0)
+    discard song.section("verse", 4.bars)
+    let prog = progression(@["Am", "Em"])
+    let am = minorScale("A")
+    let m = melody("theme", chordTone(1), chordTone(3))
+    discard song.play("melody", m, roleMelody).during("verse")
+    discard song.harmony(prog, am)
+    let notes = song.build()
+    # Фраза из 2 нот повторяется в каждом из 4 тактов verse; каждая реплика
+    # рендерится заново по аккорду своего такта (Am → Em → Am → Em).
+    doAssert notes.len == 8
+    check notes[0].pitch == 69'u8   # A (Am root, такт 0)
+    check notes[1].pitch == 76'u8   # E (Am 5th, такт 0)
+    check notes[2].pitch == 64'u8   # E (Em root, такт 1)

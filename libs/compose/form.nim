@@ -78,10 +78,13 @@ proc endBar*(song: Song): int
   # Объявлено заранее: `section` вызывает его до определения ниже.
 
 proc composition*(title: string; tempo: float = 120.0;
-                  beatsPerBar: float = 4.0): Song =
+           beatsPerBar: float = 4.0): Song =
   ## Новая песня с темпом и размером. Пустая форма — секции добавляются
   ## через `section`. Темп/размер — свойства песни (а не Core-транспорта),
   ## чтобы форма знала, сколько длится в секундах (см. `secondsOf`).
+  ##
+  ## Имя `form` (а не `composition`) — чтобы не конфликтовать с публичным
+  ## `arrangement.composition`, который строит полную аранжировку поверх формы.
   Song(title: title, sections: @[], tempo: tempo, beatsPerBar: beatsPerBar)
 
 proc section*(song: var Song; name: string; length: Duration): Section =

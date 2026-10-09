@@ -13,7 +13,7 @@
 # `toNotes`/`toNotation` ядра. Compile-time трансформация: рантайм-движка
 # повторов здесь нет — `repeat` разворачивается в ноты сразу (#COMPOSE-025).
 
-import std/math
+import std/[math, algorithm, sequtils]
 
 import compose/score
   # NoteEvent/Bar/Motif/Part + n/ch/r — общая модель событий, чтобы паттерн и
@@ -245,6 +245,128 @@ proc humanize*(p: Pattern; timing: float; velocity: int; rngSeed: int = 12345): 
     ne.beats = dur
     evs.add ne
   result.events = evs
+
+# ============================================================================
+# Наложение и свинг (COMPOSE-014: groove/слои)
+# ============================================================================
+
+proc collectCuts(evs: openArray[NoteEvent]; cuts: var seq[float]) =
+  ## Все границы событий (старты и концы) — точки разбиения при слиянии.
+  var pos = 0.0
+  for e in evs:
+    cuts.add pos
+    pos += e.beats
+    cuts.add pos
+
+proc pitchesCovering(evs: openArray[NoteEvent]; t0, t1: float): seq[uint8] =
+  ## Питчи, звучащие непрерывно на отрезке [t0, t1) (событие целиком
+  ## покрывает отрезок и не является паузой).
+  var pos = 0.0
+  for e in evs:
+    let s = pos
+    pos += e.beats
+    if e.pitches.len > 0 and s <= t0 + 1e-9 and s + e.beats >= t1 - 1e-9:
+      for p in e.pitches:
+        if p notin result:
+          result.add p
+
+proc mergeEvents*(a, b: openArray[NoteEvent]; totalBeats: float): seq[NoteEvent] =
+  ## Наложить две последовательности событий по времени. Одновременно
+  ## звучащие ноты склеиваются в аккорд, там, где не звучит никто, — пауза;
+  ## границы событий служат разрезами, поэтому ритм обоих слоёв сохраняется
+  ## точно. `totalBeats` — общая длина (за ней обрезается всё сверх).
+  ## Это основа `overlay` (киты ударных) и слияния секций в `arrangement`.
+  if a.len == 0 and b.len == 0:
+    return @[]
+  var cuts: seq[float] = @[0.0]
+  collectCuts(a, cuts)
+  collectCuts(b, cuts)
+  if totalBeats > 0.0:
+    cuts.add totalBeats
+  cuts.sort()
+  # Дедупликация и отсечение за пределами [0, totalBeats].
+  var uniq: seq[float]
+  for c in cuts:
+    if c < -1e-9:
+      continue
+    if totalBeats > 0.0 and c > totalBeats + 1e-9:
+      continue
+    if uniq.len == 0 or abs(c - uniq[^1]) > 1e-9:
+      uniq.add c
+  # Собираем события: на каждом отрезке — объединение питчей обоих слоёв.
+  for i in 0 ..< max(0, uniq.len - 1):
+    let t0 = uniq[i]
+    let t1 = uniq[i + 1]
+    if t1 - t0 < 1e-9:
+      continue
+    var pitches = pitchesCovering(a, t0, t1)
+    for p in pitchesCovering(b, t0, t1):
+      if p notin pitches:
+        pitches.add p
+    if pitches.len == 0:
+      result.add r(t1 - t0)
+    else:
+      pitches.sort()
+      result.add ch(pitches.mapIt(int(it)), t1 - t0)
+
+proc overlay*(a, b: Pattern): Pattern =
+  ## Наложение двух паттернов: kick + snare → один паттерн кита. Длина —
+  ## большая из двух; одновременные удары становятся одним событием-аккордом.
+  let total = max(a.lengthBeats, b.lengthBeats)
+  let name = if a.name.len > 0: a.name else: b.name
+  rawPattern(name, mergeEvents(a.events, b.events, total), total)
+
+proc overlay*(patterns: openArray[Pattern]): Pattern =
+  ## Наложение слоёв: `overlay([kick, snare, hats])` — готовый кит такта.
+  if patterns.len == 0:
+    return Pattern()
+  if patterns.len == 1:
+    return patterns[0]
+  var total = 0.0
+  var evs = patterns[0].events
+  total = patterns[0].lengthBeats
+  for i in 1 ..< patterns.len:
+    total = max(total, patterns[i].lengthBeats)
+    evs = mergeEvents(evs, patterns[i].events, total)
+  rawPattern(patterns[0].name, evs, total)
+
+proc swing*(p: Pattern; amount: float32; grid: float = 0.5): Pattern =
+  ## Свинг: слабые доли (вторая половина каждой `grid`-доли) сдвигаются
+  ## вправо на `amount * grid / 4`. `amount = 0` — ровно; `≈ 0.67` —
+  ## триольный feel (слабая восьмая встаёт на 2/3 доли); `1.0` — maximum.
+  ## Длительности пересобираются по новым стартам, границы не пересекаются —
+  ## ритм остаётся последовательностью событий (детерминировано, без RNG).
+  if amount <= 0.0f32 or p.events.len < 2:
+    return p
+  let st = p.starts()
+  let shift = float(amount) * grid * 0.25
+  var newStart: seq[float] = @[0.0]
+  for i in 1 ..< st.len:
+    let phase = st[i] - floor(st[i] / grid) * grid
+    var ns = st[i]
+    if abs(phase - grid * 0.5) < 1e-6:
+      ns = st[i] + shift
+    let prev = newStart[^1]
+    let nextBound = if i + 1 < st.len: st[i + 1] else: st[i] + p.events[i].beats
+    newStart.add max(prev, min(ns, nextBound))
+  var evs: seq[NoteEvent]
+  for i, e in p.events:
+    var dur: float
+    if i + 1 < newStart.len:
+      dur = max(0.0, newStart[i + 1] - newStart[i])
+    else:
+      dur = e.beats
+    var ne = e
+    ne.beats = dur
+    evs.add ne
+  rawPattern(p.name, evs, p.lengthBeats)
+
+proc groove*(p: Pattern; swingAmount: float32; timing: float = 0.012;
+             velocity: int = 6; seed: int = 12345): Pattern =
+  ## «Живой» ритм одной командой: свинг слабых долей + детерминированная
+  ## микрогуманизация времени и velocity. Один seed — один результат
+  ## (#COMPOSE-014/015): `bass.groove(0.54, seed = 42)`.
+  p.swing(swingAmount).humanize(timing, velocity, seed)
 
 # ============================================================================
 # Извлечение длины/позиций
