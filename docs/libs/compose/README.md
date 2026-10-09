@@ -95,7 +95,10 @@ nim c -r --nimcache:build/nc_my_song --out:build/my_song my_song.nim
 | `compose/form` | секции песни: intro/verse/chorus/drop/outro |
 | `compose/variation` | развитие мотива: инверсия, ретроград, фрагмент, регистр |
 | `compose/automation` | автоматизация: `autom`/`ramp`/`fadeIn`, точки в тактах |
-| `compose/arrangement` | пьеса: `play`/`during`/`harmony`/`build`/`toArrangement` |
+| `compose/ir` | Composition IR: решённые данные (тики, дорожки, автоматизация) |
+| `compose/compiler` | компилятор: `compile(IR)` → раскладка/проект Core |
+| `compose/arrangement` | пьеса: `play`/`during`/`harmony`/`resolve`/`build` |
+| `compose/preset` | пресеты инструментов: `dark_bell`, `sub_bass`, `trap_drums` |
 | `compose/generators/drums` | киты и филлы: `trapKit`, `backbeatSnare`, `fill` |
 | `compose/generators/bass` | фигуры баса: `bassLine(bsRoot/bsWalking/…)` |
 | `compose/generators/melody` | генератор мелодии: `generateMelody(seed)`, `respond` |
@@ -104,13 +107,24 @@ nim c -r --nimcache:build/nc_my_song --out:build/my_song my_song.nim
 | `compose/song` | раскладка: «инструмент + партия», запись `.eproj`/`.notes` |
 | `compose/engine` | рендер проекта в WAV (`loadScene` + `renderToWav`) |
 | `compose/midi` | Standard MIDI File: `writeMidi`, `writeMidiTracks` |
+| `compose/graph` | шаблоны графа Builder: `synthChain`, `drumChain`, `master` |
+| `compose/sound` | sound design: `SoundSpec`/`sound` для произвольного графа |
 | `compose/builder` | низкоуровневая сборка **произвольного** графа |
 | `compose/progress` | индикатор прогресса рендера для stderr |
 
-Поток данных: **музыкальный слой → `Piece` → `build`/`toArrangement` →
-раскладка (`Arrangement`) → проект (`ProjectFormat`) → звук (WAV/MIDI)**.
-`build` даёт абсолютные ноты ещё до сборки проекта — удобно для проверок и
-для будущего Compose Compiler (#COMPOSE-046/047).
+Поток данных — один и тот же для нот и раскладки:
+
+```text
+Piece  --resolve-->  CompositionIR  --compile-->  Arrangement  --buildProject-->  ProjectFormat
+   (музыка)          (решённые данные:                    (партии, инструменты,         (граф + секвенсор
+                      тики, дорожки,                       mute, автоматизация)          Core → WAV/MIDI/eproj)
+                      автоматизация)
+```
+
+`resolve` — единственный источник истины: `build` (абсолютные ноты) и
+`toArrangement` (раскладка) — обёртки над ним, поэтому они не могут разойтись
+(#COMPOSE-046/047). Проверить композицию можно на **любом** шаге: `validate`,
+`analyze`, сам IR.
 
 ## Музыкальный слой
 
@@ -266,6 +280,64 @@ discard song.solo("bell")              # остальные выключаютс
 Неизвестная дорожка или параметр автоматизации — ошибка `validate(arr)` **до**
 сборки, а не молчаливое исчезновение дорожки.
 
+### Пресеты (COMPOSE-021)
+
+Тембр — именем, а не десятком `setParam`:
+
+```nim
+discard song.playPreset("bass", "sub_bass", bassLine(bsRoot),
+                        roleBass).during("verse")
+discard song.playPreset("bell", "dark_bell", theme, roleLead).during("intro")
+
+discard song.applyPreset("pad", "warm_pad")   # тип ноды + параметры, без play
+```
+
+`presetNames()` — весь список (`dark_bell`, `bright_bass`, `sub_bass`,
+`warm_pad`, `lofi_piano`, `trap_drums`, `choir_aah`, …). Неизвестное имя — не
+падение и не тишина, а честный fallback на осциллятор. Параметры пресета
+проверяет тот же `validate(arr)`, что и ручные `setParam`, поэтому опечатка в
+пресете не переживёт первую проверку.
+
+### IR и компилятор (COMPOSE-046/047)
+
+Между музыкальным замыслом и проектом — явная граница:
+
+```nim
+let ir = song.resolve()          # CompositionIR: такты → тики, дорожки, автоматизация
+echo ir                          # Neon Pulse (48 тактов, 5 дорожек, 1477 нот, …)
+
+let notes = ir.irNotes()         # то же, что song.build()
+let arr = compile(ir)            # IR → раскладка (годится для validate/render)
+let proj = compileProject(ir)    # IR → ProjectFormat (одной командой)
+```
+
+`resolve` — единственный источник истины: `build` и `toArrangement` лишь
+обёртывают его, поэтому ноты и клипы не могут разойтись. Обратный перевод
+(IR → партии) точен до тика — это проверяет тест round-trip.
+
+### Граф и sound design (COMPOSE-022/023)
+
+Для произвольного графа (эффекты, шины, синтез) — шаблоны вместо ручных
+`addNode`/`connect`:
+
+```nim
+var b = builder("Song")
+let masterId = master(b, level = -6.0f32)
+
+let lead = synthChain(b, "lead", leadPart, waveform = 1.0f32,
+                      cutoff = 4000.0f32, compressor = true)
+connectToMaster(b, lead, masterId, 0)
+
+let kit = drumChain(b, "kit", kitPart)
+connectToMaster(b, kit, masterId, 1)
+```
+
+`sound(b, "bright bass", part)` — «звук как данные» (`SoundSpec`: волна,
+фильтр, регистр); он компилируется в тот же `Builder` и сам транспонирует
+партию в свой регистр. Это низкий уровень: секций и гармонии здесь нет — их
+даёт музыкальный слой (`piece`/`play`), а `graph`/`sound` — когда нужен
+именно свой сигнальный путь.
+
 ### Детерминизм
 
 ```nim
@@ -289,8 +361,9 @@ rng.randomChoice(@["Am", "F"])   # ровно та же нота при кажд
    паттернах; `variant(k)` — независимые вариации темы по секциям.
 5. **Адресация.** `song.play("bell", theme, roleLead).during("intro")` — кто,
    что и когда; молчащие секции дают хард-каты.
-6. **Сборка и звук.** `song.build()` (проверить ноты) → `song.toArrangement()`
-   → `writeNotes` → `writeProject` → `writeMidi` → `render`.
+6. **Сборка и звук.** `song.resolve()` (IR) → `song.build()` (проверить ноты) →
+   `song.toArrangement()` / `compile(ir)` → `writeNotes` → `writeProject` →
+   `writeMidi` → `render`.
 7. **Проверка.** `validate(arr)` — до сборки; `euterpia analyze song.wav` —
    инспектор (#290) найдёт клиппинг, щелчки, жужжание и т.п.
 
@@ -581,6 +654,10 @@ euterpia midi ensemble.eproj --split build/midi       # по файлу на и�
   прогрессии переписывает их сама.
 - **Где вариации темы?** `.variant(k)` на размещении (`play(...).during(...)`)
   или `compose/variation` напрямую (`invert`, `retrograde`, `fragment`, …).
+- **Чем `preset` отличается от `sound`?** `preset` — высокий уровень: имя
+  тембра для дорожки пьесы (готовая нода + параметры, играет по секциям).
+  `sound` — низкий: описание синтезаторного звука (`SoundSpec`) для
+  произвольного графа `Builder`.
 - **Как получить один и тот же трек дважды?** Все генераторы принимают seed
   (`humanize(..., seed)`, `fill(seed)`, `musicRandom(seed)`); `build()` без
   seed'ов пересобирается нота-в-ноту.

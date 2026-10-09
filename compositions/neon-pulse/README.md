@@ -43,15 +43,16 @@ song.harmony(prog, key)
 
 | голос | нода | роль | что играет |
 |---|---|---|---|
-| drums | `euterpia.drums` | roleDrums | хэты (intro), киты+филлы (verse/chorus), ролл (break), краш-дроп |
-| bass | `euterpia.organ` | roleBass | корень аккорда −2 октавы, входит с verse |
-| pad | `euterpia.strings` | rolePad | трезвучие по такту (intro/chorus/break/outro) |
-| bell | `euterpia.bell` | roleLead | тема «вопрос–ответ» и её вариации |
-| arp | `euterpia.piano` | roleArp | `bassLine(bsArp)` — арпеджио восьмыми (verse, drop) |
+| drums | `euterpia.drums` (пресет `trap_drums`) | roleDrums | хэты (intro), киты+филлы (verse/chorus), ролл (break), краш-дроп |
+| bass | `euterpia.organ` (пресет `dark_bass`) | roleBass | корень аккорда −2 октавы, входит с verse |
+| pad | `euterpia.strings` (пресет `warm_pad`) | rolePad | трезвучие по такту (intro/chorus/break/outro) |
+| bell | `euterpia.bell` (пресет `dark_bell`) | roleLead | тема «вопрос–ответ» и её вариации |
+| arp | `euterpia.piano` (пресет `clean_piano`) | roleArp | `bassLine(bsArp)` — арпеджио восьмыми (verse, drop) |
 
-Партии — генераторы и мелодии (`compose/generators/bass`, `compose/melody`),
-форм-контроль — `validate(song)` (замысел) и `validate(arr)` (раскладка).
-Оба валидатора в этом примере молчат: проблем нет.
+Тембры ставятся пресетами (`applyPreset`, COMPOSE-021), партии — генераторами
+и мелодиями (`compose/generators/bass`, `compose/melody`), а форм-контроль —
+`validate(song)` (замысел) + `validate(arr)` (раскладка). Оба валидатора в этом
+примере молчат: проблем нет.
 
 ## Детерминизм
 
@@ -74,6 +75,13 @@ python3 compositions/neon-pulse/tools/wav_peak.py \
 - `song.build()` — число нот (та же компиляция, что уходит в клипы Core);
 - `analyze(song)` — отчёт (COMPOSE-031): темп, тональность, длина, секции,
   дорожки с ролями и числом нот, плотность, смены гармонии, автоматизация;
+- `song.resolve()` — сводка Composition IR (COMPOSE-046/047): сколько тактов,
+  дорожек, нот и дорожек автоматизации решено до сборки проекта;
 - `validate(song)` и `validate(arr)` — музыкальная и техническая проверки
   (в этом примере обе молчат);
 - прогресс рендера — индикатор `compose/progress` в stderr.
+
+## Проверка уровней
+
+`arr.mixLevel = -7.5` плюс автоматизация сумматора (рамп −9.5 → −7.5 к дропу)
+дают запас: пик ≈ −2.5 dBFS, клиппинга нет.
