@@ -257,6 +257,8 @@ import compose/analyze
 import compose/generators/bass
 import compose/generators/melody as genMelody
 import compose/automation
+import compose/ir
+import compose/compiler
 
 suite "Compose arrangement (COMPOSE-008, COMPOSE-024)":
   test "bell.play(theme).during(intro) компилируется в Part со стартом":
@@ -773,6 +775,90 @@ suite "Compose automation and production (COMPOSE-011/012)":
     let arr = s.toArrangement()
     check arr.entries[0].inst.params.len == 2
     check validate(arr).len == 0
+
+proc irLeafSong(): Piece =
+  ## Пьеса для проверок IR: две секции, одна мелодия по гармонии.
+  var s = piece("IR", 120.0)
+  discard s.section("intro", 4.bars)
+  discard s.section("verse", 4.bars)
+  discard s.harmony(progression(@["Am", "F"]), minorScale("A"))
+  discard s.play("lead", melody("m", chordTone(1, 2.0), chordTone(2, 2.0)),
+                 roleLead, nodeType = "euterpia.piano").during("intro", "verse")
+  s
+
+suite "Compose IR and compiler (COMPOSE-046/047)":
+  test "resolve: секции, дорожки и абсолютные тики":
+    let ir = irLeafSong().resolve()
+    check ir.title == "IR"
+    check ir.endBar == 8
+    check ir.sections.len == 2
+    check ir.tracks.len == 1
+    check ir.tracks[0].name == "lead"
+    check ir.tracks[0].role == "lead"
+    check ir.tracks[0].nodeType == "euterpia.piano"
+    check ir.tracks[0].events.len > 0
+    check ir.tracks[0].events[0].startTick == 0
+    check ir.noteCount == ir.tracks[0].events.len
+    check ($ir).len > 0
+
+  test "молчащий голос в IR не попадает":
+    var s = piece("M", 120.0)
+    discard s.section("intro", 2.bars)
+    discard s.play("x", pattern("p", n(60, 4.0)), roleLead,
+                   nodeType = "euterpia.piano").during("nonexistent")
+    check s.resolve().tracks.len == 0
+
+  test "round-trip: ноты build совпадают с compile(resolve)":
+    let s = irLeafSong()
+    let direct = s.build()
+    let viaIr = compile(s.resolve()).entries[0].part.toNotes()
+    check direct.len == viaIr.len
+    for i in 0 ..< min(direct.len, viaIr.len):
+      check direct[i].startTick == viaIr[i].startTick
+      check direct[i].duration == viaIr[i].duration
+      check direct[i].pitch == viaIr[i].pitch
+      check direct[i].velocity == viaIr[i].velocity
+      check direct[i].channel == viaIr[i].channel
+
+  test "velocity такта переживает IR (гуманизация не теряется)":
+    var s = piece("V", 120.0)
+    discard s.section("verse", 16.bars)
+    let pat = trapKit(7).repeat(8).humanize(0.01, 12, 5)
+    discard s.play("drums", pat, roleDrums,
+                   nodeType = "euterpia.drums").during("verse")
+    let direct = s.build()
+    let viaIr = compile(s.resolve()).entries[0].part.toNotes()
+    check direct.len == viaIr.len
+    var notDefault = 0
+    var lower = 0        # отклонения ВНИЗ тоже должны выжить (иначе max с
+    for i in 0 ..< direct.len:   # холстом секции затирал бы половину джиттера)
+      check direct[i].velocity == viaIr[i].velocity
+      if direct[i].velocity != 100:
+        inc notDefault
+      if direct[i].velocity < 100:
+        inc lower
+    check notDefault > 0
+    check lower > 0
+
+  test "compile эквивалентен toArrangement":
+    let s = irLeafSong()
+    let a = s.toArrangement()
+    let b = compile(s.resolve())
+    check a.entries.len == b.entries.len
+    for i in 0 ..< a.entries.len:
+      check a.entries[i].part.name == b.entries[i].part.name
+      check a.entries[i].part.lengthTicks == b.entries[i].part.lengthTicks
+      check a.entries[i].mute == b.entries[i].mute
+
+  test "compileProject(ir) собирает проект с автоматизацией":
+    var s = irLeafSong()
+    discard s.automate(ramp("lead", "level", 0.0, 4.0, -30.0, -8.0))
+    let ir = s.resolve()
+    check ir.automation.len == 1
+    let proj = compileProject(ir)
+    check proj.sequencer.tracks.len == 1
+    check proj.sequencer.automationLanes.len == 1
+    check proj.sequencer.automationLanes[0].nodeId == 2
 
 suite "Compose analysis (COMPOSE-031)":
   test "отчёт описывает форму, дорожки, гармонию и плотность":
