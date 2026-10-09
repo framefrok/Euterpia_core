@@ -39,7 +39,11 @@ import compose/form
 import compose/melody
 import compose/variation
 import compose/arrangement
+import compose/validate
 import compose/generators/drums
+import compose/generators/bass
+import compose/generators/melody as melodyGen
+  # alias: имя модуля `melody` занято низкоуровневой мелодией (`compose/melody`)
 import compose/song
 import compose/engine
 import compose/progress
@@ -60,7 +64,10 @@ export form
 export melody
 export variation
 export arrangement
+export validate
 export drums
+export bass
+export melodyGen
 export song
 export engine
 export progress

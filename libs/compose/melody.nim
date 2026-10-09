@@ -155,6 +155,7 @@ proc render*(m: Melody; progression: Progression; scale: Scale;
   ## готовые `NoteEvent` для `toMotif`/`toPart`.
   var events: seq[NoteEvent]
   var bar = startBar
+  var beatsInBar = 0.0
   var lastPitch = -1
   for step in m.steps:
     let bpc = if barsPerChord > 0: barsPerChord else: progression.barsPerChord
@@ -170,8 +171,13 @@ proc render*(m: Melody; progression: Progression; scale: Scale;
         shifted.add uint8(max(0, min(127, p + m.transpose)))
       events.add NoteEvent(pitches: shifted, beats: step.beats)
       lastPitch = int(shifted[0])
-    # Продвигаем такт по длительности шага (4 доли = 1 такт).
-    bar += int(step.beats / 4.0)
+    # Продвигаем такт по НАКОПЛЕННЫМ долям (4 доли = 1 такт), а не только по
+    # целым шагам: многотактовая мелодия из мелких нот тоже следует гармонии
+    # (шаг 0.5 дважды не должен «залипать» на одном аккорде).
+    beatsInBar += step.beats
+    while beatsInBar >= 4.0 - 1e-9:
+      inc bar
+      beatsInBar -= 4.0
   events
 
 proc toPattern*(m: Melody; progression: Progression; scale: Scale;
