@@ -153,18 +153,22 @@ proc pname*(pitch: int): string =
 
 proc durSuffix(beats: float): string =
   ## Длительность в синтаксисе нотации ядра (`/4` — четверть, точка — ×1.5).
+  ## Нотация знает только ряд 1/2/4/8/16/32 с точками, а гуманизированные
+  ## длительности «плывут» (0.4875 вместо 0.5), поэтому берётся БЛИЖАЙШЕЕ
+  ## представимое значение: строка читается как партитура, а точные тики
+  ## живут в `NoteFormat`/`.eproj` (именно они важны для звука).
+  const table = [(4.0, "/1"), (3.0, "/2."), (2.0, "/2"), (1.5, "/4."),
+                 (1.0, "/4"), (0.75, "/8."), (0.5, "/8"), (0.375, "/16."),
+                 (0.25, "/16"), (0.125, "/32")]
   let b = round(beats * 1000.0) / 1000.0
-  if b == 4.0: "/1"
-  elif b == 3.0: "/2."
-  elif b == 2.0: "/2"
-  elif b == 1.5: "/4."
-  elif b == 1.0: "/4"
-  elif b == 0.75: "/8."
-  elif b == 0.5: "/8"
-  elif b == 0.375: "/16."
-  elif b == 0.25: "/16"
-  elif b == 0.125: "/32"
-  else: "/4"
+  var best = table[0]
+  var bestDiff = abs(b - table[0][0])
+  for entry in table:
+    let d = abs(b - entry[0])
+    if d < bestDiff:
+      best = entry
+      bestDiff = d
+  best[1]
 
 proc eventToken(e: NoteEvent): string =
   if e.pitches.len == 0:

@@ -463,6 +463,15 @@ suite "Compose groove and layers (COMPOSE-014)":
     for i in 0 ..< g1.events.len:
       check g1.events[i].beats == g2.events[i].beats
 
+  test "concat: фигуры подряд, длина — сумма":
+    let a = rhythm("x . . .", 1.0).toPattern(36)
+    let b = rhythm(". x . .", 1.0).toPattern(38)
+    let ab = a & b
+    check ab.lengthBeats == 8.0
+    check ab.events.len == a.events.len + b.events.len
+    # 7 тактов кита + 1 такт филла = 8 тактов одной партии
+    check (trapKit(7).repeat(7) & fill(9)).lengthBeats == 32.0
+
 suite "Compose drums generators (COMPOSE-019)":
   test "бэкбит: два удара на 2 и 4":
     let s = backbeatSnare()
