@@ -21,6 +21,8 @@ import compose/time
 import compose/scale
 import compose/harmony
 import compose/pattern
+import compose/form
+import compose/melody
 import compose/score
 
 suite "Compose musical time (COMPOSE-001)":
@@ -167,3 +169,78 @@ suite "Compose patterns (COMPOSE-003)":
     let h2 = bass.humanize(0.05, 8, 12345)
     for i in 0 ..< h1.events.len:
       check abs(h1.events[i].beats - h2.events[i].beats) < 1e-9
+
+suite "Compose song form (COMPOSE-002)":
+  test "секции выстраиваются подряд без ручного счёта тактов":
+    var song = composition("Dark Trap", 96.0)
+    discard song.section("intro", 8.bars)
+    discard song.section("verse", 16.bars)
+    discard song.section("chorus", 8.bars)
+    discard song.section("drop", 4.bars)
+    check song.sections[0].startBar == 0
+    check song.sections[1].startBar == 8
+    check song.sections[2].startBar == 24
+    check song.sections[3].startBar == 32
+    check song.endBar == 36
+
+  test "роли определяются по имени":
+    var song = composition("X")
+    discard song.section("intro", 4.bars)
+    discard song.section("verse", 4.bars)
+    discard song.section("chorus", 4.bars)
+    discard song.section("drop", 4.bars)
+    check song.sections[0].kind == skIntro
+    check song.sections[1].kind == skVerse
+    check song.sections[2].kind == skChorus
+    check song.sections[3].kind == skDrop
+
+  test "поиск и адресация секций":
+    var song = composition("X")
+    discard song.section("intro", 8.bars)
+    discard song.section("verse", 16.bars)
+    check song.hasSection("verse")
+    check not song.hasSection("typo")
+    check song.find("verse").startBar == 8
+    check song.find("typo").lengthBars == 0
+    check song.sectionAt(0).kind == skIntro
+    check song.sectionAt(10).kind == skVerse
+    check song.sectionAt(40).lengthBars == 0
+
+  test "длительность в секундах":
+    var song = composition("X", 96.0)  # 36 тактов 4/4 при 96 = 90 сек
+    discard song.section("a", 36.bars)
+    check abs(song.lengthSeconds - 90.0) < 0.01
+
+suite "Compose chord-aware melody (COMPOSE-006)":
+  test "ноты согласованы с гармонией":
+    let prog = progression(@["Am", "Em", "G", "G"])
+    let am = minorScale("A")
+    let m = melody("theme", chordTone(1), degree(3), passingTone(), chordTone(3))
+    check m.steps.len == 4
+    let evs = m.render(prog, am)
+    check evs.len == 4
+    check evs[0].pitches == @[69'u8]   # chordTone(1) на Am = A
+    check evs[1].pitches == @[72'u8]   # degree(3) в A minor = C
+    check evs[3].pitches == @[76'u8]   # chordTone(3) на Am = E (квинта)
+
+  test "мелодия меняется вместе с аккордом":
+    let prog = progression(@["Am", "Em", "G", "G"])
+    let am = minorScale("A")
+    let m = melody("m3", chordTone(1, 4.0), chordTone(1, 4.0))  # 2 такта
+    let e = m.render(prog, am)
+    check e[0].pitches == @[69'u8]   # Am (bar 0)
+    check e[1].pitches == @[64'u8]   # Em (bar 1)
+
+  test "пауза не даёт высоты":
+    let prog = progression(@["Am", "Em", "G", "G"])
+    let am = minorScale("A")
+    let m = melody("m4", rest(1.0), chordTone(1))
+    let e = m.render(prog, am)
+    check e[0].pitches.len == 0
+
+  test "мелодия как паттерн":
+    let prog = progression(@["Am", "Em", "G", "G"])
+    let am = minorScale("A")
+    let m = melody("theme", chordTone(1), degree(3), chordTone(5))
+    let p = m.toPattern(prog, am)
+    check p.events.len == 3

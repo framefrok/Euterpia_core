@@ -14,6 +14,8 @@
 #   * `compose/scale`    — лады и ступени (minorScale, degree);
 #   * `compose/harmony`  — аккорды и прогрессии (chord("Am"), progression);
 #   * `compose/pattern`  — ритмические паттерны с приёмами (repeat, reverse);
+#   * `compose/form`     — секции и форма песни (intro/verse/chorus/drop);
+#   * `compose/melody`   — аккорд-осведомлённая мелодия (chordTone/passing);
 #   * `compose/song`     — раскладка, инструменты, проверка, запись;
 #   * `compose/engine`   — рендер в WAV;
 #   * `compose/progress` — индикатор прогресса;
@@ -25,6 +27,8 @@ import compose/time
 import compose/scale
 import compose/harmony
 import compose/pattern
+import compose/form
+import compose/melody
 import compose/song
 import compose/engine
 import compose/progress
@@ -39,6 +43,8 @@ export time
 export scale
 export harmony
 export pattern
+export form
+export melody
 export song
 export engine
 export progress

@@ -13,7 +13,7 @@
 # Чистая музыкальная семантика верхнего слоя: в Core про «Am» и «доминант-
 # септаккорд» знать нельзя — здесь можно и нужно.
 
-import std/[algorithm, strutils, sequtils]
+import std/[math, algorithm, strutils, sequtils]
 
 import compose/scale
   # notePitch/noteName — общий парсер имён нот, чтобы «Am» и лад «A minor»
@@ -161,8 +161,10 @@ proc chordTone*(c: Chord; degree: int): int =
   ## мелодия может «идти по аккорду» в любом регистре.
   let ns = c.notes()
   let len = ns.len
+  # floorDiv корректно берёт и отрицательные степени (chordTone(0) = септима
+  # на октаву ниже), поэтому проходящие/заходящие тоны мелодии не падают.
   let idx = degree - 1
-  let oct = (idx div len)
+  let oct = floorDiv(idx, len)
   let deg = idx - oct * len
   ns[deg] + oct * 12
 
