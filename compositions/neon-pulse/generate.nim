@@ -120,20 +120,15 @@ discard song.play("drums", verseKit, roleDrums).during("verse")
 discard song.play("drums", chorusFull, roleDrums).during("chorus")
 discard song.play("drums", breakRoll, roleDrums).during("break")
 discard song.play("drums", dropKit, roleDrums).during("drop")
-discard song.setParam("drums", "drive", 0.35'f32)
-discard song.setParam("drums", "level", -6.0'f32)
+discard song.applyPreset("drums", "trap_drums")   # характер установки (COMPOSE-021)
 
 # Бас: входит с verse, молчит в break (хард-кат) и outro.
 discard song.play("bass", bass808, roleBass, nodeType = "euterpia.organ").during("verse", "chorus", "drop")
-discard song.setParam("bass", "bars", 0.55'f32)    # плотный низ
-discard song.setParam("bass", "click", 0.6'f32)    # щелчок атаки
-discard song.setParam("bass", "tone", 0.4'f32)
-discard song.setParam("bass", "level", -8.0'f32)
+discard song.applyPreset("bass", "dark_bass")      # плотный низ + щелчок атаки
 
 # Пад: атмосфера intro/break/outro + подложка хора и дропа.
 discard song.play("pad", pad, rolePad, nodeType = "euterpia.strings").during("intro", "chorus", "break", "outro")
-discard song.setParam("pad", "ensemble", 9.0'f32)
-discard song.setParam("pad", "level", -13.0'f32)
+discard song.applyPreset("pad", "warm_pad")       # тёплый ансамбль, не соло-струна
 
 # Колокол: тема в intro, её вариации в chorus/drop, метки в break,
 # ретрофраза в outro (COMPOSE-033: вариации независимы по секциям).
@@ -142,13 +137,11 @@ discard song.play("bell", theme, roleLead).during("chorus").variant(1)   # кв�
 discard song.play("bell", theme, roleLead).during("drop").variant(4)     # инверсия-зеркало
 discard song.play("bell", bellHit, roleLead).during("break")
 discard song.play("bell", theme, roleLead).during("outro").variant(5)    # фраза задом
-discard song.setParam("bell", "decay", 8.0'f32)
-discard song.setParam("bell", "level", -10.0'f32)
+discard song.applyPreset("bell", "dark_bell")     # тёмный звон с долгим затуханием
 
 # Арпеджио: только в verse (контраст к колоколу) и в дропе (плотность).
 discard song.play("arp", arp, roleArp, nodeType = "euterpia.piano").during("verse", "drop")
-discard song.setParam("arp", "tone", 0.6'f32)
-discard song.setParam("arp", "decay", 1.4'f32)
+discard song.applyPreset("arp", "clean_piano")
 discard song.gain("arp", -13.0'f32)     # production-команда: level ноды (COMPOSE-012)
 discard song.pan("arp", 0.25'f32)       # чуть вправо — не спорит с колоколом
 
@@ -159,7 +152,7 @@ discard song.pan("arp", 0.25'f32)       # чуть вправо — не спо�
 # Пад вплывает в intro (мягкая кривая), сумматор поднимается к дропу.
 discard song.automate(ramp("pad", "level", 0.0, 8.bars, -32.0, -13.0,
                            curveSmooth))
-discard song.automate(ramp(MixTrack, "level", 32.0, 4.bars, -8.0, -6.0,
+discard song.automate(ramp(MixTrack, "level", 32.0, 4.bars, -9.5, -7.5,
                            curveLinear))
 
 # ============================================================================
@@ -170,6 +163,7 @@ discard song.automate(ramp(MixTrack, "level", 32.0, 4.bars, -8.0, -6.0,
 let notes = song.build()
 echo "Нот в пьесе: ", notes.len
 echo analyze(song)
+echo "IR: ", song.resolve()   # резолвер: CompositionIR (COMPOSE-046/047)
 
 # Музыкальная проверка ЗАМЫСЛА до компиляции (COMPOSE-029): форма, размещения,
 # гармония под мелодии. Потом — техническая проверка раскладки.
@@ -177,7 +171,7 @@ for p in validate(song):
   echo p
 
 var arr = song.toArrangement()
-arr.mixLevel = -6.0'f32   # запас от суммы пяти дорожек — без клиппинга
+arr.mixLevel = -7.5'f32   # запас от суммы пяти дорожек — без клиппинга
 
 # Проверка раскладки (имена нод, параметры) до генерации проекта.
 let problems = validate(arr)
