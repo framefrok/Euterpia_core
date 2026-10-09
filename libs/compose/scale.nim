@@ -190,7 +190,14 @@ proc `==`*(a, b: Scale): bool =
   a.root == b.root and a.kind == b.kind
 
 proc `$`*(s: Scale): string =
-  ## Читаемая тональность: `a minor`, `c dorian`.
-  noteName(s.root) & " " & scaleName(s.kind)
+  ## Читаемая тональность: `a minor`, `c dorian` (октава не печатается —
+  ## лад определяется тоникой, а не октетом; для низких нот срезается и
+  ## минус: `a-1` → `a`).
+  var n = noteName(s.root)
+  while n.len > 0 and n[^1] in {'0' .. '9'}:
+    n.setLen(n.len - 1)
+  if n.len > 0 and n[^1] == '-':
+    n.setLen(n.len - 1)
+  n & " " & scaleName(s.kind)
 
 {.pop.}

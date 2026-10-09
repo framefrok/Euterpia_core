@@ -253,6 +253,7 @@ import compose/rhythm
 import compose/random
 import compose/generators/drums
 import compose/validate
+import compose/analyze
 import compose/generators/bass
 import compose/generators/melody as genMelody
 import compose/automation
@@ -772,3 +773,30 @@ suite "Compose automation and production (COMPOSE-011/012)":
     let arr = s.toArrangement()
     check arr.entries[0].inst.params.len == 2
     check validate(arr).len == 0
+
+suite "Compose analysis (COMPOSE-031)":
+  test "отчёт описывает форму, дорожки, гармонию и плотность":
+    var s = piece("Neon", 140.0)
+    discard s.section("intro", 4.bars)
+    discard s.section("verse", 4.bars)
+    discard s.harmony(progression(@["Am", "F"]), minorScale("A"))
+    discard s.play("drums", trapKit(7), roleDrums,
+                   nodeType = "euterpia.drums").during("verse")
+    discard s.play("bell", melody("m", chordTone(1, 4.0)), roleLead,
+                   nodeType = "euterpia.bell").during("intro")
+    discard s.automate(ramp("bell", "level", 0.0, 4.0, -30.0, -8.0))
+    let r = analyze(s)
+    check r.title == "Neon"
+    check r.tempo == 140.0
+    check r.key == "a minor"
+    check r.lengthBars == 8
+    check r.sections.len == 2
+    check r.tracks.len == 2
+    check r.tracks[0].role == "drums"
+    check r.tracks[1].role == "lead"
+    check r.tracks[0].notes > 0
+    check r.totalNotes > 0
+    check r.density > 0
+    check r.chordChanges == 7     # Am|F меняется каждый такт (8 тактов)
+    check r.automationLanes == 1
+    check ($r).len > 0

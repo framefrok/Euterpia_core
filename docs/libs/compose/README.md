@@ -100,6 +100,7 @@ nim c -r --nimcache:build/nc_my_song --out:build/my_song my_song.nim
 | `compose/generators/bass` | фигуры баса: `bassLine(bsRoot/bsWalking/…)` |
 | `compose/generators/melody` | генератор мелодии: `generateMelody(seed)`, `respond` |
 | `compose/validate` | музыкальная проверка пьесы (до компиляции) |
+| `compose/analyze` | отчёт о пьесе: длина, форма, дорожки, плотность |
 | `compose/song` | раскладка: «инструмент + партия», запись `.eproj`/`.notes` |
 | `compose/engine` | рендер проекта в WAV (`loadScene` + `renderToWav`) |
 | `compose/midi` | Standard MIDI File: `writeMidi`, `writeMidiTracks` |

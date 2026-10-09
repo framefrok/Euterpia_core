@@ -67,4 +67,13 @@ python3 compositions/neon-pulse/tools/wav_peak.py \
         compositions/neon-pulse/neon_pulse.wav
 ```
 
-Ожидается `clipped_samples=0` (сейчас peak ≈ −1.3 dBFS: `arr.mixLevel = -6`).
+Ожидается `clipped_samples=0` (сейчас peak ≈ −2.3 dBFS: `arr.mixLevel = -6`).
+
+## Что печатает скрипт
+
+- `song.build()` — число нот (та же компиляция, что уходит в клипы Core);
+- `analyze(song)` — отчёт (COMPOSE-031): темп, тональность, длина, секции,
+  дорожки с ролями и числом нот, плотность, смены гармонии, автоматизация;
+- `validate(song)` и `validate(arr)` — музыкальная и техническая проверки
+  (в этом примере обе молчат);
+- прогресс рендера — индикатор `compose/progress` в stderr.
