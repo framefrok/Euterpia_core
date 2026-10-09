@@ -16,6 +16,8 @@
 import std/[unittest, strutils]
 
 import transport
+import sequencer
+  # AutomationCurve — сверка ординалов с кривыми Compose (COMPOSE-011).
 
 import compose/time
 import compose/scale
@@ -253,6 +255,7 @@ import compose/generators/drums
 import compose/validate
 import compose/generators/bass
 import compose/generators/melody as genMelody
+import compose/automation
 
 suite "Compose arrangement (COMPOSE-008, COMPOSE-024)":
   test "bell.play(theme).during(intro) компилируется в Part со стартом":
@@ -677,3 +680,95 @@ suite "Compose melody generator (COMPOSE-018)":
     check r.steps[1].chordDegree == 2
     check r.steps[2].tone == mtDegree   # последний шаг вызова — первым в ответе
     check r.steps[3].chordDegree == 3
+
+suite "Compose automation and production (COMPOSE-011/012)":
+  test "кривые Compose совпадают с AutomationCurve ядра":
+    check ord(curveLinear) == ord(AutomationCurve.acLinear)
+    check ord(curveStep) == ord(AutomationCurve.acStep)
+    check ord(curveSmooth) == ord(AutomationCurve.acSmooth)
+    check ord(curveBezier) == ord(AutomationCurve.acBezier)
+
+  test "цепочка точек и длина дорожки":
+    var lane = autom("bass", "level", 0.0, -40.0)
+    lane.at(8.0, -8.0, curveSmooth)
+    check lane.points.len == 2
+    check lane.lengthBars == 8.0
+    check lane.points[1].curve == curveSmooth
+
+  test "ramp длиной в музыкальных длительностях":
+    let lane = ramp("pad", "level", 4.0, 4.bars, -40.0, -6.0)
+    check lane.points.len == 2
+    check lane.points[0].bar == 4.0
+    check lane.points[1].bar == 8.0    # 4 такта после начала
+
+  test "дорожка компилируется в проект: nodeId, тики, кривые":
+    var s = piece("A", 120.0)
+    discard s.section("intro", 4.bars)
+    discard s.harmony(progression(@["Am"]), minorScale("A"))
+    let m = melody("m", chordTone(1, 4.0))
+    discard s.play("bell", m, roleLead, nodeType = "euterpia.bell").during("intro")
+    discard s.automate(ramp("bell", "level", 0.0, 4.0, -40.0, -6.0, curveSmooth))
+    let arr = s.toArrangement()
+    check validate(arr).len == 0
+    let proj = buildProject(arr)
+    check proj.sequencer.automationLanes.len == 1
+    let lane = proj.sequencer.automationLanes[0]
+    check lane.nodeId == 2                       # нода инструмента первого голоса
+    check lane.points.len == 2
+    check lane.points[0].tick == 0
+    check lane.points[1].tick == 4 * 4 * 960     # четвёртый такт (4/4)
+    check lane.points[0].value == -40.0
+    check lane.points[1].curve == ord(curveSmooth)
+
+  test "неизвестная дорожка/параметр — ошибка валидатора, не молчание":
+    var s = piece("A", 120.0)
+    discard s.section("intro", 4.bars)
+    discard s.play("bell", pattern("p", n(60, 4.0)), roleLead,
+                   nodeType = "euterpia.bell").during("intro")
+    discard s.automate(autom("nosuch", "level", 0.0, -6.0))
+    check hasErrors(validate(s))
+    let arr = s.toArrangement()
+    check hasErrors(validate(arr))
+
+  test "@mix адресует сумматор":
+    var s = piece("A", 120.0)
+    discard s.section("intro", 4.bars)
+    discard s.play("bell", pattern("p", n(60, 4.0)), roleLead,
+                   nodeType = "euterpia.bell").during("intro")
+    discard s.automate(ramp(MixTrack, "level", 0.0, 4.0, -6.0, -3.0))
+    let arr = s.toArrangement()
+    check validate(arr).len == 0
+    let proj = buildProject(arr)
+    check proj.sequencer.automationLanes.len == 1
+    check proj.sequencer.automationLanes[0].nodeId == 3   # mixId = 1 + 2*1
+
+  test "mute/unmute/solo управляют дорожками":
+    var s = piece("A", 120.0)
+    discard s.section("v", 4.bars)
+    discard s.play("a", pattern("pa", n(60, 4.0)), roleLead,
+                   nodeType = "euterpia.piano").during("v")
+    discard s.play("b", pattern("pb", n(64, 4.0)), roleBass,
+                   nodeType = "euterpia.piano").during("v")
+    discard s.mute("b")
+    let arr = s.toArrangement()
+    check arr.entries.len == 2
+    check not arr.entries[0].mute
+    check arr.entries[1].mute
+    check buildProject(arr).sequencer.tracks[1].mute
+    discard s.unmute("b")
+    check not s.toArrangement().entries[1].mute
+    discard s.solo("a")
+    let arr2 = s.toArrangement()
+    check not arr2.entries[0].mute
+    check arr2.entries[1].mute
+
+  test "gain/pan задают параметры ноды (и проверяются)":
+    var s = piece("A", 120.0)
+    discard s.section("v", 4.bars)
+    discard s.play("a", pattern("pa", n(60, 4.0)), roleLead,
+                   nodeType = "euterpia.piano").during("v")
+    discard s.gain("a", -9.0f32)
+    discard s.pan("a", 0.5f32)
+    let arr = s.toArrangement()
+    check arr.entries[0].inst.params.len == 2
+    check validate(arr).len == 0

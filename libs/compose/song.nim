@@ -19,7 +19,7 @@
 #
 # Слой: верхний (libs). Зависит от Core и Nodes — наоборот быть не может.
 
-import std/[json, os, strutils, tables, times]
+import std/[algorithm, json, math, os, strutils, tables, times]
 
 import signal_types
 import transport
@@ -28,6 +28,8 @@ import sdk/node_registry
 import builtin/builtin_registry
 import compose/builder
 import compose/score
+import compose/automation
+  # AutoLane/AutoPoint — DSL автоматизации; компиляция в тики и paramId — здесь.
 
 {.push raises: [].}
 
@@ -44,6 +46,9 @@ type
   PartEntry* = object
     inst*: Instrument
     part*: Part
+    mute*: bool
+      ## Дорожка выключена (TrackFormat.mute): ноты читаются, но не звучат —
+      ## то же, что mute дорожки в секвенсоре Core (#COMPOSE-012).
 
   Arrangement* = object
     ## Пьеса: метаданные и список партий в порядке следования дорожек.
@@ -54,6 +59,9 @@ type
     sampleRate*: float32
     mixLevel*: float32
     entries*: seq[PartEntry]
+    automation*: seq[AutoLane]
+      ## Дорожки автоматизации (масштаб: такты). Компилируются в
+      ## `sequencer.automationLanes` с числовыми id параметров (#COMPOSE-011).
 
 # ============================================================================
 # Описание
@@ -70,9 +78,10 @@ proc arrangement*(name: string; tempo: float32 = 120.0f32;
                   sampleRate: float32 = 48000.0f32): Arrangement =
   Arrangement(name: name, tempo: tempo, sampleRate: sampleRate, mixLevel: 0.0f32)
 
-proc add*(arr: var Arrangement; inst: Instrument; p: Part) =
+proc add*(arr: var Arrangement; inst: Instrument; p: Part;
+          mute: bool = false) =
   ## Добавить партию. Порядок вызовов = порядок дорожек = порядок нотных нод.
-  arr.entries.add PartEntry(inst: inst, part: p)
+  arr.entries.add PartEntry(inst: inst, part: p, mute: mute)
 
 # ============================================================================
 # Внутреннее
@@ -108,7 +117,7 @@ proc validate*(arr: Arrangement): seq[string] =
   discard registerBuiltinNodes(reg)
 
   if arr.entries.len == 0:
-    return @["внимание: в раскладке нет ни одной партии — проект будет пустым"]
+    result.add "внимание: в раскладке нет ни одной партии — проект будет пустым"
 
   var used: Table[string, int]
   for i, e in arr.entries:
@@ -133,6 +142,30 @@ proc validate*(arr: Arrangement): seq[string] =
         used[key] = i
     if e.part.bars.len == 0:
       result.add who & ": внимание: партия без тактов — будет тишина"
+
+  # Автоматизация: дорожка и параметр должны существовать (#COMPOSE-011).
+  # Проверка до сборки важна: `buildProject` пропускает проблемные дорожки, и
+  # без этого автоматизация исчезла бы молча (та же болезнь, что #311).
+  for lane in arr.automation:
+    let who = "automation («" & lane.track & "».«" & lane.param & "»)"
+    var nodeType = ""
+    if lane.track == MixTrack:
+      nodeType = "euterpia.mix"
+    else:
+      for e in arr.entries:
+        if e.part.name == lane.track:
+          nodeType = e.inst.nodeType
+          break
+    if nodeType.len == 0:
+      result.add who & ": ошибка: дорожки «" & lane.track &
+                 "» нет в раскладке (или её параметр перепутан со «@mix»)"
+      continue
+    if paramIdByName(reg, nodeType, lane.param) < 0:
+      result.add who & ": ошибка: у ноды " & nodeType & " нет параметра «" &
+                 lane.param & "»\n       допустимые параметры: " &
+                 paramNames(reg, nodeType).join(", ")
+    if lane.points.len == 0:
+      result.add who & ": внимание: пустая дорожка автоматизации"
 
 proc isError*(problem: string): bool =
   ## Проблема — ошибка (а не предупреждение)?
@@ -229,9 +262,41 @@ proc buildProject*(arr: Arrangement): ProjectFormat =
     clip.notes = e.part.toNotes(channel = i mod 16)
 
     var track = TrackFormat(id: int32(i + 1), name: e.part.name, trackType: 0,
-                            volume: 1.0f32, pan: 0.0f32)
+                            volume: 1.0f32, pan: 0.0f32, mute: e.mute)
     track.clips.add clip
     result.sequencer.tracks.add track
+
+  # Автоматизация: имя дорожки → нода инструмента (или `@mix`), имя параметра →
+  # числовой id по дескриптору. Точки заданы в тактах — переводим в тики тем же
+  # масштабом, что ноты (`barTicks`), и сортируем по тику: порядок в файле
+  # детерминирован (§21). Ошибки имени/параметра уже отдал `validate(arr)`,
+  # поэтому здесь беспроблемные дорожки просто пропускаются.
+  for lane in arr.automation:
+    var nodeId = -1
+    var nodeType = ""
+    if lane.track == MixTrack:
+      nodeId = mixId
+      nodeType = "euterpia.mix"
+    else:
+      for i, e in arr.entries:
+        if e.part.name == lane.track:
+          nodeId = 2 + 2 * i
+          nodeType = e.inst.nodeType
+          break
+    if nodeId < 0:
+      continue
+    let paramId = paramIdByName(reg, nodeType, lane.param)
+    if paramId < 0:
+      continue
+    var formatted = AutomationLaneFormat(nodeId: int32(nodeId),
+                                         paramId: uint32(paramId))
+    for p in lane.points:
+      formatted.points.add AutomationPointFormat(
+        tick: int32(round(float64(p.bar) * float64(barTicks))),
+        value: p.value,
+        curve: ord(p.curve))
+    formatted.points.sort(proc(a, b: AutomationPointFormat): int = cmp(a.tick, b.tick))
+    result.sequencer.automationLanes.add formatted
 
   result.graph.nodes.add makeNode(reg, "euterpia.mix", "Mix", mixId,
                                   @[("level", arr.mixLevel)])
