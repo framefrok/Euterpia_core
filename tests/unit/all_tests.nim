@@ -37,6 +37,7 @@ import test_compressor
 import test_delay
 import test_graph_compiler
 import test_pdc
+import test_node_registry
 import test_scheduler_stop
 import test_scheduler_pool
 import test_rt_guard
