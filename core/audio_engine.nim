@@ -174,8 +174,14 @@ proc clearStereoBuffer(
     inc i
 
 
-proc isPipelineValid(p: ptr CompiledPipeline): bool {.inline, rt.} =
-  ## Проверяет инвариант готовности пайплайна к рендерингу:
+proc isPipelineRuntimeReady(p: ptr CompiledPipeline): bool {.inline, rt.} =
+  ## Дешёвая RT-проверка готовности пайплайна к рендерингу (issue #391).
+  ##
+  ## O(1): смотрит только точки входа, но НЕ трогает `steps`, `stepCount` и
+  ## `masterBinding` — полная валидация `validatePipelineControl` не имеет
+  ## права вызываться из RT (MANIFEST §9: в RT нельзя аллоцировать и ходить
+  ## по памяти без нужды). `postGraphUpdate` прогоняет полную проверку ДО
+  ## публикации, поэтому к моменту вызова здесь пайплайн уже проверен.
   ## Пайплайн обязан иметь точку входа:
   ## 1. Либо монолитную процедуру исполнения (renderProc != nil).
   ## 2. Либо пошаговое исполнение с процедурой привязки мастер-буфера
@@ -184,6 +190,47 @@ proc isPipelineValid(p: ptr CompiledPipeline): bool {.inline, rt.} =
     return true
   result = (p.renderProc != nil) or (p.bindMasterProc != nil and (p.stepCount == 0 or p.steps != nil))
 
+
+proc validatePipelineControl(p: ptr CompiledPipeline): bool =
+  ## Полная проверка пайплайна на контрольной плоскости (issue #391,
+  ## EUT-NEW-038). Вызывается из `postGraphUpdate` ДО публикации в RT.
+  ##
+  ## `isPipelineRuntimeReady` смотрит только точки входа: пайплайн с
+  ## пронумерованными шагами, но без валидной привязки (userData), или с
+  ## шагом, чей `processProc` равен nil, проходил её и ронял движок внутри
+  ## `renderBlock`. Здесь, до того как пайплайн увидит RT, проверяется вся
+  ## структура:
+  ##   - шаги существуют, их столько, сколько заявлено;
+  ##   - у каждого шага есть `processProc` (шаг без обработчика -- битый
+  ##     пайплайн: компилятор не смог найти фабрику ноды);
+  ##   - привязка (userData) существует.
+  ##
+  ## ЗАПРЕЩЕНО вызывать из RT: обход шагов не O(1), а граница рендера
+  ## требует детерминированного времени. Это граница control-path -- по
+  ## образцу `postGraphUpdate`.
+  if p == nil:
+    return false
+  if not isPipelineRuntimeReady(p):
+    return false
+
+  if p.stepCount > 0:
+    if p.steps.isNil:
+      return false
+    # Шаг без обработчика: компилятор не смог найти фабрику ноды, и вызов
+    # в RT дал бы обращение по нулевому указателю.
+    for i in 0 ..< p.stepCount.int:
+      if p.steps[i].processProc.isNil:
+        return false
+
+    # Привязка параметров к нодам (userData): без неё applyParam не находит
+    # ноду, а renderBlock читает masterState по нулевому указателю.
+    # Сам тип PipelineBinding живёт в nodes/sdk и НЕ импортируется сюда
+    # по причине слоистой архитектуры (core не знает про SDK); проверяем
+    # только факт существования привязки.
+    if p.userData.isNil:
+      return false
+
+  true
 
 proc flushLocalRetire(engine: ptr AudioEngine) {.rt.} =
   if engine.localRetireCount == 0:
@@ -537,7 +584,7 @@ proc applyCommands(engine: ptr AudioEngine) {.rt.} =
       if newPipeline != oldPipeline:
         # Гарантия инварианта до первого renderBlock:
         # Проверяем корректность структуры и наличие процедур рендеринга/привязки буферов.
-        if newPipeline != nil and not isPipelineValid(newPipeline):
+        if newPipeline != nil and not isPipelineRuntimeReady(newPipeline):
           # Пайплайн повреждён или не удовлетворяет контракту привязки мастер-буфера:
           # не активируем его, отправляя сразу на утилизацию во избежание сбоя в RT.
           retirePipelineRT(engine, newPipeline)
@@ -1373,6 +1420,14 @@ proc postGraphUpdate*(
     return false
 
   if engine.retireBacklog.load(moAcquire) >= MaxRetireBacklog.int32:
+    return false
+
+  # Полная проверка структуры пайплайна ДО публикации (issue #391,
+  # EUT-NEW-038): control-path может себе позволить O(n) по шагам, а RT -- нет.
+  # Ломаный пайплайн (шаги без masterBinding, шаг без processProc)
+  # отклоняется здесь и не доезжает до renderBlock, где он уронил бы движок.
+  # Вызывающий по-прежнему владеет памятью p, если публикация отклонена.
+  if p != nil and not validatePipelineControl(p):
     return false
 
   let id = engine.sharedPool.acquireBlock()
