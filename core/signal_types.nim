@@ -36,11 +36,27 @@ type
     count*: int32
     events* {.align: 64.}: array[MaxBlockEvents, RealtimeEvent]
 
+  AudioLayout* = enum
+    ## Явная раскладка буфера (issue #392). Раньше planar/interleaved
+    ## вычислялась эвристикой `stride >= frames`, что для interleaved при
+    ## frames=1, stride=1 давало `1 >= 1` → ложно planar, и сэмпл читался
+    ## неверно. Теперь раскладка — часть буфера: её задаёт тот, кто буфер
+    ## создаёт (компилятор графа, мастер-выход, пул).
+    ##
+    ## `alAuto` — «не задано явно»: единственный безопасный дефолт для
+    ## существующего кода и тестов, которые создают AudioBuffer без layout.
+    ## При `alAuto` `isPlanar` падает обратно на эвристику (фолбэк), но с
+    ## этим значением буфер живёт ровно до первого явного `layout`.
+    alAuto
+    alPlanar    ## каналы лежат подряд: index = ch*stride + frame
+    alInterleaved ## каналы чередуются: index = frame*channels + ch
+
   AudioBuffer* = object
     data*: ptr UncheckedArray[float32]
     channels*: int32
     frames*: int32
     stride*: int32
+    layout*: AudioLayout
 
   PAudioBuffer* = ptr AudioBuffer
 

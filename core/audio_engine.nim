@@ -432,7 +432,8 @@ proc createAudioEngine*(
     data: result.inputArena,
     channels: 0,
     frames: 0,
-    stride: int32(signal_types.MaxBlockSize)
+    stride: int32(signal_types.MaxBlockSize),
+    layout: alPlanar
   )
   result.inputDeviceChannels = 0
   result.inputStatusFlags.store(0'u32, moRelaxed)
