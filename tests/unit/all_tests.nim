@@ -19,6 +19,7 @@ import test_midi_api
 import test_midi_smf
 import test_midi_export
 import test_scene_ownership
+import test_scene_resources
 import test_backend_contract
 import test_backend_registry
 import test_input_path
