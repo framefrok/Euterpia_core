@@ -369,27 +369,14 @@ proc projectBody*(doc: Document; path: string): JsonNode =
   result["summary"] = summarize(summary)
 
 proc writeAtomic*(path: string; proj: ProjectFormat): ProjectResult[void] =
-  ## Атомарная запись: временный файл рядом с целью + переименование.
+  ## Атомарная запись проекта (issue #390).
   ##
-  ## `moveFile` перезаписывает цель на всех платформах (POSIX `rename`,
-  ## Windows `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`), поэтому читатель
-  ## видит либо старый файл целиком, либо новый целиком. Имя tmp-файла
-  ## содержит PID: два параллельных `set` не подменят друг другу буфер.
-  let tmp = path & ".tmp-" & $getCurrentProcessId()
-  let saved = saveProject(proj, tmp)
-  if not saved.success:
-    return saved
-  try:
-    moveFile(tmp, path)
-  except CatchableError as e:
-    # Мусорный tmp-файл не оставляем: иначе он переживёт процесс и будет
-    # выглядеть как «второй проект».
-    try:
-      removeFile(tmp)
-    except CatchableError:
-      discard
-    return err[void](pekIOError, "не удалось заменить файл проекта: " & e.msg)
-  ok[void]()
+  ## Раньше tmp+rename жили здесь, а `core/project.nim` `saveProject` писал
+  ## файл напрямую — и любой другой вызывающий (embedding, тесты, адаптеры)
+  ## оставался незащищённым. Теперь атомарность — контракт самого Core API
+  ## (`saveProject`: tmp + flush + close + rename + best-effort `.bak`), а
+  ## эта обёртка сохранена для совместимости вызывающих CLI.
+  saveProject(proj, path)
 
 proc splitInline*(args: seq[string]): seq[string] =
   ## `--tempo=140` → `--tempo`, `140`: ключи с инлайн-значением

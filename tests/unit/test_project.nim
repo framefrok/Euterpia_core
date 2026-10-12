@@ -11,7 +11,7 @@
 #     невозможная запись -> pekIOError;
 #   - ProjectResult не бросает исключений наружу.
 
-import std/[unittest, os, tables]
+import std/[unittest, os, strutils, tables]
 import project
 
 proc makeProject(): ProjectFormat =
@@ -307,4 +307,147 @@ suite "project: ошибки":
 
     check p.sequencer.automationLanes.len == 1
     check p.sequencer.automationLanes[0].points.len == 0
+
+
+# =============================================================================
+# issue #390: атомарная запись, канонический JSON, без молчаливого сужения
+# =============================================================================
+
+suite "project: атомарная запись (#390)":
+  test "перезапись атомарна: прежняя версия уходит в .bak, tmp-мусора нет":
+    let path = getTempDir() / "euterpia_atomic_390.json"
+    check saveProject(makeProject(), path).success
+    defer:
+      removeFile(path)
+      removeFile(path & ".bak")
+      removeFile(path & ".tmp-" & $getCurrentProcessId())
+
+    var p2 = makeProject()
+    p2.metadata.name = "Second"
+    check saveProject(p2, path).success
+    check readFile(path).contains "\"Second\""
+    # tmp-файл процесса не переживает запись.
+    check not fileExists(path & ".tmp-" & $getCurrentProcessId())
+    # Прежняя версия сохранена как .bak (страховка, best-effort).
+    check fileExists(path & ".bak")
+    check readFile(path & ".bak").contains "\"Demo\""
+    # Итоговый файл — валидный JSON и загружается.
+    let loaded = loadProject(path)
+    check loaded.success
+    check loaded.value.metadata.name == "Second"
+
+  test "сбой записи в недоступный каталог -> pekIOError без побочек":
+    let r = saveProject(makeProject(), "/nonexistent_dir_9f3/euterpia/x.json")
+    check not r.success
+    check r.error.kind == pekIOError
+
+suite "project: канонический JSON (#390)":
+  test "порядок вставки параметров не влияет на байт-поток файла":
+    # Логически равные проекты (разный порядок вставки в Table) дают
+    # байт-в-байт одинаковый файл — иначе мусорные git-диффы.
+    let pathA = getTempDir() / "euterpia_canon_a.json"
+    let pathB = getTempDir() / "euterpia_canon_b.json"
+    defer:
+      removeFile(pathA); removeFile(pathB)
+      removeFile(pathA & ".bak"); removeFile(pathB & ".bak")
+
+    var pa = ProjectFormat(format: ProjectFormatName, version: ProjectFormatVersion)
+    var na = NodeFormat(id: 1, nodeType: "fx.gain")
+    na.parameters["alpha"] = 1.0f
+    na.parameters["beta"] = 2.0f
+    na.parameters["gamma"] = 3.0f
+    pa.graph.nodes.add na
+
+    var pb = ProjectFormat(format: ProjectFormatName, version: ProjectFormatVersion)
+    var nb = NodeFormat(id: 1, nodeType: "fx.gain")
+    nb.parameters["gamma"] = 3.0f
+    nb.parameters["alpha"] = 1.0f
+    nb.parameters["beta"] = 2.0f
+    pb.graph.nodes.add nb
+
+    check saveProject(pa, pathA).success
+    check saveProject(pb, pathB).success
+    check readFile(pathA) == readFile(pathB)
+
+    # Ключи в файле отсортированы, а не в порядке хеш-таблицы.
+    let text = readFile(pathA)
+    check text.find("\"alpha\"") < text.find("\"beta\"")
+    check text.find("\"beta\"") < text.find("\"gamma\"")
+
+suite "project: сужение типов отвергается (#390)":
+  test "pitch: 300 -> pekInvalidFormat, а не молчаливое 44":
+    let path = getTempDir() / "euterpia_pitch_300.json"
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "sequencer":{"tracks":[{"id":1,"clips":[{"id":1,"notes":[
+        {"startTick":0,"duration":240,"pitch":300,"velocity":80,"channel":0}]}]}]}}""")
+    defer: removeFile(path)
+    let r = loadProject(path)
+    check not r.success
+    check r.error.kind == pekInvalidFormat
+    # Ошибка называет поле и значение, а не «битый файл».
+    check r.error.message.contains "pitch"
+    check r.error.message.contains "300"
+
+  test "отрицательная latency не превращается в 4294967295":
+    let path = getTempDir() / "euterpia_latency_neg.json"
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "graph":{"nodes":[{"id":1,"nodeType":"fx.gain","latencyReported":-1}]}}""")
+    defer: removeFile(path)
+    let r = loadProject(path)
+    check not r.success
+    check r.error.kind == pekInvalidFormat
+    check r.error.message.contains "latencyReported"
+
+  test "velocity: 256 и channel: -1 тоже отвергаются":
+    let path = getTempDir() / "euterpia_velocity_256.json"
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "sequencer":{"tracks":[{"id":1,"clips":[{"id":1,"notes":[
+        {"startTick":0,"duration":240,"pitch":60,"velocity":256,"channel":-1}]}]}]}}""")
+    defer: removeFile(path)
+    let r = loadProject(path)
+    check not r.success
+    check r.error.kind == pekInvalidFormat
+    check r.error.message.contains "velocity"
+
+  test "значения на границе диапазона проходят":
+    let path = getTempDir() / "euterpia_pitch_edge.json"
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "sequencer":{"tracks":[{"id":1,"clips":[{"id":1,"notes":[
+        {"startTick":0,"duration":240,"pitch":255,"velocity":0,"channel":15}]}]}]}}""")
+    defer: removeFile(path)
+    let r = loadProject(path)
+    check r.success
+    let note = r.value.sequencer.tracks[0].clips[0].notes[0]
+    check note.pitch == 255'u8
+    check note.velocity == 0'u8
+    check note.channel == 15'u8
+
+  test "отсутствующие необязательные поля по-прежнему не роняют загрузку":
+    # Проверка диапазона не превращается в валидацию схемы: файл без
+    # необязательных полей остаётся загружаемым (совместимость вперёд).
+    let path = getTempDir() / "euterpia_optional_390.json"
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "graph":{"nodes":[{"id":1,"nodeType":"fx.gain"}]}}""")
+    defer: removeFile(path)
+    let r = loadProject(path)
+    check r.success
+    check r.value.graph.nodes.len == 1
+    check r.value.graph.nodes[0].latencyReported == 0'u32
+
+  test "round-trip self-made проекта с нулевым timeSignature не отклоняется":
+    # TimeSignatureFormat(numerator: 0) — это «не задано» (дефолт Nim-объекта),
+    # а не размер такта. Сериализация подставляет 4/4, иначе round-trip
+    # отклонялся бы собственной валидацией диапазона `1..64`.
+    let path = getTempDir() / "euterpia_ts_zero_390.json"
+    removeFile(path); removeFile(path & ".bak")
+    var p = ProjectFormat(format: ProjectFormatName, version: ProjectFormatVersion)
+    p.metadata = ProjectMetadata(name: "NoSig")  # timeSignature остаётся 0/0
+    check saveProject(p, path).success
+    defer:
+      removeFile(path)
+      removeFile(path & ".bak")
+    let r = loadProject(path)
+    check r.success
+    check r.value.metadata.timeSignature.numerator == 4
+    check r.value.metadata.timeSignature.denominator == 4
 
