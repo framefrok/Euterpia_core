@@ -19,6 +19,7 @@ import test_midi_api
 import test_midi_smf
 import test_midi_export
 import test_scene_ownership
+import test_scene_resources
 import test_backend_contract
 import test_backend_registry
 import test_input_path
@@ -37,6 +38,7 @@ import test_compressor
 import test_delay
 import test_graph_compiler
 import test_pdc
+import test_node_registry
 import test_scheduler_stop
 import test_scheduler_pool
 import test_rt_guard

@@ -1,5 +1,5 @@
 # project.nim
-import std/[json, tables, os]
+import std/[algorithm, json, tables, os]
 
 {.push raises: [].}
 
@@ -200,9 +200,17 @@ proc toJson*(p: ProjectFormat): JsonNode =
   meta["author"] = %p.metadata.author
   meta["sampleRate"] = %p.metadata.sampleRate
   meta["tempo"] = %p.metadata.tempo
+  # 0 в нулевом TimeSignatureFormat означает «не задан» — это дефолт
+  # Nim-объекта, а не размер такта. Пишем 4/4, как при загрузке
+  # отсутствующего блока: иначе round-trip self-made проекта отклонялся
+  # бы собственной валидацией диапазона (issue #390).
+  let tsNum = (if p.metadata.timeSignature.numerator <= 0: 4
+               else: p.metadata.timeSignature.numerator)
+  let tsDen = (if p.metadata.timeSignature.denominator <= 0: 4
+               else: p.metadata.timeSignature.denominator)
   meta["timeSignature"] = %*{
-    "numerator": p.metadata.timeSignature.numerator,
-    "denominator": p.metadata.timeSignature.denominator
+    "numerator": tsNum,
+    "denominator": tsDen
   }
   meta["created"] = %p.metadata.created
   meta["modified"] = %p.metadata.modified
@@ -226,8 +234,14 @@ proc toJson*(p: ProjectFormat): JsonNode =
     result["latencyIntrinsic"] = %int(n.latencyIntrinsic)
     result["isSubgraph"] = %n.isSubgraph
     
+    # Канонический JSON (issue #390): ключи параметров сортируются, иначе два
+    # логически равных проекта (разный порядок вставки в Table) дают разный
+    # байт-поток — мусорные git-диффы и невоспроизводимость в CI/AI.
     var params = newJObject()
-    for k, v in n.parameters: params[k] = %v
+    var paramKeys: seq[string] = @[]
+    for k in n.parameters.keys: paramKeys.add k
+    paramKeys.sort()
+    for k in paramKeys: params[k] = %n.parameters.getOrDefault(k)
     result["parameters"] = params
     
     var subNodes = newJArray()
@@ -371,7 +385,25 @@ proc isJObject(n: JsonNode): bool {.inline.} =
   ## Поэтому такие элементы пропускаются.
   not n.isNil and n.kind == JObject
 
-proc parseNode(n: JsonNode): NodeFormat =
+proc narrowInt(n: JsonNode, key: string, lo, hi: int64, def: int,
+               err: var string): int =
+  ## Целочисленное поле с проверкой диапазона (issue #390, EUT-NEW-034).
+  ##
+  ## JSON-число читается как `int64` и проверяется на попадание в `[lo, hi]`
+  ## ДО сужения до целевого типа поля. Выход за диапазон — ошибка формата с
+  ## именем поля, а не молчаливый wrap: `pitch: 300` раньше превращался в 44,
+  ## `latency: -1` — в 4294967295. Отсутствующее поле (или не-целое значение)
+  ## по-прежнему даёт `def` — необязательные поля не роняют загрузку.
+  let val = n{key}
+  if val == nil or val.kind != JInt: return def
+  let v = val.num
+  if v < lo or v > hi:
+    if err.len > 0: err.add("; ")
+    err.add("'" & key & "'=" & $v & " вне диапазона [" & $lo & ".." & $hi & "]")
+    return def
+  return int(v)
+
+proc parseNode(n: JsonNode, err: var string): NodeFormat =
   result.id = safeInt(n, "id")
   result.nodeType = safeStr(n, "nodeType")
   result.name = safeStr(n, "name")
@@ -381,8 +413,8 @@ proc parseNode(n: JsonNode): NodeFormat =
   result.ctrlOutCount = safeInt(n, "ctrlOutCount")
   result.eventInCount = safeInt(n, "eventInCount")
   result.eventOutCount = safeInt(n, "eventOutCount")
-  result.latencyReported = uint32(safeInt(n, "latencyReported"))
-  result.latencyIntrinsic = uint32(safeInt(n, "latencyIntrinsic"))
+  result.latencyReported = uint32(narrowInt(n, "latencyReported", 0, int64(high(uint32)), 0, err))
+  result.latencyIntrinsic = uint32(narrowInt(n, "latencyIntrinsic", 0, int64(high(uint32)), 0, err))
   result.isSubgraph = safeBool(n, "isSubgraph")
   
   let paramsNode = n{"parameters"}
@@ -395,7 +427,7 @@ proc parseNode(n: JsonNode): NodeFormat =
   if subNodesNode != nil and subNodesNode.kind == JArray:
     for sn in subNodesNode:
       if not isJObject(sn): continue
-      result.subgraphNodes.add(parseNode(sn))
+      result.subgraphNodes.add(parseNode(sn, err))
       
   let subConnsNode = n{"subgraphConnections"}
   if subConnsNode != nil and subConnsNode.kind == JArray:
@@ -412,12 +444,47 @@ proc parseNode(n: JsonNode): NodeFormat =
 # ============================================================================
 
 proc saveProject*(project: ProjectFormat, filepath: string): ProjectResult[void] =
+  ## Атомарная запись проекта (issue #390): tmp-файл рядом с целью + flush +
+  ## close + переименование. Читатель видит либо старый файл целиком, либо
+  ## новый целиком: падение в момент записи не портит `project.eproj`.
+  ##
+  ## Имя tmp содержит PID: две параллельные записи не подменят друг другу
+  ## буфер. Прежний файл сохраняется как `.bak` (best-effort: неудача бэкапа
+  ## не отменяет успешную запись, это страховка, а не контракт).
+  let tmp = filepath & ".tmp-" & $getCurrentProcessId()
+  var f: File
   try:
-    let jsonStr = pretty(project.toJson())
-    writeFile(filepath, jsonStr)
+    f = open(tmp, fmWrite)
+    try:
+      f.write(pretty(project.toJson()))
+      f.flushFile()
+    finally:
+      close(f)
+    # Best-effort бэкап прежней версии до подмены.
+    if fileExists(filepath):
+      try:
+        copyFile(filepath, filepath & ".bak")
+      except CatchableError:
+        discard
+    moveFile(tmp, filepath)
     return ok[void]()
   except CatchableError as e:
+    # Мусорный tmp-файл не оставляем: иначе он переживёт процесс и будет
+    # выглядеть как «второй проект».
+    try:
+      removeFile(tmp)
+    except CatchableError:
+      discard
     return err[void](pekIOError, "Failed to save project: " & e.msg)
+  except Exception:
+    # `moveFile` — `extern` без аннотации raises, поэтому под `raises: []`
+    # требует перехвата и `Exception` (Defect = авария: OOM, assertion).
+    # Ловим, чтобы сбой записи стал `pekIOError`, а не стеком наружу.
+    try:
+      removeFile(tmp)
+    except CatchableError:
+      discard
+    return err[void](pekIOError, "Failed to save project: OS error")
 
 proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
   if not fileExists(filepath):
@@ -452,6 +519,12 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
   res.format = fmt
   res.version = ver
 
+  # Коллектор нарушений диапазонов (issue #390, EUT-NEW-034): сужение типа
+  # (`pitch: 300` → 44, `latency: -1` → 4294967295) раньше происходило молча.
+  # Теперь файл с такими значениями отклоняется целиком: частично
+  # протащенная нота хуже честной ошибки.
+  var rangeErr: string
+
   # Дефолты метаданных совпадают с initTransport (48 кГц, 120 BPM, 4/4).
   # Без этого проект без блока metadata — или без timeSignature внутри
   # него — давал бы вырожденное состояние: tempo 0 обнуляет
@@ -469,8 +542,10 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
     res.metadata.tempo = float32(safeFloat(metaNode, "tempo", 120.0))
     let tsNode = metaNode{"timeSignature"}
     if tsNode != nil and tsNode.kind == JObject:
-      res.metadata.timeSignature.numerator = int32(safeInt(tsNode, "numerator", 4))
-      res.metadata.timeSignature.denominator = int32(safeInt(tsNode, "denominator", 4))
+      res.metadata.timeSignature.numerator =
+        int32(narrowInt(tsNode, "numerator", 1, 64, 4, rangeErr))
+      res.metadata.timeSignature.denominator =
+        int32(narrowInt(tsNode, "denominator", 1, 64, 4, rangeErr))
     res.metadata.created = safeStr(metaNode, "created")
     res.metadata.modified = safeStr(metaNode, "modified")
     
@@ -480,7 +555,7 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
     if nodesNode != nil and nodesNode.kind == JArray:
       for n in nodesNode:
         if not isJObject(n): continue
-        res.graph.nodes.add(parseNode(n))
+        res.graph.nodes.add(parseNode(n, rangeErr))
     let connsNode = graphNode{"connections"}
     if connsNode != nil and connsNode.kind == JArray:
       for c in connsNode:
@@ -498,7 +573,7 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
       for t in tracksNode:
         if not isJObject(t): continue
         var track = TrackFormat(
-          id: int32(safeInt(t, "id")),
+          id: int32(narrowInt(t, "id", int64(low(int32)), int64(high(int32)), 0, rangeErr)),
           name: safeStr(t, "name"),
           trackType: safeInt(t, "trackType"),
           volume: float32(safeFloat(t, "volume", 1.0)),
@@ -506,35 +581,35 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
           mute: safeBool(t, "mute"),
           solo: safeBool(t, "solo"),
           armed: safeBool(t, "armed"),
-          inputChannel: int32(safeInt(t, "inputChannel")),
-          outputBus: int32(safeInt(t, "outputBus"))
+          inputChannel: int32(narrowInt(t, "inputChannel", int64(low(int32)), int64(high(int32)), 0, rangeErr)),
+          outputBus: int32(narrowInt(t, "outputBus", int64(low(int32)), int64(high(int32)), 0, rangeErr))
         )
         let clipsNode = t{"clips"}
         if clipsNode != nil and clipsNode.kind == JArray:
           for c in clipsNode:
             if not isJObject(c): continue
             var clip = ClipFormat(
-              id: int32(safeInt(c, "id")),
+              id: int32(narrowInt(c, "id", int64(low(int32)), int64(high(int32)), 0, rangeErr)),
               clipType: safeInt(c, "clipType"),
               name: safeStr(c, "name"),
-              startTick: int32(safeInt(c, "startTick")),
-              lengthTicks: int32(safeInt(c, "lengthTicks")),
+              startTick: int32(narrowInt(c, "startTick", int64(low(int32)), int64(high(int32)), 0, rangeErr)),
+              lengthTicks: int32(narrowInt(c, "lengthTicks", int64(low(int32)), int64(high(int32)), 0, rangeErr)),
               loopEnabled: safeBool(c, "loopEnabled"),
-              audioBufferId: int32(safeInt(c, "audioBufferId", -1)),
-              resourceId: int32(safeInt(c, "resourceId", -1)),
-              offsetFrames: int64(safeInt(c, "offsetFrames", 0)),
-              color: uint32(safeInt(c, "color"))
+              audioBufferId: int32(narrowInt(c, "audioBufferId", int64(low(int32)), int64(high(int32)), -1, rangeErr)),
+              resourceId: int32(narrowInt(c, "resourceId", int64(low(int32)), int64(high(int32)), -1, rangeErr)),
+              offsetFrames: int64(narrowInt(c, "offsetFrames", 0, int64(high(int64)), 0, rangeErr)),
+              color: uint32(narrowInt(c, "color", 0, int64(high(uint32)), 0, rangeErr))
             )
             let notesNode = c{"notes"}
             if notesNode != nil and notesNode.kind == JArray:
               for n in notesNode:
                 if not isJObject(n): continue
                 clip.notes.add(NoteFormat(
-                  startTick: int32(safeInt(n, "startTick")),
-                  duration: int32(safeInt(n, "duration")),
-                  pitch: uint8(safeInt(n, "pitch")),
-                  velocity: uint8(safeInt(n, "velocity")),
-                  channel: uint8(safeInt(n, "channel"))
+                  startTick: int32(narrowInt(n, "startTick", int64(low(int32)), int64(high(int32)), 0, rangeErr)),
+                  duration: int32(narrowInt(n, "duration", int64(low(int32)), int64(high(int32)), 0, rangeErr)),
+                  pitch: uint8(narrowInt(n, "pitch", 0, 255, 0, rangeErr)),
+                  velocity: uint8(narrowInt(n, "velocity", 0, 255, 0, rangeErr)),
+                  channel: uint8(narrowInt(n, "channel", 0, 255, 0, rangeErr))
                 ))
             track.clips.add(clip)
         res.sequencer.tracks.add(track)
@@ -544,15 +619,15 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
       for l in lanesNode:
         if not isJObject(l): continue
         var lane = AutomationLaneFormat(
-          paramId: uint32(safeInt(l, "paramId")),
-          nodeId: int32(safeInt(l, "nodeId"))
+          paramId: uint32(narrowInt(l, "paramId", 0, int64(high(uint32)), 0, rangeErr)),
+          nodeId: int32(narrowInt(l, "nodeId", int64(low(int32)), int64(high(int32)), 0, rangeErr))
         )
         let pointsNode = l{"points"}
         if pointsNode != nil and pointsNode.kind == JArray:
           for p in pointsNode:
             if not isJObject(p): continue
             lane.points.add(AutomationPointFormat(
-              tick: int32(safeInt(p, "tick")),
+              tick: int32(narrowInt(p, "tick", int64(low(int32)), int64(high(int32)), 0, rangeErr)),
               value: float32(safeFloat(p, "value")),
               curve: safeInt(p, "curve")
             ))
@@ -576,14 +651,20 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
     for r in resourcesNode:
       if not isJObject(r): continue
       res.resources.add(AudioResourceFormat(
-        id: int32(safeInt(r, "id")),
+        id: int32(narrowInt(r, "id", int64(low(int32)), int64(high(int32)), 0, rangeErr)),
         path: safeStr(r, "path"),
-        sampleRate: int32(safeInt(r, "sampleRate")),
-        channels: int32(safeInt(r, "channels")),
-        numFrames: int64(safeInt(r, "numFrames")),
-        bitsPerSample: int32(safeInt(r, "bitsPerSample")),
+        sampleRate: int32(narrowInt(r, "sampleRate", 1, int64(high(int32)), 0, rangeErr)),
+        channels: int32(narrowInt(r, "channels", 1, int64(high(int32)), 0, rangeErr)),
+        numFrames: int64(narrowInt(r, "numFrames", 0, int64(high(int64)), 0, rangeErr)),
+        bitsPerSample: int32(narrowInt(r, "bitsPerSample", 0, int64(high(int32)), 0, rangeErr)),
         isFloat: safeBool(r, "isFloat"),
         copy: safeBool(r, "copy")))
+
+  # Значения вне диапазона целевых типов (issue #390, EUT-NEW-034): файл
+  # отклоняется целиком, а не загружается с молчаливо обрезанными полями.
+  if rangeErr.len > 0:
+    return err[ProjectFormat](pekInvalidFormat,
+      "Значения полей вне допустимого диапазона: " & rangeErr)
 
   return ok[ProjectFormat](res)
 

@@ -228,6 +228,74 @@ proc paramFromNormalized*(d: NodeDesc; paramId: uint32; n: float32): float32 {.i
   p.minValue + clamp(n, 0.0f, 1.0f) * span
 
 # ==============================================================================
+# Валидация дескриптора (issue #388, EUT-NEW-017)
+# ==============================================================================
+
+proc validateNodeDesc*(desc: ptr NodeDesc): string =
+  ## Структурная проверка описателя ПЕРЕД регистрацией в реестре.
+  ##
+  ## Возвращает пустую строку, если дескриптор валиден, иначе — причину
+  ## отказа. Это gate SDK (EUT-NEW-017): `PipelineStep` хранит порты в
+  ## фиксированных массивах (`MaxAudioPorts`/`MaxCtrlPorts`/`MaxEventPorts`),
+  ## поэтому дескриптор с `audioOutCount=100` приводил бы к чтению и записи
+  ## за границей структуры на горячей стороне. Здесь проверяется только
+  ## СТРУКТУРА; сверка `structSize`/`apiVersion` — работа реестра
+  ## (EUT-NEW-016), потому что ABI-поля перезаписываются только после того,
+  ## как реестр убедился, что структура действительно наша.
+  if desc.isNil:
+    return "дескриптор nil"
+  if readFixed(desc.id).len == 0:
+    return "пустой id ноды"
+
+  if desc.audioInCount < 0 or desc.audioInCount > MaxAudioPorts:
+    return "audioInCount=" & $desc.audioInCount &
+           " вне диапазона 0.." & $MaxAudioPorts
+  if desc.audioOutCount < 0 or desc.audioOutCount > MaxAudioPorts:
+    return "audioOutCount=" & $desc.audioOutCount &
+           " вне диапазона 0.." & $MaxAudioPorts
+  if desc.ctrlInCount < 0 or desc.ctrlInCount > MaxCtrlPorts:
+    return "ctrlInCount=" & $desc.ctrlInCount &
+           " вне диапазона 0.." & $MaxCtrlPorts
+  if desc.ctrlOutCount < 0 or desc.ctrlOutCount > MaxCtrlPorts:
+    return "ctrlOutCount=" & $desc.ctrlOutCount &
+           " вне диапазона 0.." & $MaxCtrlPorts
+  if desc.eventInCount < 0 or desc.eventInCount > MaxEventPorts:
+    return "eventInCount=" & $desc.eventInCount &
+           " вне диапазона 0.." & $MaxEventPorts
+  if desc.eventOutCount < 0 or desc.eventOutCount > MaxEventPorts:
+    return "eventOutCount=" & $desc.eventOutCount &
+           " вне диапазона 0.." & $MaxEventPorts
+  if desc.latencyFrames < 0:
+    return "latencyFrames=" & $desc.latencyFrames & " отрицательная"
+  if desc.maxChannels < 0 or desc.maxChannels > MaxAudioPorts:
+    return "maxChannels=" & $desc.maxChannels &
+           " вне диапазона 0.." & $MaxAudioPorts
+
+  # Параметры: сначала счётчик (цикл ниже читает params[0 ..< paramCount]),
+  # затем каждый параметр по отдельности.
+  if desc.paramCount < 0 or desc.paramCount > NodeMaxParams:
+    return "paramCount=" & $desc.paramCount &
+           " вне диапазона 0.." & $NodeMaxParams
+  for i in 0 ..< int(desc.paramCount):
+    let p = addr desc.params[i]
+    let pname = readFixed(p.name)
+    let label = (if pname.len > 0: pname else: $p.id)
+    if p.minValue > p.maxValue:
+      return "параметр \"" & label & "\": minValue=" & $p.minValue &
+             " больше maxValue=" & $p.maxValue
+    # Обе границы участвуют в сравнении, поэтому NaN default тоже отклоняется.
+    if not (p.defaultValue >= p.minValue and p.defaultValue <= p.maxValue):
+      return "параметр \"" & label & "\": default=" & $p.defaultValue &
+             " вне диапазона [" & $p.minValue & ", " & $p.maxValue & "]"
+    if not (p.step > 0.0f):
+      return "параметр \"" & label & "\": step=" & $p.step & " должен быть > 0"
+    for j in 0 ..< i:
+      if desc.params[j].id == p.id:
+        return "параметр id=" & $p.id & " объявлен повторно"
+
+  ""
+
+# ==============================================================================
 # Инстанцирование
 # ==============================================================================
 

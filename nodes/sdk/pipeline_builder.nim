@@ -16,7 +16,7 @@
 # Потокобезопасность: сборка — только холодная сторона. После сборки
 # в audio thread работают только bindMasterProc и applyParamProc.
 
-import std/tables
+import std/[algorithm, tables]
 import
   signal_types,
   node_interface,
@@ -130,6 +130,33 @@ proc buildPipeline*(reg: var NodeRegistry; g: var NodeGraph;
   if not cr.success:
     return false
 
+  # Мастер обязан существовать, иметь аудиовыход и не иметь исходящих
+  # аудио-связей (issue #391, EUT-NEW-037): раньше `masterState` молча
+  # оставался nil, если id не находился в графе, и движок играл без привязки
+  # мастер-ноды. Теперь каждый случай даёт свой вид CompileError с id ноды,
+  # и `graph check` говорит, что именно сломано.
+  let masterEntry = g.nodes.getOrDefault(masterNodeId, EditorNode())
+  if masterNodeId < 0 or not g.nodes.hasKey(masterNodeId):
+    cr = CompileResult(success: false,
+      error: CompileError(kind: cekMasterInvalid, nodeId: masterNodeId,
+                          portIdx: -1, connection: -1))
+    return false
+  if masterEntry.audioOutCount < 1:
+    cr = CompileResult(success: false,
+      error: CompileError(kind: cekMasterInvalid, nodeId: masterNodeId,
+                          portIdx: -1, connection: -1))
+    return false
+  var masterHasOutgoing = false
+  for c in g.connections:
+    if c.srcNodeId == masterNodeId and c.sigType == sigAudio:
+      masterHasOutgoing = true
+      break
+  if masterHasOutgoing:
+    cr = CompileResult(success: false,
+      error: CompileError(kind: cekMasterInvalid, nodeId: masterNodeId,
+                          portIdx: -1, connection: -1))
+    return false
+
   let p = cr.pipeline
   if p.isNil or p.steps.isNil or p.stepCount <= 0:
     destroyPipeline(p)
@@ -160,9 +187,17 @@ proc buildPipeline*(reg: var NodeRegistry; g: var NodeGraph;
     binding = nil
     return false
 
-  for id, node in g.nodes:
+  # Обход нод по отсортированным id (issue #391, EUT-NEW-036): `for id, node
+  # in g.nodes` шёл в произвольном порядке Table, и привязка параметров к
+  # нодам зависела от хеш-порядка. Порядок теперь детерминирован.
+  var bindIds: seq[int] = @[]
+  for id in g.nodes.keys: bindIds.add id
+  bindIds.sort()
+
+  for id in bindIds:
     if binding.count >= nodeCount.int32:
       break
+    let node = g.nodes.getOrDefault(id, EditorNode())
     let entry = reg.findNodeType(node.nodeType)
     binding.nodeIds[binding.count] = id.int32
     binding.states[binding.count] = node.userData

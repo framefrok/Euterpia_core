@@ -1409,7 +1409,23 @@ proc runGraphCheck(ctx: var Ctx; scan: ArgScan): Report =
                 of gvUnknownType, gvInstantiateFailed:
                   "euterpia node types — какие типы доступны этой сборке"
                 of gvAllocationFailed:
-                  "граф слишком велик для этой сборки: разбейте его на подграфы"),
+                  "граф слишком велик для этой сборки: разбейте его на подграфы"
+                of gvUnknownNode:
+                  "связь ссылается на ноду, которой нет в графе — добавьте ноду или уберите связь"
+                of gvUnknownSrcPort:
+                  "у ноды-источника нет такого аудиовыхода — сверьте число портов с типом ноды"
+                of gvUnknownDstPort:
+                  "у ноды-приёмника нет такого аудиовхода — сверьте число портов с типом ноды"
+                of gvSignalMismatch:
+                  "тип сигнала связи не поддерживается — используйте sigAudio, sigControl или sigEvent"
+                of gvMultipleWriter:
+                  "на один вход пишут два источника — оставьте один или добавьте ноду слияния"
+                of gvDuplicateConnection:
+                  "одна и та же связь задана дважды — уберите дубль"
+                of gvNegativePortIdx:
+                  "отрицательный индекс порта — задайте неотрицательный номер порта"
+                of gvMasterInvalid:
+                  "мастер-нода не может быть мастером — проверьте id, наличие аудиовыхода и отсутствие исходящих связей"),
       body = compileFacts)
   sections.add Section(id: "compile", title: "graph: компиляция",
                        checks: @[compileCheck])

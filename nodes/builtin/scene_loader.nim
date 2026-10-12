@@ -70,6 +70,11 @@ type
     what*: string
     message*: string
 
+  ResourceFacts = tuple[channels: int32, frames: int64]
+    ## Фактические метаданные аудиоресурса — из заголовка ФАЙЛА, а не из
+    ## JSON проекта (issue #389, EUT-NEW-018). Проект мог устареть; слот
+    ## обязан индексироваться по данным, с которыми реально загружен буфер.
+
   Scene* = object
     ## Собранная сцена: то, что нужно рендеру, и ничего больше.
     ok*: bool
@@ -271,11 +276,21 @@ proc fillClips(nodeId: int; st: ptr ClipState; track: TrackFormat;
                sampleRate: int32; tempo: float64;
                buffers: var seq[seq[float32]];
                bufferIndex: var Table[int32, int];
-               issues: var seq[SceneIssue]) =
+               resMeta: var Table[int32, ResourceFacts];
+               issues: var seq[SceneIssue]): string =
   ## Раскладывает аудиоклипы дорожки в ноду-плеер (issue #107): читает
   ## ресурсы, кэширует сэмплы по id ресурса и наполняет слоты.
+  ##
+  ## Возвращает пустую строку или ФАТАЛЬНУЮ ошибку загрузки (EUT-NEW-019):
+  ## частота файла обязана совпадать с частотой сцены — иначе тик → сэмпл
+  ## считается по частоте проекта, а файл играет «как есть»: выше, короче и
+  ## не в такт. Молча такое не проходит; ресемплинг — отдельная задача (#8).
+  ##
+  ## Метаданные слота берутся из ФАЙЛА, а не из JSON (EUT-NEW-018): проект
+  ## мог устареть (конвертация, перезапись файла), а индексация клипа идёт по
+  ## `resFrames`/`channels` — расхождение читало бы сэмплы за границей буфера.
   if st.isNil:
-    return
+    return ""
   clipClear(st[])
 
   # Тик → сэмпл: переводится ОДИН раз здесь, чтобы в audio-потоке осталась
@@ -299,32 +314,70 @@ proc fillClips(nodeId: int; st: ptr ClipState; track: TrackFormat;
     if bufIdx < 0:
       let path = resolveResourcePath(baseDir, res.path)
       var samples: seq[float32]
+      var info: AudioFileInfo
       try:
-        (samples, _) = loadAudioFile(path)
+        (samples, info) = loadAudioFile(path)
       except CatchableError:
         issues.add SceneIssue(nodeId: nodeId, what: "resource",
           message: "аудиоресурс не прочитан: " & path)
         continue
-      if samples.len == 0 or res.channels <= 0:
+      if samples.len == 0 or info.channels <= 0 or info.numFrames <= 0:
         issues.add SceneIssue(nodeId: nodeId, what: "resource",
           message: "аудиоресурс пуст: " & path)
         continue
+
+      let actualChannels = int32(info.channels)
+      let actualFrames = info.numFrames
+      if int64(samples.len) != int64(actualChannels) * actualFrames:
+        issues.add SceneIssue(nodeId: nodeId, what: "resource",
+          message: "аудиоресурс повреждён: " & path & " — заголовок обещает " &
+            $actualFrames & " кадров × " & $actualChannels & " кан. = " &
+            $(int64(actualChannels) * actualFrames) & " сэмплов, прочитано " &
+            $samples.len)
+        continue
+
+      # EUT-NEW-019: SR файла обязан совпадать с SR сцены: тик → сэмпл
+      # считается по частоте проекта, а файл читается без ресемплинга.
+      # 44.1k в проекте 48k играл бы выше и короче — это ошибка данных,
+      # а не «звучит немного иначе».
+      if info.sampleRate > 0 and sampleRate > 0 and
+         info.sampleRate != sampleRate:
+        return "аудиоресурс " & path & ": файл " & $info.sampleRate &
+               " Гц, а сцена " & $sampleRate & " Гц — ресемплинг не " &
+               "реализован (#8); пересохраните файл под частоту проекта"
+
+      # EUT-NEW-018: сверка метаданных ресурса с фактическими данными файла.
+      # Поле 0 (старый проект / неизвестно) расхождением не считается.
+      if res.channels != actualChannels or res.numFrames != actualFrames or
+         (res.sampleRate != 0 and res.sampleRate != info.sampleRate):
+        issues.add SceneIssue(nodeId: nodeId, what: "resource",
+          message: "метаданные ресурса #" & $res.id &
+            " не совпадают с файлом: в проекте " & $res.sampleRate & " Гц, " &
+            $res.channels & " кан., " & $res.numFrames & " кадров; в файле " &
+            $info.sampleRate & " Гц, " & $actualChannels & " кан., " &
+            $actualFrames & " кадров — взяты данные файла")
+
       # Сначала кладём буфер в список (владение сцены), потом берём на него
       # указатель: элементы seq не двигаются при росте ВНЕШНЕГО списка.
       buffers.add samples
       bufIdx = buffers.len - 1
       bufferIndex[res.id] = bufIdx
+      resMeta[res.id] = (channels: actualChannels, frames: actualFrames)
 
+    # Слот всегда получает ФАКТИЧЕСКИЕ метаданные файла (кэш по id ресурса).
+    let facts = resMeta.getOrDefault(res.id,
+      (channels: res.channels, frames: res.numFrames))
     let startSample = int64(round(float64(clip.startTick) * samplesPerTick))
     let lengthSamples =
       int64(round(float64(max(clip.lengthTicks, 0'i32)) * samplesPerTick))
     let endSample = startSample + lengthSamples
     let data = cast[ptr UncheckedArray[float32]](addr buffers[bufIdx][0])
-    if not clipAddSlot(st[], data, res.channels, res.numFrames,
+    if not clipAddSlot(st[], data, facts.channels, facts.frames,
                        clip.offsetFrames, startSample, endSample):
       issues.add SceneIssue(nodeId: nodeId, what: "clip",
         message: "клип \"" & clip.name & "\" не поместился в ноду " & ClipTypeId &
           " (слотов не больше " & $MaxClipSlots & ")")
+  ""
 
 proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
                 masterNodeId: int = -1;
@@ -343,6 +396,7 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
   var clipStates: seq[tuple[id: int, st: ptr ClipState]] = @[]
   var clipBuffers: seq[seq[float32]] = @[]
   var bufferIndex = initTable[int32, int]()
+  var clipMeta = initTable[int32, ResourceFacts]()
 
   result.ok = false
   result.sampleRate = if sampleRate > 0: sampleRate else: 48000
@@ -501,9 +555,15 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
 
   for k in 0 ..< withAudio.len:
     let track = proj.sequencer.tracks[withAudio[k]]
-    fillClips(clipStates[k].id, clipStates[k].st, track, proj, baseDir,
-              result.sampleRate, float64(proj.metadata.tempo),
-              clipBuffers, bufferIndex, result.issues)
+    let clipErr = fillClips(clipStates[k].id, clipStates[k].st, track, proj,
+                            baseDir, result.sampleRate,
+                            float64(proj.metadata.tempo),
+                            clipBuffers, bufferIndex, clipMeta,
+                            result.issues)
+    if clipErr.len > 0:
+      # Фатальная ошибка данных ресурса (SR-файл ≠ SR-сцена, EUT-NEW-019):
+      # рендерил бы не в такт — лучше явный отказ при загрузке.
+      return failScene(result, clipErr)
     # Конец сцены — по тикам клипов: рендер мыслит музыкальным временем.
     for clip in track.clips:
       if clip.clipType == ClipTypeAudio:

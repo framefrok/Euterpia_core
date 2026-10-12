@@ -38,18 +38,44 @@ type
     nodes*: Table[int, EditorNode]
     connections*: seq[EditorConnection]
 
+  ## Классификация ошибки компиляции (issue #391, EUT-NEW-035).
+  ##
+  ## Раньше было 4 вида, и все, кроме цикла, звучали как «не компилируется».
+  ## Пользователь не мог отличить «соединение ссылается на несуществующую
+  ## ноду» от «на ноде нет такого порта» — и правил граф наугад. Теперь
+  ## каждый класс — отдельный вердикт с указанием ноды/порта, и `graph check`
+  ## называет конкретное место поломки.
   CompileErrorKind* = enum
     cekNone
     cekCycleDetected
     cekPdcCycleDetected
     cekAllocationFailed
+    cekUnknownNode           ## связь ссылается на ноду, которой нет в графе
+    cekUnknownSrcPort        ## нет такого аудиовыхода у ноды-источника
+    cekUnknownDstPort        ## нет такого аудиовхода у ноды-приёмника
+    cekSignalMismatch        ## sigType связи невалиден
+    cekMultipleWriter        ## на один вход пишут два источника
+    cekDuplicateConnection   ## одна и та же связь задана дважды
+    cekNegativePortIdx       ## отрицательный индекс порта
+    cekMasterInvalid         ## мастер ненайдён / не может быть мастером
+
+  ## Ошибка компиляции с адресом поломки (issue #391).
+  ##
+  ## `kind` — класс, остальное — координаты, чтобы сообщение было
+  ## «нода 7, аудиовыход 2: нет такого порта», а не «ошибка компиляции».
+  CompileError* = object
+    kind*: CompileErrorKind
+    nodeId*: int             ## виновная нода (0, если не применимо)
+    portIdx*: int            ## виновный порт (-1, если не применимо)
+    connection*: int         ## индекс связи в `srcGraph.connections` (-1)
+    detail*: string          ## уточнение для лога/CLI (без аллокаций в RT)
 
   CompileResult* = object
     case success*: bool
     of true:
       pipeline*: ptr CompiledPipeline
     of false:
-      error*: CompileErrorKind
+      error*: CompileError
 
 # ============================================================================
 # COMPILER STATE & HELPERS
@@ -71,7 +97,7 @@ proc nextId*(a: var IdAllocator): int =
   result = a.nextId
   inc(a.nextId)
 
-proc initAdjacencyList(g: NodeGraph): AdjacencyList =
+proc initAdjacencyList*(g: NodeGraph): AdjacencyList =
   result.outgoing = initTable[int, seq[int]]()
   result.incoming = initTable[int, seq[int]]()
   
@@ -212,7 +238,16 @@ proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator): NodeGraph =
   
   var idRemap = initTable[int, int]()
 
-  for id, node in g.nodes:
+  # Обход нод по отсортированным id (issue #391, EUT-NEW-036): `for id, node
+  # in g.nodes` шёл в произвольном порядке Table, из-за чего `idRemap` (а с ним
+  # и все сгенерированные id сабграфов/PDC) зависел от хеш-порядка. Теперь
+  # разворачивание и переприсвоение id — функция только от состава графа.
+  var flatIds: seq[int] = @[]
+  for id in g.nodes.keys: flatIds.add id
+  flatIds.sort()
+
+  for id in flatIds:
+    let node = g.nodes.getOrDefault(id, EditorNode())
     flattenNode(node, 0, allocator, idRemap, result.nodes, result.connections)
 
   for c in g.connections:
@@ -232,18 +267,29 @@ proc flattenGraph*(g: NodeGraph, allocator: ptr IdAllocator): NodeGraph =
 # 2. TOPOLOGICAL SORT 
 # ============================================================================
 proc topologicalSort*(g: NodeGraph, adj: AdjacencyList, sortedIds: var seq[int]): bool =
+  ## Порядок шагов пайплайна (issue #391, EUT-NEW-036).
+  ##
+  ## Очередь засевается обходом `Table`, чей порядок произволен — один и тот
+  ## же граф давал разный `sortedIds`, а значит и разный layout пайплайна
+  ## (разные шаги, разные буферы, разные версии в метриках). Теперь и засев,
+  ## и развязка идут по отсортированным по id, поэтому порядок шагов —
+  ## функция только от структуры графа.
   var inDegree = initTable[int, int]()
-  for id in g.nodes.keys:
+  # Отсортированный список id: детерминированный обход вместо порядка Table.
+  var nodeIds: seq[int] = @[]
+  for id in g.nodes.keys: nodeIds.add id
+  nodeIds.sort()
+  for id in nodeIds:
     inDegree[id] = adj.incoming.getOrDefault(id, @[]).len
 
   var q: seq[int] = @[]
-  q.setLen(g.nodes.len) 
+  q.setLen(g.nodes.len)
   var head = 0
   var tail = 0
 
-  for id, deg in inDegree:
-    if deg == 0:
-      # Защита от переполнения фиксированного буфера очереди очереди
+  for id in nodeIds:
+    if inDegree.getOrDefault(id, 0) == 0:
+      # Защита от переполнения фиксированного буфера очереди
       if tail >= q.len:
         return false
       q[tail] = id
@@ -255,7 +301,12 @@ proc topologicalSort*(g: NodeGraph, adj: AdjacencyList, sortedIds: var seq[int])
     inc(head)
     sortedIds.add(u)
 
-    for v in adj.outgoing.getOrDefault(u, @[]):
+    # Соседи обходятся в отсортированном порядке: две связи к одной ноде
+    # не должны переставлять её в зависимости от порядка вставки в Table.
+    let outs = adj.outgoing.getOrDefault(u, @[])
+    var outsSorted = outs
+    outsSorted.sort()
+    for v in outsSorted:
       let curDeg = inDegree.getOrDefault(v, 0) - 1
       inDegree[v] = curDeg
       if curDeg == 0:
@@ -388,8 +439,17 @@ proc analyzeLifetimes(g: NodeGraph, adj: AdjacencyList, sortedIds: seq[int]): (s
   var sortedNets: seq[NetLifetime] = @[]
   for v in netLifetimes.values:
     sortedNets.add(v)
-  
-  sortedNets.sort(proc(a, b: NetLifetime): int = cmp(a.birthStep, b.birthStep))
+
+  # Полный tie-break (issue #391, EUT-NEW-036): сортировка только по birthStep
+  # оставляла порядок нетов с одинаковым birthStep на усмотрение `sort`
+  # (нестабильного) и порядка Table — и назначенные номера буферов менялись
+  # между запусками. Детерминированный ключ делает reuse-план буферов
+  # воспроизводимым.
+  sortedNets.sort(proc(a, b: NetLifetime): int =
+    result = cmp(a.birthStep, b.birthStep)
+    if result == 0: result = cmp(a.net.srcNodeId, b.net.srcNodeId)
+    if result == 0: result = cmp(a.net.srcPortIdx, b.net.srcPortIdx)
+    if result == 0: result = cmp(ord(a.net.sigType), ord(b.net.sigType)))
 
   var netToBuffer = initTable[NetKey, int]()
   var bufferEndSteps: seq[int] = @[]
@@ -414,8 +474,118 @@ proc analyzeLifetimes(g: NodeGraph, adj: AdjacencyList, sortedIds: seq[int]): (s
 proc initGraphCompiler*(): GraphCompiler =
   GraphCompiler(allocator: IdAllocator(nextId: 100_000)) 
 
+proc validateGraph*(srcGraph: NodeGraph): CompileError =
+  ## Единая проверка графа ДО компиляции (issue #391, EUT-NEW-035).
+  ##
+  ## Раньше связи проверялись только внутри `topologicalSort`/`applyPDC`, и
+  ## битая ссылка всплывала либо как цикл («связь на несуществующую ноду»),
+  ## либо не всплывала вовсе — а дальше писала в память за пределами массивов
+  ## портов. Здесь проверяется всё, что можно проверить без компиляции:
+  ##   - существование нод в связях;
+  ##   - индексы портов против фактических `audioInCount/audioOutCount`
+  ##     (а не только против `MaxAudioPorts`);
+  ##   - валидность `sigType`;
+  ##   - занятость входа (два писателя на один вход);
+  ##   - дубли связей и отрицательные индексы.
+  ##
+  ## Возвращает `CompileError` с координатами; `cekNone` — граф валиден.
+  ## Детерминирован: связи обходятся в порядке `srcGraph.connections`, поэтому
+  ## одна и та же поломка всегда даёт одно и то же сообщение.
+  ##
+  ## `detail` здесь не заполняется: модуль целиком под `raises: []`, а
+  ## строковая конкатенация аллоцирует и может бросить. Человекочитаемый текст
+  ## по `kind`/`nodeId`/`portIdx` строит вызывающий (`graph_check.describe`) —
+  ## там это контрольная плоскость, а не RT.
+  result = CompileError(kind: cekNone, nodeId: 0, portIdx: -1, connection: -1)
+
+  # Занятость входов: ключ «нода-порт», значение — индекс связи-писателя.
+  var writers = initTable[(int, int), int]()
+
+  for i, c in srcGraph.connections:
+    # 1. Отрицательные индексы портов — мусор, а не «порт 0».
+    if c.srcPortIdx < 0:
+      return CompileError(kind: cekNegativePortIdx, nodeId: c.srcNodeId,
+        portIdx: c.srcPortIdx, connection: i)
+    if c.dstPortIdx < 0:
+      return CompileError(kind: cekNegativePortIdx, nodeId: c.dstNodeId,
+        portIdx: c.dstPortIdx, connection: i)
+
+    # 2. Ноды связи должны существовать.
+    if not srcGraph.nodes.hasKey(c.srcNodeId):
+      return CompileError(kind: cekUnknownNode, nodeId: c.srcNodeId,
+        portIdx: -1, connection: i)
+    if not srcGraph.nodes.hasKey(c.dstNodeId):
+      return CompileError(kind: cekUnknownNode, nodeId: c.dstNodeId,
+        portIdx: -1, connection: i)
+
+    # 3. Порт должен существовать у ноды по фактическому числу портов
+    #    СООТВЕТСТВУЮЩЕГО ТИПА. Проверка только против `MaxAudioPorts`
+    #    пропускала ссылку на порт, которого у ноды нет, — а компилятор потом
+    #    писал за пределами массивов. Проверять audio-порты для event-связи
+    #    тоже нельзя: у `euterpia.notes` их ноль, и связь eventOut→eventIn
+    #    объявлялась бы битой (issue #391).
+    #    `getOrDefault` не бросает KeyError (модуль под `raises: []`), а
+    #    «нода без портов этого типа» означает «порта нет» — ошибка.
+    let emptyNode = EditorNode(audioOutCount: 0, audioInCount: 0,
+                               ctrlOutCount: 0, ctrlInCount: 0,
+                               eventOutCount: 0, eventInCount: 0)
+    let srcNode = srcGraph.nodes.getOrDefault(c.srcNodeId, emptyNode)
+    let dstNode = srcGraph.nodes.getOrDefault(c.dstNodeId, emptyNode)
+    case c.sigType
+    of sigAudio:
+      if c.srcPortIdx >= int(srcNode.audioOutCount):
+        return CompileError(kind: cekUnknownSrcPort, nodeId: c.srcNodeId,
+          portIdx: c.srcPortIdx, connection: i)
+      if c.dstPortIdx >= int(dstNode.audioInCount):
+        return CompileError(kind: cekUnknownDstPort, nodeId: c.dstNodeId,
+          portIdx: c.dstPortIdx, connection: i)
+    of sigControl:
+      if c.srcPortIdx >= int(srcNode.ctrlOutCount):
+        return CompileError(kind: cekUnknownSrcPort, nodeId: c.srcNodeId,
+          portIdx: c.srcPortIdx, connection: i)
+      if c.dstPortIdx >= int(dstNode.ctrlInCount):
+        return CompileError(kind: cekUnknownDstPort, nodeId: c.dstNodeId,
+          portIdx: c.dstPortIdx, connection: i)
+    of sigEvent:
+      if c.srcPortIdx >= int(srcNode.eventOutCount):
+        return CompileError(kind: cekUnknownSrcPort, nodeId: c.srcNodeId,
+          portIdx: c.srcPortIdx, connection: i)
+      if c.dstPortIdx >= int(dstNode.eventInCount):
+        return CompileError(kind: cekUnknownDstPort, nodeId: c.dstNodeId,
+          portIdx: c.dstPortIdx, connection: i)
+
+    # 4. sigType должен быть известным классом (sigAudio/sigControl/sigEvent).
+    #    Мусор из файла (`sigType: 99`) не должен доходить до аудиобуферов,
+    #    где `case` просто проигнорирует неизвестный класс — и связь молча
+    #    перестанет проводить сигнал. Но `!= sigAudio` здесь быть НЕ должно:
+    #    нода может принимать event на вход и выдавать audio (инструменты —
+    #    ровно этот паттерн), поэтому аудио-проверка уже сделана выше по
+    #    фактическим портам соответствующего типа (issue #391).
+    if ord(c.sigType) < ord(sigAudio) or ord(c.sigType) > ord(sigEvent):
+      return CompileError(kind: cekSignalMismatch, nodeId: c.dstNodeId,
+        portIdx: c.dstPortIdx, connection: i)
+
+    # 5. Дубль связи: тот же источник пишет в тот же приёмник повторно. Это
+    #    безусловная ошибка — сигнал пришёл бы дважды, а при одинаковом diff
+    #    PDC выдало бы два одинаковых компенсатора в один вход.
+    #    `getOrDefault(-1)`: чтение таблицы не должно бросать под `raises: []`.
+    let key = (c.dstNodeId, c.dstPortIdx)
+    let prevIdx = writers.getOrDefault(key, -1)
+    if prevIdx >= 0:
+      let prev = srcGraph.connections[prevIdx]
+      if prev.srcNodeId == c.srcNodeId and prev.srcPortIdx == c.srcPortIdx:
+        return CompileError(kind: cekDuplicateConnection, nodeId: c.dstNodeId,
+          portIdx: c.dstPortIdx, connection: i)
+    writers[key] = i
+
 proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   var compiler = initGraphCompiler()
+
+  # Полная валидация до любой аллокации (issue #391): битый граф не должен
+  # доходить до `flattenGraph`, где индексы портов начинают трогать память.
+  let vErr = validateGraph(srcGraph)
+  if vErr.kind != cekNone:
+    return CompileResult(success: false, error: vErr)
   
   var g = flattenGraph(srcGraph, compiler.allocator)
   var adj = initAdjacencyList(g)
@@ -423,7 +593,8 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   var order: seq[int]
   if not topologicalSort(g, adj, order):
     if compiler.delayStates != nil: deallocShared(compiler.delayStates)
-    return CompileResult(success: false, error: cekCycleDetected)
+    return CompileResult(success: false,
+      error: CompileError(kind: cekCycleDetected, portIdx: -1, connection: -1))
 
   applyPDC(g, adj, order, compiler)
   
@@ -433,7 +604,8 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
         if compiler.delayStates[i].buffer != nil:
           deallocShared(compiler.delayStates[i].buffer)
       deallocShared(compiler.delayStates)
-    return CompileResult(success: false, error: cekPdcCycleDetected)
+    return CompileResult(success: false,
+      error: CompileError(kind: cekPdcCycleDetected, portIdx: -1, connection: -1))
 
   let (sortedNets, netToBuffer) = analyzeLifetimes(g, adj, order)
 
@@ -461,7 +633,8 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
         if compiler.delayStates[i].buffer != nil:
           deallocShared(compiler.delayStates[i].buffer)
       deallocShared(compiler.delayStates)
-    return CompileResult(success: false, error: cekAllocationFailed)
+    return CompileResult(success: false,
+      error: CompileError(kind: cekAllocationFailed, portIdx: -1, connection: -1))
 
   # Каждый скомпилированный граф обязан иметь непустую монотонную версию:
   # audio thread публикует её в метриках и по ней же отбрасывает устаревшие
