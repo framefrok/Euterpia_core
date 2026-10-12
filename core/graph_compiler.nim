@@ -502,6 +502,7 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
       p.audioBufferPool[i].frames = arenaFrames
       p.audioBufferPool[i].channels = int32(arenaChannels)
       p.audioBufferPool[i].stride = arenaFrames
+      p.audioBufferPool[i].layout = alPlanar
   
   p.ctrlPoolCount = maxCtrl
   p.ctrlPool = cast[ptr UncheckedArray[float32]](allocShared0(sizeof(float32) * maxCtrl))

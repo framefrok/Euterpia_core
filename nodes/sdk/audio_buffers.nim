@@ -28,10 +28,19 @@ import node_interface
 
 proc isPlanar*(buf: PAudioBuffer): bool {.inline.} =
   ## true — каналы лежат подряд (planar), false — interleaved.
+  ##
+  ## Явный `layout` читается первым делом (issue #392): он часть буфера, а
+  ## не вывод из математики. `alAuto` (буфер создан без раскладки — тесты,
+  ## сторонний код) — фолбэк на старую эвристику `stride >= frames`; для
+  ## frames<=1 она неразрешима, поэтому моно всегда planar.
   if buf.isNil or buf.channels <= 1:
     return true
-  let stride = if buf.stride > 0: buf.stride else: buf.frames
-  stride >= buf.frames
+  case buf.layout
+  of alPlanar: true
+  of alInterleaved: false
+  of alAuto:
+    let stride = if buf.stride > 0: buf.stride else: buf.frames
+    stride >= buf.frames
 
 proc channelCount*(buf: PAudioBuffer): int32 {.inline.} =
   if buf.isNil: return 0

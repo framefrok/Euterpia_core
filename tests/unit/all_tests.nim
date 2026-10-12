@@ -11,6 +11,7 @@
 {.warning[UnusedImport]: off.}
 
 import test_signal_types
+import test_audio_layout
 import test_transport
 import test_transport_runtime
 import test_native_abi
