@@ -404,3 +404,79 @@ suite "handles: проекция формата проекта":
     check openProjectHandles(tbl, proj) == heOk
     check tbl.liveHandleCount() == 0
     check tbl.slotCount(hkNode) == 0
+
+# =============================================================================
+# #394: инкрементальный sync проекции — поколения не сбрасываются
+# =============================================================================
+
+suite "handles: инкрементальный sync (#394)":
+  test "sync на пустой таблице заселяет адреса как openProjectHandles":
+    var tbl = newTable()
+    check syncProjectHandles(tbl, sampleProject()) == heOk
+    check tbl.liveHandleCount() == 4   # 3 ноды + дорожка
+    check tbl.nodeHandle(5).handleToText() == "node:5.1"
+    check tbl.trackHandle(1).handleToText() == "track:1.1"
+
+  test "модель не менялась — sync не растит поколения":
+    ## Регрессия против прежнего refreshHandles: каждая мутация пересобирала
+    ## таблицу с нуля, и поколения начинались заново. При инкрементальном sync
+    ## сущность, оставшаяся в модели, сохраняет слот и поколение.
+    var tbl = newTable()
+    var proj = sampleProject()
+    check syncProjectHandles(tbl, proj) == heOk
+    let gain = tbl.nodeHandle(1)
+    let track = tbl.trackHandle(1)
+    for i in 0 ..< 3:
+      check syncProjectHandles(tbl, proj) == heOk
+    check tbl.nodeHandle(1).handleToText() == gain.handleToText()
+    check tbl.trackHandle(1).handleToText() == track.handleToText()
+    check tbl.entityOf(gain).ok
+    check tbl.entityOf(gain).entityId == 1'u64
+
+  test "ABA: удаление и пересоздание той же id — старый handle отвергается":
+    ## Сердце #394: node:5.1 -> удалили #5 -> sync -> создали #5 заново ->
+    ## sync. Старый адрес обязан быть мёртв (слот пересоздан с новым
+    ## поколением), новый — валиден и текстом отличается от старого.
+    var tbl = newTable()
+    var proj = sampleProject()
+    check syncProjectHandles(tbl, proj) == heOk
+    let old = tbl.nodeHandle(5)
+    check old.handleToText() == "node:5.1"
+
+    # Удалили ноду #5 из модели; #1 и #2 остаются.
+    proj.graph.nodes = @[proj.graph.nodes[0], proj.graph.nodes[1]]
+    check syncProjectHandles(tbl, proj) == heOk
+    check tbl.entityOf(old).error in {heReleased, heStale}
+    check not tbl.hasEntity(hkNode, 5'u64)
+    check tbl.liveHandleCount() == 3   # 2 ноды + дорожка
+
+    # Пересоздали #5: слот занимается заново с новым поколением.
+    proj.graph.nodes.add NodeFormat(id: 5, nodeType: "mix.mix", name: "Sum")
+    check syncProjectHandles(tbl, proj) == heOk
+    let fresh = tbl.nodeHandle(5)
+    check tbl.entityOf(fresh).ok
+    check tbl.entityOf(fresh).entityId == 5'u64
+    check fresh.handleToText() != old.handleToText()
+    check tbl.entityOf(old).error == heStale
+    # Оставшиеся сущности поколение не потеряли.
+    check tbl.nodeHandle(1).handleToText() == "node:1.1"
+
+  test "sync: дорожки подчиняются той же дисциплине поколений":
+    var tbl = newTable()
+    var proj = sampleProject()
+    check syncProjectHandles(tbl, proj) == heOk
+    let track = tbl.trackHandle(1)
+    proj.sequencer.tracks.setLen(0)
+    check syncProjectHandles(tbl, proj) == heOk
+    check tbl.entityOf(track).error in {heReleased, heStale}
+    proj.sequencer.tracks = @[TrackFormat(id: 1, name: "Drums")]
+    check syncProjectHandles(tbl, proj) == heOk
+    let fresh = tbl.trackHandle(1)
+    check tbl.entityOf(fresh).ok
+    check fresh.handleToText() != track.handleToText()
+
+  test "sync без документа отказывает честно":
+    var empty: HandleTable
+    check initHandleTable(empty, 0'u32) == heInvalid
+    check syncProjectHandles(empty, sampleProject()) == heInvalid
+

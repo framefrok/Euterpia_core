@@ -74,13 +74,19 @@ type
       ## Отметка изменения; `nil` — не проставляется.
 
 proc refreshHandles*(doc: var Document): void =
-  ## Пересобрать адреса под текущую модель (#143). Просто и не может
-  ## «забыться»: единственный способ изменить модель — команда, а она
-  ## пересобрает адреса в конце.
-  var tbl: HandleTable
-  discard initHandleTable(tbl, doc.docId)
-  discard openProjectHandles(tbl, doc.proj)
-  doc.handles = tbl
+  ## Привести адреса в соответствие с моделью (#143). Просто и не может
+  ## «забыться»: единственный способ изменить модель -- команда, а она в конце
+  ## вызывает refreshHandles. С #394 это инкрементальный sync с сохранением
+  ## поколений, а не пересборка с нуля: прежний код создавал новый HandleTable
+  ## на каждой мутации, из-за чего поколение сбрасывалось и защита от ABA
+  ## внутри сессии не работала (node:10.1 -> удалили -> создали #10 -> снова
+  ## валиден node:10.1). При открытии документа таблица пуста, и sync
+  ## эквивалентен полному заселению.
+  if doc.handles.docId != doc.docId:
+    # Таблица ещё не построена (или принадлежит другому документу) — сначала
+    # инициализация; дальше идёт инкрементальный sync, поколения сохраняются.
+    discard initHandleTable(doc.handles, doc.docId)
+  discard syncProjectHandles(doc.handles, doc.proj)
 
 proc initDocument*(doc: var Document; proj: ProjectFormat; docId: uint32;
                    types: NodeTypeProvider = nil;
