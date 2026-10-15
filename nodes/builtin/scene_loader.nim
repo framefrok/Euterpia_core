@@ -136,6 +136,10 @@ proc disposeScene(s: var Scene) =
     destroyPipeline(s.pipeline)
     s.pipeline = nil
   for item in s.states:
+    # `entry` указывает в seq реестра — он обязан жить дольше сцены.
+    # На практике так и есть: CLI/Editor держат один реестр на весь процесс
+    # (см. `loadScene`), а локальный реестр + сцена — запрещённая комбинация
+    # (ASan ловит heap-use-after-free при выходе, #395).
     destroyNodeState(item.entry, item.state)
   s.states.setLen(0)
 
@@ -331,6 +335,10 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
                 sampleRate: int32 = 48000;
                 baseDir: string = ""): Scene =
   ## Собирает сцену из данных проекта.
+  ##
+  ## `reg` обязан жить дольше возвращённой сцены: состояния ссылаются на
+  ## записи реестра (`entry`), и уничтожение реестра раньше сцены даёт
+  ## висячие указатели (ASan: heap-use-after-free, #395).
   ##
   ## `masterNodeId` — нода, подключённая к мастер-шине. При -1 она
   ## определяется по графу: это единственная нода с аудиовыходом, у которой
