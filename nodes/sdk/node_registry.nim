@@ -66,11 +66,26 @@ iterator items*(reg: NodeRegistry): NodeTypeEntry =
   for entry in reg.entries:
     yield entry
 
+proc prepareNodeState*(entry: ptr NodeTypeEntry; state: pointer;
+                       sampleRate: float32) {.inline.} =
+  ## Подготовить состояние под частоту сессии на холодной стороне (#393).
+  ## Без хука (prepare == nil) — тихий no-op: ноде частота не важна.
+  if entry.isNil or entry.factory.isNil or state.isNil:
+    return
+  if entry.factory.prepare.isNil or sampleRate <= 0.0f:
+    return
+  entry.factory.prepare(state, sampleRate)
+
 proc instantiateNode*(reg: NodeRegistry; typeId: string; nodeId: int;
-                      outNode: var EditorNode): bool =
+                      outNode: var EditorNode;
+                      sampleRate: float32 = 48000.0f): bool =
   ## Создаёт состояние ноды и заполняет outNode.
   ## Владение состоянием переходит к вызывающему: он обязан вызвать
   ## destroyNodeState, когда нода удаляется из проекта.
+  ##
+  ## `sampleRate` — частота будущей сессии: после create сразу вызывается
+  ## хук prepare (если он есть), чтобы инструменты сделали reinit огибающих
+  ## здесь, а не в первом блоке audio thread (#393).
   let entry = reg.findNodeType(typeId)
   if entry.isNil:
     return false
@@ -79,6 +94,7 @@ proc instantiateNode*(reg: NodeRegistry; typeId: string; nodeId: int;
   if state.isNil:
     return false
 
+  prepareNodeState(entry, state, sampleRate)
   outNode = makeEditorNode(entry.desc, entry.factory, nodeId, state)
   true
 

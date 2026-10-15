@@ -156,6 +156,20 @@ proc processBellNode(ctx: ptr NodeProcessContext; audio: ptr NodeAudioPorts;
     q = events.inputs[0]
   instRender(st.abi, st.midi, outBuf, frames, q, addr st.scratch[0])
 
+proc prepareBellState(state: pointer; sampleRate: float32)
+    {.cdecl, raises: [], gcsafe.} =
+  ## Подготовка на холодной стороне (#393): reinit под частоту сессии
+  ## до первого блока в audio thread. После вызова частоты совпадают,
+  ## поэтому защитный reinit-блок в process не срабатывает.
+  if state.isNil or sampleRate <= 0.0f:
+    return
+  let st = cast[ptr BellState](state)
+  if abs(sampleRate - st.sampleRate) <= 0.01f:
+    return
+  if bellInitAt(addr st.g, sampleRate):
+    st.sampleRate = sampleRate
+    instSetSampleRate(st.midi, sampleRate)
+
 proc getBellDesc*(): ptr NodeDesc =
   if not bellReady:
     initBellDesc()
@@ -170,7 +184,8 @@ proc getBellFactory*(): ptr NodeFactory =
     bellFactory = NodeFactory(
       create: createBellState, destroy: destroyBellState,
       process: processBellNode, setParam: setBellParam,
-      getParam: getBellParam, reset: resetBellState)
+      getParam: getBellParam, reset: resetBellState,
+      prepare: prepareBellState)
   addr bellFactory
 
 {.pop.}

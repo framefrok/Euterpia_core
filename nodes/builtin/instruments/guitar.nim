@@ -266,6 +266,21 @@ proc processGuitarNode(
 # Экспорт
 # ==============================================================================
 
+proc prepareGuitarState(state: pointer; sampleRate: float32)
+    {.cdecl, raises: [], gcsafe.} =
+  ## Подготовка на холодной стороне (#393): reinit под частоту сессии
+  ## до первого блока в audio thread. После вызова частоты совпадают,
+  ## поэтому защитный reinit-блок в process не срабатывает.
+  if state.isNil or sampleRate <= 0.0f:
+    return
+  let st = cast[ptr GuitarState](state)
+  if abs(sampleRate - st.sampleRate) <= 0.01f:
+    return
+  if guitarInitAt(addr st.g, sampleRate):
+    st.sampleRate = sampleRate
+    instSetSampleRate(st.midi, sampleRate)
+    st.live = true
+
 proc getGuitarDesc*(): ptr NodeDesc =
   if not guitarReady:
     initGuitarDesc()
@@ -283,7 +298,8 @@ proc getGuitarFactory*(): ptr NodeFactory =
       process: processGuitarNode,
       setParam: setGuitarParam,
       getParam: getGuitarParam,
-      reset: resetGuitarState
+      reset: resetGuitarState,
+      prepare: prepareGuitarState
     )
   addr guitarFactory
 

@@ -270,6 +270,21 @@ proc processOrganNode(
 # Экспорт
 # ==============================================================================
 
+proc prepareOrganState(state: pointer; sampleRate: float32)
+    {.cdecl, raises: [], gcsafe.} =
+  ## Подготовка на холодной стороне (#393): reinit под частоту сессии
+  ## до первого блока в audio thread. После вызова частоты совпадают,
+  ## поэтому защитный reinit-блок в process не срабатывает.
+  if state.isNil or sampleRate <= 0.0f:
+    return
+  let st = cast[ptr OrganState](state)
+  if abs(sampleRate - st.sampleRate) <= 0.01f:
+    return
+  if organInitAt(addr st.g, sampleRate):
+    st.sampleRate = sampleRate
+    instSetSampleRate(st.midi, sampleRate)
+    st.live = true
+
 proc getOrganDesc*(): ptr NodeDesc =
   if not organReady:
     initOrganDesc()
@@ -287,7 +302,8 @@ proc getOrganFactory*(): ptr NodeFactory =
       process: processOrganNode,
       setParam: setOrganParam,
       getParam: getOrganParam,
-      reset: resetOrganState
+      reset: resetOrganState,
+      prepare: prepareOrganState
     )
   addr organFactory
 

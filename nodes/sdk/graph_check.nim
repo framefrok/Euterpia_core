@@ -78,13 +78,17 @@ proc describe*(v: GraphVerdict): string =
     "нода " & v.nodeType & " не создалась (повтор id или отказ фабрики)"
 
 proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
-                  conns: seq[GraphConnSpec]): GraphVerdict =
+                  conns: seq[GraphConnSpec];
+                  sampleRate: float32 = 48000.0f): GraphVerdict =
   ## Компилирует граф, собранный из описаний, и освобождает всё созданное.
   ##
   ## Проверяется ровно то, что проверяла бы загрузка проекта: тип ноды
   ## известен, состояние создаётся, связи образуют ациклический граф.
   ## Значения параметров здесь не применяются: неверное значение — это
   ## проверка данных (`param`/`project validate`), а не структуры графа.
+  ##
+  ## `sampleRate` уходит в instantiateNode, чтобы состояние получило хук
+  ## prepare под частоту сессии — ровно то же, что сделала бы загрузка (#393).
   var g: NodeGraph
   var created: seq[tuple[entry: ptr NodeTypeEntry, state: pointer]] = @[]
   var cr: CompileResult
@@ -108,7 +112,7 @@ proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
       return GraphVerdict(kind: gvUnknownType, nodeType: spec.nodeType)
 
     var node: EditorNode
-    if not reg.instantiateNode(spec.nodeType, spec.id, node):
+    if not reg.instantiateNode(spec.nodeType, spec.id, node, sampleRate):
       return GraphVerdict(kind: gvInstantiateFailed, nodeType: spec.nodeType)
     created.add (entry, node.userData)
     g.nodes[spec.id] = node

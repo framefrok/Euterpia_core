@@ -126,3 +126,31 @@ suite "delay":
     let (_, post) = argPeak(s, ExpectedEcho + 500, 2 * ExpectedEcho - 500)
     check abs(pre - 0.5f) < 0.02f
     check abs(post - 1.0f) < 0.02f
+
+  test "4 секунды достижимы при 96 kHz — ёмкость по максимальной частоте (#393)":
+    ## Регрессия против эвристики «int(DelayMaxSeconds) * 48000»: при 96 kHz
+    ## кольцо старого размера (192008 кадров) обрезало бы 4 с почти вдвое —
+    ## ядро урезает время до capacity - 4, и эхо пришло бы на ~2 с.
+    const
+      Sr96 = 96000.0'f32
+      EchoAt96 = int(DelayMaxSeconds * Sr96)       # 384000 кадров = 4 с
+    let blocks = EchoAt96 div TestBlockSize + 2
+    let s = renderNode(getDelayFactory(), getDelayDesc(), blocks,
+      setup = proc(state: pointer) =
+        let f = getDelayFactory()
+        f.setParam(state, DelayParamTimeL, DelayMaxSeconds, false)
+        f.setParam(state, DelayParamTimeR, DelayMaxSeconds, false)
+        f.setParam(state, DelayParamFeedback, 0.0f, false)
+        f.setParam(state, DelayParamMix, 1.0f, false),
+      prepare = proc(tb: var TestBuffers) =
+        if tb.blockIndex == 0:
+          tb.setInputSample(0, 1.0f),
+      sampleRate = Sr96)
+    check s.isFinite()
+    let (idx, amp) = argPeak(s, EchoAt96 - 1000, EchoAt96 + 1000)
+    check amp > 0.3f
+    check abs(idx - EchoAt96) <= 400
+    # При усечённом кольце (старая ёмкость) пик стоял бы на ~192004,
+    # то есть в окне настоящего эха был бы только хвост затухания.
+    let (_, clamped) = argPeak(s, 190000, 195000)
+    check clamped < 0.1f
