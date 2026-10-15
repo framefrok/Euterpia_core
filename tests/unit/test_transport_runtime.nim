@@ -160,3 +160,43 @@ suite "audio_engine: runtime-контракт транспорта (#257)":
       cast[ptr UncheckedArray[float32]](addr outBuf[0]),
       cast[ptr UncheckedArray[float32]](addr scratch[0]))
     check e.currentFrame() == total
+
+  test "неполный хвост — частичный блок без отката позиции (#395)":
+    # 3 полных блока + 100 кадров хвоста: позиция обязана дойти ровно до
+    # totalFrames. Прежний путь «полный блок + frame -= overshoot» давал
+    # ту же цифру БЕЗ цикла, но платой за счёт лишней обработки хвоста.
+    let e = mkEngine()
+    defer: destroyAudioEngine(e)
+
+    let total = int64(Block) * 3 + 100
+    var outBuf = newSeq[float32](int(total) * 2)
+    var scratch = newSeq[float32](int(Block) * 2)
+    e.renderOffline(
+      total,
+      cast[ptr UncheckedArray[float32]](addr outBuf[0]),
+      cast[ptr UncheckedArray[float32]](addr scratch[0]))
+    check e.currentFrame() == total
+
+  test "неполный хвост считает loop-wrap по остатку, а не по полному блоку (#395)":
+    # Случай, где старый откат терял wrap: цикл 100..300 (длина 200),
+    # старт с позиции 150, рендер 400 кадров = блок 256 + хвост 144.
+    # 400 кадров = ровно 2 полных прохода цикла, поэтому итог = 150.
+    #   Блок 1 (новый): 150 + 256 = 406 -> wrap -> 100 + (306 mod 200) = 206.
+    #   Хвост (новый): 206 + 144 = 350 -> wrap -> 100 + 50 = 150.
+    #   Хвост (старый): рендер полного блока 206 + 256 = 462 -> 162,
+    #   затем откат 256 - 144 = 112 -> 50, то есть ниже loopStart.
+    let e = mkEngine()
+    defer: destroyAudioEngine(e)
+
+    discard e.postSetLoop(true, 100'i64, 300'i64)
+    discard e.postSeekSamples(150)
+    discard e.postPlay()
+
+    let total = int64(Block) + 144
+    var outBuf = newSeq[float32](int(total) * 2)
+    var scratch = newSeq[float32](int(Block) * 2)
+    e.renderOffline(
+      total,
+      cast[ptr UncheckedArray[float32]](addr outBuf[0]),
+      cast[ptr UncheckedArray[float32]](addr scratch[0]))
+    check e.currentFrame() == 150
