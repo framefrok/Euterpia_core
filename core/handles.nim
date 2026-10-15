@@ -717,6 +717,77 @@ proc openProjectHandles*(tbl: var HandleTable; proj: ProjectFormat): HandleError
       error = heSlotOccupied
   error
 
+proc projectHasNodeId(proj: ProjectFormat; id: uint64): bool =
+  for node in proj.graph.nodes:
+    if node.id > 0 and uint64(node.id) == id:
+      return true
+  false
+
+proc projectHasTrackId(proj: ProjectFormat; id: uint64): bool =
+  for track in proj.sequencer.tracks:
+    if track.id > 0 and uint64(track.id) == id:
+      return true
+  false
+
+proc syncProjectHandles*(tbl: var HandleTable; proj: ProjectFormat): HandleError =
+  ## Инкрементально привести таблицу в соответствие модели (#394), СОХРАНЯЯ
+  ## поколения. В отличие от `openProjectHandles`, который засеивает с нуля,
+  ## эта процедура работает с уже живой таблицей: слот не пересоздаётся, если
+  ## он уже занят той же сущностью, поэтому её поколение не растёт.
+  ##
+  ## Зачем: `refreshHandles` раньше пересобирал таблицу с нуля на КАЖДОЙ
+  ## мутации, из-за чего поколение сбрасывалось и заявленная защита от ABA
+  ## внутри сессии не работала (`node:10.1` → удалили → создали #10 → снова
+  ## валиден `node:10.1`). Инкрементальный sync переносит поколения: удаление
+  ## сущности освобождает её слот (`releaseHandle`, deadGeneration растёт), а
+  ## пересоздание с тем же id занимает слот заново с НОВЫМ поколением
+  ## (`occupySlot`), поэтому старый handle отвергается как `heStale`/`heReleased`.
+  ##
+  ## Первый вызов на пустой таблице эквивалентен `openProjectHandles`.
+  if tbl.docId == 0'u32:
+    return heInvalid
+  var error = heOk
+
+  # 1. Освободить слоты сущностей, которых больше нет в модели.
+  #    releaseHandle снимает занятость и запоминает «умершее» поколение; длину
+  #    slots он не меняет, поэтому обход по индексу безопасен. Старый handle
+  #    удалённой сущности после этого отвергается (heReleased), а после
+  #    переиспользования слота — уже по поколению (heStale).
+  for kind in [hkNode, hkTrack]:
+    var i = 0
+    while i < tbl.slots[kind].len:
+      let s = tbl.slots[kind][i]
+      if s.alive:
+        let present =
+          case kind
+          of hkNode: projectHasNodeId(proj, s.entityId)
+          of hkTrack: projectHasTrackId(proj, s.entityId)
+          else: true
+        if not present:
+          let h = EntityHandle(docId: tbl.docId, slot: uint32(i),
+                               generation: s.generation, kind: kind)
+          discard tbl.releaseHandle(h)
+      inc i
+
+  # 2. Занять слоты для сущностей модели, у которых слота ещё нет. Уже занятые
+  #    слоты той же сущности не трогаем — поколение сохраняется (это и есть
+  #    защита от ложного ABA для сущностей, которые просто остались).
+  for node in proj.graph.nodes:
+    if node.id <= 0:
+      continue
+    if not tbl.hasEntity(hkNode, uint64(node.id)):
+      if not tbl.acquireHandleAt(hkNode, uint32(node.id), uint64(node.id))
+          .isValidHandle() and error == heOk:
+        error = heSlotOccupied
+  for track in proj.sequencer.tracks:
+    if track.id <= 0:
+      continue
+    if not tbl.hasEntity(hkTrack, uint64(track.id)):
+      if not tbl.acquireHandleAt(hkTrack, uint32(track.id), uint64(track.id))
+          .isValidHandle() and error == heOk:
+        error = heSlotOccupied
+  error
+
 proc nodeHandle*(tbl: HandleTable; nodeId: int): EntityHandle =
   ## Адрес ноды по её id в файле.
   if nodeId <= 0:
