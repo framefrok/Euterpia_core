@@ -32,7 +32,11 @@ const
 
 type GainRig = object
   engine: ptr AudioEngine
-  entry: ptr NodeTypeEntry
+  factory: ptr NodeFactory
+    ## Копия указателя на глобальную фабрику gain (синглтон модуля живёт
+    ## вечно). Хранить `ptr NodeTypeEntry` нельзя: он указывает внутрь
+    ## seq локального реестра из `mkGainRig`, который умирает при выходе, —
+    ## ASan ловит heap-use-after-free при выходе из процесса (#395, CI asan).
   state: pointer
 
 proc mkGainRig(): GainRig =
@@ -43,7 +47,9 @@ proc mkGainRig(): GainRig =
 
   var node: EditorNode
   doAssert reg.instantiateNode("euterpia.gain", GainNodeId, node)
-  result.entry = reg.findNodeType("euterpia.gain")
+  let entry = reg.findNodeType("euterpia.gain")
+  doAssert not entry.isNil
+  result.factory = entry.factory
   result.state = node.userData
 
   var g: NodeGraph
@@ -63,8 +69,8 @@ proc freeRig(rig: var GainRig) =
   if not rig.engine.isNil:
     destroyAudioEngine(rig.engine)
     rig.engine = nil
-  if not rig.state.isNil and not rig.entry.isNil:
-    destroyNodeState(rig.entry, rig.state)
+  if not rig.state.isNil and not rig.factory.isNil:
+    rig.factory.destroy(rig.state)
     rig.state = nil
 
 suite "офлайн: lossless automation (#395)":
@@ -92,7 +98,7 @@ suite "офлайн: lossless automation (#395)":
 
     # Последний параметр обязан дойти до состояния ноды.
     var got = 0.0'f32
-    check rig.entry.factory.getParam(rig.state, GainParamGain, addr got)
+    check rig.factory.getParam(rig.state, GainParamGain, addr got)
     check got == -3.0'f32
 
   test "параметр до активации пайплайна применяется при активации":
@@ -102,9 +108,9 @@ suite "офлайн: lossless automation (#395)":
     check rig.engine.applyParamNow(GainNodeId.int32, GainParamGain, -9.0'f32)
 
     var got = 0.0'f32
-    check rig.entry.factory.getParam(rig.state, GainParamGain, addr got)
+    check rig.factory.getParam(rig.state, GainParamGain, addr got)
     check got != -9.0'f32   # до активации ещё не применён
 
     flushQueuedCommands(rig.engine)
-    check rig.entry.factory.getParam(rig.state, GainParamGain, addr got)
+    check rig.factory.getParam(rig.state, GainParamGain, addr got)
     check got == -9.0'f32   # replayPendingParams довёл значение

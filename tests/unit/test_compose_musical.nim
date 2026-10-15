@@ -13,9 +13,10 @@
 #   * паттерны: `repeat`/`reverse`/`transpose`/`truncate`/`toMotif` и
 #     детерминированный `humanize` (один seed — один результат) (#COMPOSE-003).
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, math]
 
 import transport
+import notation
 import sequencer
   # AutomationCurve — сверка ординалов с кривыми Compose (COMPOSE-011).
 
@@ -859,6 +860,29 @@ suite "Compose IR and compiler (COMPOSE-046/047)":
     check proj.sequencer.tracks.len == 1
     check proj.sequencer.automationLanes.len == 1
     check proj.sequencer.automationLanes[0].nodeId == 2
+
+suite "Compose score notation (score)":
+  test "двойные точки: суффикс и round-trip в парсер ядра":
+    # 3.5/1.75/0.875 долей — вдвое пунктирные /2../4../8..; раньше 3.5
+    # округлялись до целой (/1) и бас «переезжал» сетку.
+    var p = part("bass")
+    p.add bar(100, n(60, 3.5), n(62, 1.75), n(64, 0.875))
+    let text = p.toNotation()
+    check "c4/2.." in text
+    check "d4/4.." in text
+    check "e4/8.." in text
+    let parsed = parseNotation(text)
+    check parsed.ok
+    check parsed.notes.len == 3
+    check parsed.notes[0].durationTicks ==
+      int32(round(3.5 * float(PpqTicksPerQuarter)))
+    check parsed.notes[1].durationTicks ==
+      int32(round(1.75 * float(PpqTicksPerQuarter)))
+    check parsed.notes[2].durationTicks ==
+      int32(round(0.875 * float(PpqTicksPerQuarter)))
+    check parsed.notes[0].pitch == 60
+    check parsed.notes[1].pitch == 62
+    check parsed.notes[2].pitch == 64
 
 suite "Compose analysis (COMPOSE-031)":
   test "отчёт описывает форму, дорожки, гармонию и плотность":
