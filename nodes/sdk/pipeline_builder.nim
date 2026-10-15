@@ -86,6 +86,7 @@ proc bindMasterProc(p: ptr CompiledPipeline; outBuf: ptr UncheckedArray[float32]
   b.masterOut.channels = 2
   b.masterOut.frames = frames
   b.masterOut.stride = 1
+  b.masterOut.layout = alInterleaved
   step.audio.outputs[0] = addr b.masterOut
 
 proc applyParamProc(p: ptr CompiledPipeline; nodeId: int32; paramId: uint32;
@@ -235,6 +236,7 @@ proc buildPipeline*(reg: var NodeRegistry; g: var NodeGraph;
   binding.masterOut.channels = 2
   binding.masterOut.frames = 0
   binding.masterOut.stride = 0
+  binding.masterOut.layout = alPlanar
   binding.masterOut.data = nil
 
   p.userData = binding

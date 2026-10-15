@@ -157,6 +157,20 @@ proc processRecorderNode(ctx: ptr NodeProcessContext; audio: ptr NodeAudioPorts;
     q = events.inputs[0]
   instRender(st.abi, st.midi, outBuf, frames, q, addr st.scratch[0])
 
+proc prepareRecorderState(state: pointer; sampleRate: float32)
+    {.cdecl, raises: [], gcsafe.} =
+  ## Подготовка на холодной стороне (#393): reinit под частоту сессии
+  ## до первого блока в audio thread. После вызова частоты совпадают,
+  ## поэтому защитный reinit-блок в process не срабатывает.
+  if state.isNil or sampleRate <= 0.0f:
+    return
+  let st = cast[ptr RecorderState](state)
+  if abs(sampleRate - st.sampleRate) <= 0.01f:
+    return
+  if recorderInitAt(addr st.g, sampleRate):
+    st.sampleRate = sampleRate
+    instSetSampleRate(st.midi, sampleRate)
+
 proc getRecorderDesc*(): ptr NodeDesc =
   if not recorderReady:
     initRecorderDesc()
@@ -171,7 +185,8 @@ proc getRecorderFactory*(): ptr NodeFactory =
     recorderFactory = NodeFactory(
       create: createRecorderState, destroy: destroyRecorderState,
       process: processRecorderNode, setParam: setRecorderParam,
-      getParam: getRecorderParam, reset: resetRecorderState)
+      getParam: getRecorderParam, reset: resetRecorderState,
+      prepare: prepareRecorderState)
   addr recorderFactory
 
 {.pop.}

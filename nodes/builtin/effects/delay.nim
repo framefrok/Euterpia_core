@@ -25,8 +25,11 @@ const
   DelayParamPingPong*  = 4'u32
 
   # 4 секунды максимума: для большинства музыкальных задержек хватает,
-  # а память под кольцо (2 канала * 192000 фреймов) считается один раз.
+  # а память под кольцо (2 канала * 384000 фреймов) считается один раз.
+  # Ёмкость считается по максимальной частоте (#393): при 48 кГц 4 с
+  # достижимы, при 96 кГц — тоже, без переаллокации кольца в audio thread.
   DelayMaxSeconds* = 4.0'f32
+  DelayMaxSampleRate* = 96000.0'f32
 
 type
   DelayState* = object
@@ -102,7 +105,7 @@ proc createDelayState(desc: ptr NodeDesc; userData: pointer): pointer
   let st = cast[ptr DelayState](result)
   st.sampleRate = 48000.0f
   st.pingPong = false
-  st.capacityFrames = int(DelayMaxSeconds) * 48000 + 8
+  st.capacityFrames = int(DelayMaxSeconds * DelayMaxSampleRate) + 8
 
   st.memory = cast[ptr float32](
     allocShared0(sizeof(float32) * st.capacityFrames * 2)

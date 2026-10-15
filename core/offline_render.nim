@@ -19,10 +19,13 @@
 # Автоматизация:
 #   параметры нод — это то, что в проекте лежит отдельными дорожками
 #   (`AutomationLaneFormat`). Здесь они применяются на границах ЧАНКОВ через
-#   обычный `postSetParam`: тот же путь, что у живой автоматизации в
-#   реальном времени. Чанк — четверть секунды, поэтому «на слух»
-#   интерполяция неотличима от пошаговой по блокам, а команд в очереди
-#   в тысячи раз меньше.
+#   `applyParamNow` — прямой вызов в пайплайн БЕЗ realtime-очереди (#395):
+#   батч из десятков/тысяч параметров в начале чанка переполнял бы очередь
+#   (ёмкость 1024) и молча терялся, а офлайн-рендер обязан быть lossless и
+#   детерминированным. До первого блока очередь команд (граф, темп, play)
+#   разбирается явно через `flushQueuedCommands`, чтобы пайплайн уже был
+#   активен. Чанк — четверть секунды, поэтому «на слух» интерполяция
+#   неотличима от пошаговой по блокам.
 #
 # Формат вывода — WAV (PCM 16 или 24 бита), стерео: ровно то, что умеет
 # `wav_codec`. MP3/OGG в ядре не пишутся — см. `OfflineFormatsSupported`.
@@ -231,6 +234,9 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
   handedOver = true
   discard engine.postSetTempo(tempo)
   discard engine.postPlay()
+  # Граф, темп и play активируются ДО первого блока: параметры automation
+  # в цикле ниже идут через applyParamNow напрямую в пайплайн (#395).
+  flushQueuedCommands(engine)
 
   let channels = 2
   let blockFrames = int64(opts.blockSize)
@@ -278,13 +284,15 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
       let framesThis = int32(min(chunkFrames, remaining))
 
       # Автоматизация применяется к началу чанка: значение на границе —
-      # именно то, с которым чанк и должен звучать.
+      # именно то, с которым чанк и должен звучать. Прямо в пайплайн, без
+      # realtime-очереди: при большом числе lanes очередь переполнялась бы
+      # и команды терялись (#395).
       if opts.automation.len > 0:
         let tick = float64(done) / samplesPerTick
         for lane in opts.automation:
           if lane.points.len == 0:
             continue
-          discard engine.postSetParam(
+          discard engine.applyParamNow(
             lane.nodeId, lane.paramId, automationValueAt(lane, tick)
           )
 

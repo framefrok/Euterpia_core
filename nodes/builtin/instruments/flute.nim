@@ -157,6 +157,20 @@ proc processFluteNode(ctx: ptr NodeProcessContext; audio: ptr NodeAudioPorts;
     q = events.inputs[0]
   instRender(st.abi, st.midi, outBuf, frames, q, addr st.scratch[0])
 
+proc prepareFluteState(state: pointer; sampleRate: float32)
+    {.cdecl, raises: [], gcsafe.} =
+  ## Подготовка на холодной стороне (#393): reinit под частоту сессии
+  ## до первого блока в audio thread. После вызова частоты совпадают,
+  ## поэтому защитный reinit-блок в process не срабатывает.
+  if state.isNil or sampleRate <= 0.0f:
+    return
+  let st = cast[ptr FluteState](state)
+  if abs(sampleRate - st.sampleRate) <= 0.01f:
+    return
+  if fluteInitAt(addr st.g, sampleRate):
+    st.sampleRate = sampleRate
+    instSetSampleRate(st.midi, sampleRate)
+
 proc getFluteDesc*(): ptr NodeDesc =
   if not fluteReady:
     initFluteDesc()
@@ -171,7 +185,8 @@ proc getFluteFactory*(): ptr NodeFactory =
     fluteFactory = NodeFactory(
       create: createFluteState, destroy: destroyFluteState,
       process: processFluteNode, setParam: setFluteParam,
-      getParam: getFluteParam, reset: resetFluteState)
+      getParam: getFluteParam, reset: resetFluteState,
+      prepare: prepareFluteState)
   addr fluteFactory
 
 {.pop.}

@@ -432,7 +432,8 @@ proc createAudioEngine*(
     data: result.inputArena,
     channels: 0,
     frames: 0,
-    stride: int32(signal_types.MaxBlockSize)
+    stride: int32(signal_types.MaxBlockSize),
+    layout: alPlanar
   )
   result.inputDeviceChannels = 0
   result.inputStatusFlags.store(0'u32, moRelaxed)
@@ -625,10 +626,14 @@ proc setupContext(
   ctx: var NodeProcessContext;
   offline: bool;
   lastBlock: bool;
-  transportActive: bool
+  transportActive: bool;
+  frames: int32
 ) {.rt.} =
   ctx.sampleRate = engine.transport.sampleRate
-  ctx.blockSize = engine.blockSize
+  # Фактическая длина блока: у частичного (неполного) блока это остаток,
+  # а не размер буфера (#395) -- ноды обязаны считать ровно frames кадров,
+  # иначе хвост рендера обработал бы лишние сэмплы.
+  ctx.blockSize = frames
   ctx.samplePosition = engine.transport.frame
 
   if engine.transport.sampleRate > 0.0f:
@@ -993,12 +998,20 @@ proc renderBlockInternal(
   inputChannels: int32;
   offline: bool;
   lastBlock: bool;
-  forceAdvance: bool
+  forceAdvance: bool;
+  renderFrames: int32 = 0'i32
 ) {.rt.} =
   if engine == nil or driverOut == nil:
     return
 
-  let frames = engine.blockSize
+  # renderFrames > 0 — частичный блок (#395): считается ровно остаток,
+  # транспорт продвигается на остаток, метрики — по остатку. 0 — обычный
+  # полный блок (realtime-путь не меняется).
+  let frames =
+    if renderFrames > 0 and renderFrames < engine.blockSize:
+      renderFrames
+    else:
+      engine.blockSize
 
   if frames <= 0:
     return
@@ -1034,7 +1047,7 @@ proc renderBlockInternal(
 
     if transportActive and engine.activePipeline != nil:
       var ctx: NodeProcessContext
-      setupContext(engine, ctx, offline, lastBlock, transportActive)
+      setupContext(engine, ctx, offline, lastBlock, transportActive, frames)
       # Публикация входа в граф (issue #3).
       ctx.input = addr engine.inputBuffer
       ctx.inputChannels = engine.inputBuffer.channels
@@ -1171,7 +1184,12 @@ proc renderOffline*(
       done += engine.blockSize.int64
 
     else:
-      # Финальный неполный блок.
+      # Финальный неполный блок: считается НАСТОЯЩЕ частично (#395),
+      # renderFrames = remaining. Раньше здесь рендерился полный блок в
+      # scratch, копировался остаток, а транспорт откатывался
+      # (`frame -= overshoot`) -- откат шёл ПОСЛЕ loop-wrap и в координатах
+      # уже обёрнутой позиции, из-за чего при цикле итоговая позиция была
+      # неверной. Теперь граф и транспорт видят ровно remaining кадров.
       renderBlockInternal(
         engine,
         nil,
@@ -1179,7 +1197,8 @@ proc renderOffline*(
         0'i32,
         offline = true,
         lastBlock = true,
-        forceAdvance = true
+        forceAdvance = true,
+        renderFrames = int32(remaining)
       )
 
       var i: int64 = 0
@@ -1192,12 +1211,6 @@ proc renderOffline*(
         outputBuffer[outIdx + 1] = scratch[inIdx + 1]
 
         inc i
-
-      # renderBlockInternal продвинул транспорт на полный блок,
-      # а нам нужен только остаток.
-      let overshoot = engine.blockSize.int64 - remaining
-      engine.transport.frame -= overshoot
-      engine.frameSnapshot.store(engine.transport.frame, moRelease)
 
       done = totalFrames
 
@@ -1403,6 +1416,62 @@ proc postSetParamNormalized*(
       value: value
     )
   )
+
+
+proc applyParamNow*(
+  engine: ptr AudioEngine;
+  nodeId: int32;
+  paramId: uint32;
+  value: float32
+): bool =
+  ## Синхронное применение параметра в активный пайплайн (#395). Control-path.
+  ##
+  ## В отличие от `postSetParam`, команда НЕ идёт через realtime-очередь
+  ## (ёмкость 1024): батч automation-параметров в начале чанка переполнял
+  ## очередь, и `push` молча отдавал false — рендер терял автоматизацию и
+  ## становился недетерминированным. Здесь вызов идёт напрямую в
+  ## `applyParamProc` пайплайна — тот же путь, что и у разобранной команды,
+  ## но без стадии очереди, поэтому потеря невозможна при любом числе
+  ## параметров.
+  ##
+  ## Контракт потоков: предназначен для офлайн-рендера (один поток, аудио-
+  ## потока нет). В живом realtime используйте `postSetParam`: там синхронный
+  ## вызов гонялся бы с аудиопотоком за состоянием нод.
+  ##
+  ## До активации пайплайна параметр копится в `pendingParams` (как и раньше
+  ## при разборе очереди) и применяется при активации графа.
+  if engine == nil:
+    return false
+
+  let cmd = EngineCommand(
+    kind: cmdSetParam,
+    nodeId: nodeId,
+    paramId: paramId,
+    value: value
+  )
+
+  if engine.activePipeline != nil:
+    applyParamCommand(engine.activePipeline, cmd)
+    return true
+
+  if engine.pendingParamCount < MaxPendingParams.int32:
+    engine.pendingParams[engine.pendingParamCount] = cmd
+    inc engine.pendingParamCount
+    return true
+
+  false
+
+
+proc flushQueuedCommands*(engine: ptr AudioEngine) =
+  ## Разобрать очередь команд синхронно с control-path (#395).
+  ##
+  ## Нужен офлайн-рендеру, чтобы граф, темп и play активировались ДО первого
+  ## блока: тогда параметры automation идут через `applyParamNow` напрямую в
+  ## пайплайн, минуя очередь. В realtime вызывать НЕЛЬЗЯ: очередь разбирает
+  ## сам audio-поток, а здесь был бы доступ к его состоянию извне (гонка).
+  if engine == nil:
+    return
+  applyCommands(engine)
 
 
 proc postGraphUpdate*(

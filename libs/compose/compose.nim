@@ -10,6 +10,18 @@
 #
 # Что можно взять и откуда:
 #   * `compose/score`    — события, такты, мотивы, партии;
+#   * `compose/time`     — музыкальное время (4.bars, barAt, secondsAt);
+#   * `compose/scale`    — лады и ступени (minorScale, degree);
+#   * `compose/harmony`  — аккорды и прогрессии (chord("Am"), progression);
+#   * `compose/pattern`  — ритмические паттерны с приёмами (repeat, reverse,
+#                          overlay, swing, humanize);
+#   * `compose/rhythm`   — библиотека ритмов (tresillo, trap16, clave, DSL);
+#   * `compose/random`   — детерминированный RNG (musicRandom, seed);
+#   * `compose/form`     — секции и форма песни (intro/verse/chorus/drop);
+#   * `compose/melody`   — аккорд-осведомлённая мелодия (chordTone/passing);
+#   * `compose/variation` — развитие мотива (invert, retrograde, fragment);
+#   * `compose/arrangement` — пьеса: play/during/build/harmony (компиляция);
+#   * `compose/generators/drums` — барабанные связки и филлы (trapKit, fill);
 #   * `compose/song`     — раскладка, инструменты, проверка, запись;
 #   * `compose/engine`   — рендер в WAV;
 #   * `compose/progress` — индикатор прогресса;
@@ -17,6 +29,28 @@
 #     `Builder` — низкоуровневый инструмент, а не часть повседневного API).
 
 import compose/score
+import compose/time
+import compose/scale
+import compose/harmony
+import compose/pattern
+import compose/rhythm
+import compose/random
+import compose/form
+import compose/melody
+import compose/variation
+import compose/automation
+import compose/ir
+import compose/compiler
+import compose/arrangement
+import compose/validate
+import compose/analyze
+import compose/preset
+import compose/graph
+import compose/sound
+import compose/generators/drums
+import compose/generators/bass
+import compose/generators/melody as melodyGen
+  # alias: имя модуля `melody` занято низкоуровневой мелодией (`compose/melody`)
 import compose/song
 import compose/engine
 import compose/progress
@@ -27,6 +61,27 @@ import compose/progress
 # «cannot export»).
 {.warning[UnusedImport]: off.}
 export score
+export time
+export scale
+export harmony
+export pattern
+export rhythm
+export random
+export form
+export melody
+export variation
+export automation
+export ir
+export compiler
+export arrangement
+export validate
+export analyze
+export preset
+export graph
+export sound
+export drums
+export bass
+export melodyGen
 export song
 export engine
 export progress
