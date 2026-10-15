@@ -14,6 +14,7 @@ import test_signal_types
 import test_audio_layout
 import test_transport
 import test_transport_runtime
+import test_offline_automation
 import test_native_abi
 import test_ring_buffer
 import test_midi_api
