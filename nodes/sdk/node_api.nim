@@ -133,6 +133,15 @@ type
 
   NodeResetProc* = proc(state: pointer) {.cdecl, raises: [], gcsafe.}
 
+  NodePrepareProc* = proc(state: pointer; sampleRate: float32)
+      {.cdecl, raises: [], gcsafe.}
+    ## Подготовка состояния под фактическую частоту сессии (#393).
+    ## Вызывается на ХОЛОДНОЙ стороне сразу после create (загрузка сцены,
+    ## валидация графа), до того как состояние уйдёт в audio thread. Хук
+    ## опционален (nil у нод, которым частота не важна): инструменты здесь
+    ## пересчитывают огибающие и частоты через `*InitAt`, чтобы первый же
+    ## блок в audio thread не делал reinit на горячей стороне.
+
   ## Фабрика типа ноды. Указатель на неё статичен: столько же,
   ## сколько живёт сам тип ноды в реестре.
   NodeFactory* {.bycopy.} = object
@@ -142,6 +151,7 @@ type
     setParam*: NodeSetParamProc
     getParam*: NodeGetParamProc
     reset*: NodeResetProc
+    prepare*: NodePrepareProc
 
 # ==============================================================================
 # Работа с фиксированными строками descriptor'а

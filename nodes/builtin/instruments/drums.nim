@@ -254,6 +254,21 @@ proc processDrumsNode(
 # Экспорт
 # ==============================================================================
 
+proc prepareDrumsState(state: pointer; sampleRate: float32)
+    {.cdecl, raises: [], gcsafe.} =
+  ## Подготовка на холодной стороне (#393): reinit под частоту сессии
+  ## до первого блока в audio thread. После вызова частоты совпадают,
+  ## поэтому защитный reinit-блок в process не срабатывает.
+  if state.isNil or sampleRate <= 0.0f:
+    return
+  let st = cast[ptr DrumsState](state)
+  if abs(sampleRate - st.sampleRate) <= 0.01f:
+    return
+  if drumsInitAt(addr st.g, sampleRate):
+    st.sampleRate = sampleRate
+    instSetSampleRate(st.midi, sampleRate)
+    st.live = true
+
 proc getDrumsDesc*(): ptr NodeDesc =
   if not drumsReady:
     initDrumsDesc()
@@ -271,7 +286,8 @@ proc getDrumsFactory*(): ptr NodeFactory =
       process: processDrumsNode,
       setParam: setDrumsParam,
       getParam: getDrumsParam,
-      reset: resetDrumsState
+      reset: resetDrumsState,
+      prepare: prepareDrumsState
     )
   addr drumsFactory
 

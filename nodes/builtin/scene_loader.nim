@@ -429,7 +429,8 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
            " (нода #" & $node.id & ")")
 
     var en: EditorNode
-    if not reg.instantiateNode(node.nodeType, node.id, en):
+    if not reg.instantiateNode(node.nodeType, node.id, en,
+                               result.sampleRate.float32):
       bail("нода #" & $node.id & " (" & node.nodeType & ") не создалась")
 
     created.add (entry, en.userData)

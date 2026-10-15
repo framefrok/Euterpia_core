@@ -253,6 +253,20 @@ proc processPluckNode(ctx: ptr NodeProcessContext; audio: ptr NodeAudioPorts;
     q = events.inputs[0]
   instRender(st.abi, st.midi, outBuf, frames, q, addr st.scratch[0])
 
+proc preparePluckState(state: pointer; sampleRate: float32)
+    {.cdecl, raises: [], gcsafe.} =
+  ## Подготовка на холодной стороне (#393): reinit под частоту сессии
+  ## до первого блока в audio thread. После вызова частоты совпадают,
+  ## поэтому защитный reinit-блок в process не срабатывает.
+  if state.isNil or sampleRate <= 0.0f:
+    return
+  let st = cast[ptr PluckState](state)
+  if abs(sampleRate - st.sampleRate) <= 0.01f:
+    return
+  if pluckInitAt(addr st.g, sampleRate):
+    st.sampleRate = sampleRate
+    instSetSampleRate(st.midi, sampleRate)
+
 proc pluckNode(kind: PluckKind): tuple[desc: ptr NodeDesc;
                                        factory: ptr NodeFactory] =
   if not pluckReady:
@@ -263,7 +277,8 @@ proc pluckNode(kind: PluckKind): tuple[desc: ptr NodeDesc;
     f[] = NodeFactory(
       create: createPluckState, destroy: destroyPluckState,
       process: processPluckNode, setParam: setPluckParam,
-      getParam: getPluckParam, reset: resetPluckState)
+      getParam: getPluckParam, reset: resetPluckState,
+      prepare: preparePluckState)
   (descFor(kind), f)
 
 proc getHarpDesc*(): ptr NodeDesc = pluckNode(pkHarp).desc

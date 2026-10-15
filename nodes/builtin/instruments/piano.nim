@@ -255,6 +255,21 @@ proc processPianoNode(
 # Экспорт
 # ==============================================================================
 
+proc preparePianoState(state: pointer; sampleRate: float32)
+    {.cdecl, raises: [], gcsafe.} =
+  ## Подготовка на холодной стороне (#393): reinit под частоту сессии
+  ## до первого блока в audio thread. После вызова частоты совпадают,
+  ## поэтому защитный reinit-блок в process не срабатывает.
+  if state.isNil or sampleRate <= 0.0f:
+    return
+  let st = cast[ptr PianoState](state)
+  if abs(sampleRate - st.sampleRate) <= 0.01f:
+    return
+  if pianoInitAt(addr st.g, sampleRate):
+    st.sampleRate = sampleRate
+    instSetSampleRate(st.midi, sampleRate)
+    st.live = true
+
 proc getPianoDesc*(): ptr NodeDesc =
   if not pianoReady:
     initPianoDesc()
@@ -272,7 +287,8 @@ proc getPianoFactory*(): ptr NodeFactory =
       process: processPianoNode,
       setParam: setPianoParam,
       getParam: getPianoParam,
-      reset: resetPianoState
+      reset: resetPianoState,
+      prepare: preparePianoState
     )
   addr pianoFactory
 

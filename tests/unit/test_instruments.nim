@@ -1033,3 +1033,78 @@ suite "инструменты: выход прямо в драйвер (interlea
     check lastFrame > 1e-6f
     rig.freeRig()
 
+
+# ------------------------------------------------------------------------------
+# #393: prepare — reinit под частоту сессии вынесен из audio thread
+# ------------------------------------------------------------------------------
+
+proc allInstrumentPairs(): seq[tuple[factory: ptr NodeFactory; desc: ptr NodeDesc]] =
+  ## Все типы инструментов (по одному от семейства): каждый обязан иметь
+  ## prepare, иначе reinit огибающих останется в первом блоке audio thread.
+  @[
+    (getPianoFactory(), getPianoDesc()),
+    (getOrganFactory(), getOrganDesc()),
+    (getGuitarFactory(), getGuitarDesc()),
+    (getDrumsFactory(), getDrumsDesc()),
+    (getFluteFactory(), getFluteDesc()),
+    (getBagpipeFactory(), getBagpipeDesc()),
+    (getStringsFactory(), getStringsDesc()),
+    (getBellFactory(), getBellDesc()),
+    (getHarpFactory(), getHarpDesc()),
+    (getRecorderFactory(), getRecorderDesc()),
+    (getBrassFactory(), getBrassDesc()),
+    (getTimpaniFactory(), getTimpaniDesc()),
+    (getChoirFactory(), getChoirDesc()),
+    (getAccordionFactory(), getAccordionDesc())
+  ]
+
+suite "инструменты: prepare на холодной стороне (#393)":
+  test "у каждого инструмента задан хук prepare":
+    for pair in allInstrumentPairs():
+      check not pair.factory.prepare.isNil
+
+  test "create + prepare под частотой сессии проходит у всех":
+    # Состояние создаётся под дефолтной частотой движка (обычно 48 кГц),
+    # prepare переводит его на частоту сессии — до первого блока рендера.
+    # Здесь важен сам факт отсутствия ошибок/освобождений: InitAt работает
+    # в пределах уже выделенной памяти.
+    for pair in allInstrumentPairs():
+      let state = pair.factory.create(pair.desc, nil)
+      check state != nil
+      if state != nil:
+        pair.factory.prepare(state, 96000.0'f32)
+        pair.factory.prepare(state, 44100.0'f32)
+        pair.factory.prepare(state, 0.0'f32)     # мусорная частота — no-op
+        pair.factory.destroy(state)
+
+  test "фортепиано после prepare звучит при 44100 — первый блок не тихий":
+    # Регрессия против «reinit остался бы в RT и мог бы сорвать первый блок»:
+    # нода обязана сразу играть на частоте, отличной от дефолтной движка.
+    var rig: InstrumentRig
+    check rig.initRig(getPianoFactory(), getPianoDesc(), false)
+    rig.ctx.sampleRate = 44100.0'f32
+    getPianoFactory().prepare(rig.state, 44100.0'f32)
+
+    rig.pushNote(evNoteOn, 60, 0.9f)
+    rig.renderBlock()
+    rig.pushNote(evNoteOn, 60, 0.9f)
+    for _ in 0 ..< 4:
+      rig.renderBlock()
+    check rig.blockIsFinite()
+    check rig.lastBlockPeak() > 1e-4f
+    rig.freeRig()
+
+  test "ударные после prepare звучат при 96000 — смена частоты не глушит":
+    var rig: InstrumentRig
+    check rig.initRig(getDrumsFactory(), getDrumsDesc(), false)
+    rig.ctx.sampleRate = 96000.0'f32
+    getDrumsFactory().prepare(rig.state, 96000.0'f32)
+
+    rig.pushNote(evNoteOn, 36, 1.0f)     # бочка по карте GM
+    rig.renderBlock()
+    for _ in 0 ..< 4:
+      rig.renderBlock()
+    check rig.blockIsFinite()
+    check rig.lastBlockPeak() > 1e-4f
+    rig.freeRig()
+
