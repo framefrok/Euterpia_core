@@ -19,7 +19,10 @@
 # Коды возврата (#88): 0 — успех, 1 — использование, 2 — среда (сокет,
 # права, нет процесса), 3 — внутренняя.
 
-import std/[json, monotimes, os, posix, strutils]
+import std/[json, monotimes, os, strutils]
+
+when defined(posix):
+  import std/posix
 
 import context
 import cli_spec
@@ -247,89 +250,90 @@ proc resolveProjectParams(path: string; scan: SessionScan;
 
 var gSessionStop {.volatile.}: bool
 
-proc handleSessionSignal(sig: cint) {.noconv.} =
-  ## Async-signal-safe: только запись флага, без аллокаций и логов.
-  gSessionStop = true
+when defined(posix):
+  proc handleSessionSignal(sig: cint) {.noconv.} =
+    ## Async-signal-safe: только запись флага, без аллокаций и логов.
+    gSessionStop = true
 
-proc daemonMain(paths: SessionPaths; projectPath: string;
-                sampleRate: float32; blockSize: int32;
-                tempo: float64; meterNum, meterDen: int32;
-                autosaveMs: int64): int =
-  ## Цикл демона: тик транспорта + обработка одного запроса за итерацию.
-  ##
-  ## `accept` с таймаутом (20 мс), а не блокирующий: иначе позиция «играет»
-  ## стояла бы до прихода клиента.
-  var session = initRuntimeSession(sampleRate, blockSize, tempo,
-                                  meterNum, meterDen)
-  if not session.isActive:
-    return 2
-  defer: session.closeRuntimeSession()
+  proc daemonMain(paths: SessionPaths; projectPath: string;
+                  sampleRate: float32; blockSize: int32;
+                  tempo: float64; meterNum, meterDen: int32;
+                  autosaveMs: int64): int =
+    ## Цикл демона: тик транспорта + обработка одного запроса за итерацию.
+    ##
+    ## `accept` с таймаутом (20 мс), а не блокирующий: иначе позиция «играет»
+    ## стояла бы до прихода клиента.
+    var session = initRuntimeSession(sampleRate, blockSize, tempo,
+                                    meterNum, meterDen)
+    if not session.isActive:
+      return 2
+    defer: session.closeRuntimeSession()
 
-  # --- автосохранение (issue #110) -----------------------------------------
-  # Демон — единственный долгоживущий процесс CLI, поэтому автосохранение
-  # имеет смысл именно здесь. Каждый тик перечитываем проект: правки идут
-  # другими вызовами CLI (`project set`, `param set`), и снимок должен
-  # содержать ИХ, а не состояние на старте. Маркер пишется сразу; штатный
-  # `session stop` его снимает, SIGKILL — оставляет для `project recover`.
-  var auto: AutoSave
-  var autoVersion = 0'u64
-  var nextAuto = 0'i64
-  if autosaveMs > 0 and projectPath.len > 0 and fileExists(projectPath):
-    var policy = defaultAutosavePolicy()
-    policy.intervalMs = autosaveMs
-    policy.minChanges = 1
-    auto = initAutoSave(projectPath, policy)
-    nextAuto = monoMs() + autosaveMs
-  defer:
-    if auto.isActive:
-      auto.closeAutoSave(graceful = true)
-
-  let (listenFd, listenError) = listenUnix(paths.socketPath)
-  if listenFd == SocketHandle(-1):
-    return 2
-  defer:
-    discard close(listenFd)
-    removeSessionInfo(paths)
-
-  saveSessionInfo(paths, int(getpid()), sampleRate, blockSize)
-  session.startTimeMs(monoMs())
-
-  gSessionStop = false
-  discard signal(SIGTERM, handleSessionSignal)
-  discard signal(SIGINT, handleSessionSignal)
-
-  var running = true
-  while running and not gSessionStop:
-    session.tickRuntimeSession(monoMs())
-
-    if auto.isActive and monoMs() >= nextAuto:
-      let loaded = loadProject(projectPath)
-      if loaded.success:
-        inc autoVersion
-        discard auto.submitSnapshot(autoVersion, $loaded.value.toJson,
-                                    monoMs())
+    # --- автосохранение (issue #110) -----------------------------------------
+    # Демон — единственный долгоживущий процесс CLI, поэтому автосохранение
+    # имеет смысл именно здесь. Каждый тик перечитываем проект: правки идут
+    # другими вызовами CLI (`project set`, `param set`), и снимок должен
+    # содержать ИХ, а не состояние на старте. Маркер пишется сразу; штатный
+    # `session stop` его снимает, SIGKILL — оставляет для `project recover`.
+    var auto: AutoSave
+    var autoVersion = 0'u64
+    var nextAuto = 0'i64
+    if autosaveMs > 0 and projectPath.len > 0 and fileExists(projectPath):
+      var policy = defaultAutosavePolicy()
+      policy.intervalMs = autosaveMs
+      policy.minChanges = 1
+      auto = initAutoSave(projectPath, policy)
       nextAuto = monoMs() + autosaveMs
+    defer:
+      if auto.isActive:
+        auto.closeAutoSave(graceful = true)
 
-    let client = acceptClient(listenFd, 20)
-    if client == SocketHandle(-1):
-      continue
-    defer: discard close(client)
+    let (listenFd, listenError) = listenUnix(paths.socketPath)
+    if listenFd == SocketHandle(-1):
+      return 2
+    defer:
+      discard close(listenFd)
+      removeSessionInfo(paths)
 
-    let (request, reqError) = readRequest(client, 1000)
-    if reqError.len > 0:
-      discard writeResponse(client, %*{"ok": false,
-        "error": reqError})
-      continue
+    saveSessionInfo(paths, int(getpid()), sampleRate, blockSize)
+    session.startTimeMs(monoMs())
 
-    var stopRequested = false
-    var response = session.applyRuntimeCommand(request, stopRequested)
-    if response.kind == JObject:
-      response["pid"] = %int(getpid())
-    discard writeResponse(client, response)
-    if stopRequested:
-      running = false
+    gSessionStop = false
+    discard signal(SIGTERM, handleSessionSignal)
+    discard signal(SIGINT, handleSessionSignal)
 
-  0
+    var running = true
+    while running and not gSessionStop:
+      session.tickRuntimeSession(monoMs())
+
+      if auto.isActive and monoMs() >= nextAuto:
+        let loaded = loadProject(projectPath)
+        if loaded.success:
+          inc autoVersion
+          discard auto.submitSnapshot(autoVersion, $loaded.value.toJson,
+                                      monoMs())
+        nextAuto = monoMs() + autosaveMs
+
+      let client = acceptClient(listenFd, 20)
+      if client == SocketHandle(-1):
+        continue
+      defer: discard close(client)
+
+      let (request, reqError) = readRequest(client, 1000)
+      if reqError.len > 0:
+        discard writeResponse(client, %*{"ok": false,
+          "error": reqError})
+        continue
+
+      var stopRequested = false
+      var response = session.applyRuntimeCommand(request, stopRequested)
+      if response.kind == JObject:
+        response["pid"] = %int(getpid())
+      discard writeResponse(client, response)
+      if stopRequested:
+        running = false
+
+    0
 
 
 # =============================================================================
