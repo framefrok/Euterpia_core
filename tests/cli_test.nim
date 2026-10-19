@@ -2620,3 +2620,60 @@ suite "CLI: транспорт — tempo/meter/position/seek/loop/state (#257)":
     check n["state"].getStr == "stopped"
     check n["tempo"].getFloat == 120.0
 
+
+# =============================================================================
+# #407: headless runtime-сессия переживает вызовы CLI
+# =============================================================================
+
+suite "CLI: runtime-сессия (#407)":
+  test "play в одном запуске виден state в другом; stop закрывает движок":
+    let dir = getTempDir() / "euterpia_cli_session"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    # Демон не должен пережить тест даже при провале проверки.
+    defer:
+      discard runCliIn(dir, ["session", "stop", "demo.eproj"])
+      removeDir(dir)
+
+    check runCliIn(dir, ["init", "demo.eproj"]).code == 0
+
+    let started = runCliIn(dir, ["session", "start", "demo.eproj", "--json"])
+    check started.code == 0
+    let startedJson = parseJson(started.output)
+    check startedJson["running"].getBool
+    check startedJson["pid"].getInt > 0
+
+    let play = runCliIn(dir, ["transport", "play", "demo.eproj", "--json"])
+    check play.code == 0
+    check parseJson(play.output)["state"].getStr == "playing"
+
+    # Позиция идёт в ДРУГОМ процессе: сессия живёт между вызовами CLI.
+    sleep(400)
+    let state = runCliIn(dir, ["transport", "state", "demo.eproj", "--json"])
+    check state.code == 0
+    let stateJson = parseJson(state.output)
+    check stateJson["state"].getStr == "playing"
+    check stateJson["position"]["frames"].getBiggestInt > 0
+
+    let stop = runCliIn(dir, ["transport", "stop", "demo.eproj", "--json"])
+    check stop.code == 0
+    let stopJson = parseJson(stop.output)
+    check stopJson["state"].getStr == "stopped"
+    check stopJson["position"]["frames"].getBiggestInt == 0
+
+    let stopped = runCliIn(dir, ["session", "stop", "demo.eproj", "--json"])
+    check stopped.code == 0
+    check not parseJson(stopped.output)["running"].getBool
+
+    let status = runCliIn(dir, ["session", "status", "demo.eproj", "--json"])
+    check status.code == 0
+    check not parseJson(status.output)["running"].getBool
+
+    # После остановки offline-состояние не врёт: оно stopped/0.
+    let offline = runCliIn(dir, ["transport", "state", "demo.eproj", "--json"])
+    check offline.code == 0
+    let offlineJson = parseJson(offline.output)
+    check offlineJson["state"].getStr == "stopped"
+    check offlineJson["position"]["frames"].getBiggestInt == 0
+

@@ -199,6 +199,7 @@ proc clientActions*(): seq[ClientAction] =
     # --- окружение --------------------------------------------------------
     sessionAction("session.settings", "Настройки окружения", "config"),
     sessionAction("session.diagnostics", "Диагностика окружения", "doctor"),
+    sessionAction("session.runtime", "Headless runtime-сессия", "session"),
 
     # --- история правок (#331): откат и повтор поверх control-слоя (#109) -
     # Документ меняется, но команды в перечислении нет: откат воспроизводит
