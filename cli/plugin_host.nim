@@ -23,7 +23,6 @@ import std/[os, strutils]
 
 import plugin_api
 import logger
-import node_interface
 import signal_types
 import sdk/node_api
 import sdk/node_registry

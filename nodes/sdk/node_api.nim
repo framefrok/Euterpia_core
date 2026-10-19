@@ -22,6 +22,12 @@ import
   node_interface,
   graph_compiler
 
+# Node SDK — публичная поверхность для авторов нод: типы процесса
+# (`NodeProcessContext`, `NodeAudioPorts`, `EventQueue`) реэкспортируются,
+# чтобы хост-обёртки (например, плагины в CLI, #95) не импортировали
+# `core/node_interface` напрямую.
+export node_interface
+
 const
   NodeApiVersion* = 1'u32
 

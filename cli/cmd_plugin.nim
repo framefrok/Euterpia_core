@@ -18,18 +18,16 @@
 #   save    <проект> <нода>       снимок состояния в проект;
 #   validate <файл.clap> [--validator путь]  прогон официального валидатора.
 
-import std/[algorithm, json, os, osproc, strutils, sha1, tables]
+import std/[algorithm, json, os, osproc, strutils, sha1]
 
 import context
 import cli_spec
 import cmd_project
 import plugin_api
 import plugin_host
-import clap_plugin_backend
 import control/query
 import control/document
 import control_bridge
-import control/error_frame
 import project
 
 const

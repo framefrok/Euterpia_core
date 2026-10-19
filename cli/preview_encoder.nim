@@ -21,7 +21,6 @@
 
 import std/[os, osproc, strutils]
 
-import audio_file_io
 
 type
   PreviewResult* = object

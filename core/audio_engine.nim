@@ -8,6 +8,7 @@ import
   node_interface,
   compiled_pipeline,
   audio_recorder,
+  aligned_mem,
   live_automation,
   midi_api,
   midi_events,
@@ -426,7 +427,11 @@ proc createAudioEngine*(
   if blockSize <= 0 or blockSize > signal_types.MaxBlockSize:
     return nil
 
-  result = cast[ptr AudioEngine](allocShared0(sizeof(AudioEngine)))
+  # `AudioEngine` содержит `EventQueue` с `{.align: 64.}` (живой MIDI-вход,
+  # #413). `allocShared0` даёт выравнивание платформы (16), и UBSan справедливо
+  # ругался на доступ к полю с требованием 64. Выделяем выровненно и
+  # освобождаем парной функцией.
+  result = cast[ptr AudioEngine](alignedSharedAlloc0(sizeof(AudioEngine), 64))
   if result == nil:
     return nil
 
@@ -465,7 +470,7 @@ proc createAudioEngine*(
   )
 
   if result.inputArena == nil:
-    deallocShared(cast[pointer](result))
+    alignedSharedDealloc(cast[pointer](result))
     return nil
 
   result.inputBuffer = AudioBuffer(
@@ -551,7 +556,7 @@ proc destroyAudioEngine*(engine: ptr AudioEngine) =
   # до уничтожения AudioRecorder.
   engine.recorder = nil
 
-  deallocShared(engine)
+  alignedSharedDealloc(cast[pointer](engine))
 
 
 # ==============================================================================
