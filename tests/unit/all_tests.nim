@@ -47,6 +47,7 @@ import test_engine_retire
 import test_realtime_gcsafe
 import test_recorder
 import test_sequencer
+import test_sequencer_player
 import test_project
 import test_param_flags
 import test_memory_pool

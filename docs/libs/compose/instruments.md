@@ -1,7 +1,8 @@
 # Инструменты и ноды «из коробки»
 
-В реестре ядра **28 типов**: 10 DSP-нод, **17 инструментов** и нотный
-секвенсор `notes`. Полный список нод с параметрами (имя — диапазон —
+В реестре ядра **30 типов**: 10 DSP-нод, **17 инструментов**, нотный
+секвенсор `notes`, плеер секвенсора проекта `sequencer` и плеер аудиоклипов
+`clip`. Полный список нод с параметрами (имя — диапазон —
 значение по умолчанию). Параметры задаются по имени или по числовому id:
 
 ```nim
@@ -227,6 +228,15 @@ inst.setParam("level", -6.0f32)   # по имени (стабильно)
 | `length` | 0..65536 | 0 | длина, тики (0 — из клипа) |
 | `swing` | 0..0.75 | 0 | свинг восьмых |
 
+### `euterpia.sequencer` — плеер секвенсора проекта (#87)
+Проигрывает **все** дорожки и клипы проекта через `core/sequencer`:
+несколько дорожек, mute, повторы loop-клипов, sample-accurate атаки.
+Параметров нет: данные приходят из проекта, скомпилированный секвенсор
+привязывает загрузчик сцены (`setCompiledSequencer`). В отличие от
+`euterpia.notes` (один паттерн на дорожку), этой ноде не нужны отдельные
+нотные ноды: клипы проекта раскрывает сам секвенсор ядра. Аудиоклипы
+по-прежнему играет `euterpia.clip`.
+
 ### `euterpia.mix` — сумматор
 8 аудиовходов → 1 выход, с DC-блокером.
 | параметр | диапазон | по умолчанию | смысл |
@@ -315,6 +325,7 @@ inst.setParam("level", -6.0f32)   # по имени (стабильно)
 |---|---|
 | `euterpia.organ`, `euterpia.piano`, `euterpia.guitar`, `euterpia.drums`, `euterpia.flute`, `euterpia.bagpipe`, `euterpia.strings`, `euterpia.bell`, `euterpia.harp`, `euterpia.harpsichord`, `euterpia.recorder`, `euterpia.brass`, `euterpia.timpani`, `euterpia.choir`, `euterpia.ukulele`, `euterpia.accordion`, `euterpia.harmonica` | инструменты |
 | `euterpia.notes` | секвенсор (ноты дорожки → события) |
+| `euterpia.sequencer` | плеер секвенсора проекта (все дорожки и клипы → события, #87) |
 | `euterpia.osc`, `euterpia.noise` | генераторы |
 | `euterpia.biquad`, `euterpia.svf` | фильтры |
 | `euterpia.gain`, `euterpia.pan`, `euterpia.mix` | микширование |

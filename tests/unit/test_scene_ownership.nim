@@ -91,3 +91,27 @@ suite "сцена: владение пайплайном":
     for _, v in t:
       acc += v.len
     check acc == 1500
+
+  test "нода euterpia.sequencer играет клипы проекта без нотных нод (#87)":
+    # Тот же проект, но нотную ноду заменили плеером секвенсора: дорожки
+    # проекта больше не раскладываются в паттерн `euterpia.notes`.
+    var proj = tinyProject()
+    proj.graph.nodes[0] = NodeFormat(id: 1, nodeType: "euterpia.sequencer",
+                                     name: "Seq", eventOutCount: 1)
+
+    var reg = initNodeRegistry()
+    discard registerBuiltinNodes(reg)
+
+    var scene = loadScene(reg, proj, -1, int32(Sr))
+    check scene.ok
+    defer: destroyScene(scene)
+    check scene.songEndTick == PpqTicksPerQuarter
+
+    var pipeline = detachPipeline(scene)
+    var opts = defaultRenderOptions(int32(Sr), 512, 1.0)
+    opts.tempo = 120.0
+    let rep = renderToWav(getTempDir() / "eut_sequencer_player.wav",
+                          move(pipeline), opts)
+    check rep.ok
+    check not rep.silent
+    check rep.peak > 0.0f

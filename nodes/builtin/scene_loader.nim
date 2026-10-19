@@ -47,7 +47,8 @@ import
   ../sdk/node_registry,
   ../sdk/pipeline_builder,
   sequencer/notes,
-  io/clip_player
+  io/clip_player,
+  io/sequencer_player
 
 {.push raises: [].}
 
@@ -106,6 +107,11 @@ type
       ## держат на них УКАЗАТЕЛИ, поэтому буферы обязаны жить, пока живёт
       ## сцена: список держит их до `destroyScene`.
 
+    compiledSequencers: seq[ref CompiledSequencer]
+      ## Скомпилированные секвенсоры для нод `euterpia.sequencer` (#87).
+      ## `ref` держит объект живым; ноды получают `ptr` на его данные и
+      ## обязаны жить не дольше сцены. Освобождение — вместе со сценой.
+
 
 # ==============================================================================
 # Вспомогательное
@@ -147,6 +153,10 @@ proc disposeScene(s: var Scene) =
     # (ASan ловит heap-use-after-free при выходе, #395).
     destroyNodeState(item.entry, item.state)
   s.states.setLen(0)
+  # Скомпилированные секвенсоры (#87): состояния нод уже уничтожены, значит
+  # указатели на них больше никто не читает; `ref`-владение отпускается
+  # вместе со сценой.
+  s.compiledSequencers.setLen(0)
 
 proc failScene(s: var Scene; message: string): Scene =
   ## Единая точка отказа: сцена не отдаёт наружу ни пайплайн, ни состояния,
@@ -197,6 +207,64 @@ proc automationFromProject*(proj: ProjectFormat): seq[OfflineAutomationLane] =
         tick: point.tick, value: point.value, curve: curve
       )
     result.add converted
+
+# ==============================================================================
+# Секвенсор проекта (issue #87)
+# ==============================================================================
+
+proc sequencerSongTicks*(proj: ProjectFormat): int32 =
+  ## Граница песни в тиках: конец последнего клипа, а для клипов без длины —
+  ## фактический конец нот. То же правило, что у MIDI-экспорта и у движка:
+  ## дальше зацикленный клип повторять некуда.
+  for tr in proj.sequencer.tracks:
+    for cl in tr.clips:
+      if cl.lengthTicks > 0:
+        result = max(result, cl.startTick + cl.lengthTicks)
+      else:
+        for nt in cl.notes:
+          result = max(result, cl.startTick + nt.startTick + nt.duration)
+
+proc sequencerFromProject*(proj: ProjectFormat): Sequencer =
+  ## Данные проекта → `Sequencer` Core. Единственное место, где формат файла
+  ## и модель секвенсора сводятся вместе (Nodes знает оба, Core — нет).
+  ##
+  ## Аудиоклипы переносятся как записи без нот: секвенсор событий о них
+  ## ничего не знает, а звук аудиоклипов даёт `euterpia.clip` (#107).
+  result.tracks = newSeq[Track](proj.sequencer.tracks.len)
+  for i, src in proj.sequencer.tracks:
+    var tr = Track(
+      id: src.id, name: src.name, trackType: ttMidi,
+      volume: src.volume, pan: src.pan,
+      mute: src.mute, solo: src.solo, armed: src.armed,
+      inputChannel: src.inputChannel, outputBus: src.outputBus
+    )
+    tr.clips = newSeq[Clip](src.clips.len)
+    for j, cs in src.clips:
+      var cl = Clip(
+        id: cs.id, clipType: ctMidi, name: cs.name,
+        startTick: cs.startTick, lengthTicks: cs.lengthTicks,
+        loopEnabled: cs.loopEnabled, audioBufferId: cs.audioBufferId,
+        color: cs.color
+      )
+      cl.notes = newSeq[NoteEvent](cs.notes.len)
+      for k, nt in cs.notes:
+        cl.notes[k] = NoteEvent(
+          startTick: nt.startTick, duration: nt.duration, pitch: nt.pitch,
+          velocity: nt.velocity, channel: nt.channel
+        )
+      tr.clips[j] = cl
+    result.tracks[i] = tr
+
+  for lane in proj.sequencer.automationLanes:
+    var dst = AutomationLane(nodeId: lane.nodeId, paramId: lane.paramId)
+    for pt in lane.points:
+      let curve =
+        if pt.curve >= 0 and pt.curve <= ord(AutomationCurve.high):
+          cast[AutomationCurve](pt.curve)
+        else:
+          acLinear
+      dst.points.add AutomationPoint(tick: pt.tick, value: pt.value, curve: curve)
+    result.automationLanes.add dst
 
 # ==============================================================================
 # Паттерны нотных нод
@@ -402,6 +470,7 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
   var created: seq[tuple[entry: ptr NodeTypeEntry, state: pointer]] = @[]
   var noteStates: seq[tuple[id: int, st: ptr NotesState]] = @[]
   var clipStates: seq[tuple[id: int, st: ptr ClipState]] = @[]
+  var sequencerStates: seq[tuple[id: int, state: pointer]] = @[]
   var clipBuffers: seq[seq[float32]] = @[]
   var bufferIndex = initTable[int32, int]()
   var clipMeta = initTable[int32, ResourceFacts]()
@@ -447,6 +516,8 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
       noteStates.add (node.id, cast[ptr NotesState](en.userData))
     if node.nodeType == ClipTypeId:
       clipStates.add (node.id, cast[ptr ClipState](en.userData))
+    if node.nodeType == SequencerPlayerTypeId:
+      sequencerStates.add (node.id, en.userData)
 
     # --- параметры: имена из файла → значения в единицах ноды --------------
     for name in sortedParamNames(node.parameters):
@@ -514,6 +585,29 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
   # Дальнейшие ошибки уходят через `failScene` (он снимет и то, и другое).
   result.states = created
 
+  # --- секвенсор проекта (#87) ---------------------------------------------
+  # Если в графе есть нода `euterpia.sequencer`, клипы проекта играет ОНА:
+  # компиляция одна на сцену, ноды получают указатель. Раскладка «дорожка →
+  # нотная нода» тогда отключается: иначе те же ноты прозвучали бы дважды.
+  if sequencerStates.len > 0:
+    var src = sequencerFromProject(proj)
+    let songTicks = max(sequencerSongTicks(proj), 1'i32)
+    var compiled = src.compile(songTicks)
+    let owned = new(CompiledSequencer)
+    owned[] = compiled
+    result.compiledSequencers.add owned
+    for item in sequencerStates:
+      setCompiledSequencer(item.state, addr owned[])
+    if compiled.maxTick > result.songEndTick:
+      result.songEndTick = compiled.maxTick
+    if compiled.tracks.len == 0:
+      issue(result, sequencerStates[0].id, "sequencer",
+            "секвенсор пуст: в проекте нет дорожек")
+    if songTicks >= DefaultMaxSongTicks:
+      issue(result, sequencerStates[0].id, "sequencer",
+            "конец песни не задан: зацикленные клипы ограничены " &
+              $DefaultMaxSongTicks & " тиками")
+
   # --- паттерны нот -------------------------------------------------------
   # Дорожки берутся в порядке файла, нотные ноды — по возрастанию id:
   # соответствие «дорожка → нода» детерминировано и не зависит от порядка
@@ -523,24 +617,25 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
   for item in noteStates:
     result.noteNodeIds.add item.id
 
-  var withNotes: seq[int] = @[]      # индексы дорожек, где есть ноты
-  for i in 0 ..< proj.sequencer.tracks.len:
-    for clip in proj.sequencer.tracks[i].clips:
-      if clip.notes.len > 0:
-        withNotes.add i
-        break
+  if sequencerStates.len == 0:
+    var withNotes: seq[int] = @[]      # индексы дорожек, где есть ноты
+    for i in 0 ..< proj.sequencer.tracks.len:
+      for clip in proj.sequencer.tracks[i].clips:
+        if clip.notes.len > 0:
+          withNotes.add i
+          break
 
-  if withNotes.len > noteStates.len:
-    return failScene(result,
-      "нотных дорожек " & $withNotes.len & ", а нод " & NotesTypeId & " — " &
-      $noteStates.len & ": добавьте нотные ноды в граф")
+    if withNotes.len > noteStates.len:
+      return failScene(result,
+        "нотных дорожек " & $withNotes.len & ", а нод " & NotesTypeId & " — " &
+        $noteStates.len & ": добавьте нотные ноды в граф")
 
-  for k in 0 ..< withNotes.len:
-    fillPattern(noteStates[k].st, proj.sequencer.tracks[withNotes[k]],
-                result.issues, noteStates[k].id)
-    let last = notesLastTick(noteStates[k].st[])
-    if last > result.songEndTick:
-      result.songEndTick = last
+    for k in 0 ..< withNotes.len:
+      fillPattern(noteStates[k].st, proj.sequencer.tracks[withNotes[k]],
+                  result.issues, noteStates[k].id)
+      let last = notesLastTick(noteStates[k].st[])
+      if last > result.songEndTick:
+        result.songEndTick = last
 
   # --- аудиоклипы (issue #107) --------------------------------------------
   # То же правило «дорожка → нода», что у нот: порядок дорожек и нод по id
