@@ -49,6 +49,7 @@ import test_recorder
 import test_sequencer
 import test_sequencer_player
 import test_project
+import test_autosave
 import test_param_flags
 import test_memory_pool
 import test_aligned_mem
@@ -66,6 +67,7 @@ import test_codec_api
 import test_instruments
 import test_mix
 import test_audio_inspect
+import test_loudness
 import test_graph_check
 import test_node_api_fixed
 import test_render_progress
