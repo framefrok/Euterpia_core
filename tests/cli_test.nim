@@ -736,13 +736,15 @@ suite "CLI: проект — init/show/set/validate (#89)":
 
     check nonEmptyLines(runCli(["__complete", "--", "proj"]).output) ==
           @["project"]
-    check nonEmptyLines(runCli(["__complete", "--", "project", ""]).output) ==
-          @["show", "set", "validate"]
+    let projectCandidates =
+      nonEmptyLines(runCli(["__complete", "--", "project", ""]).output)
+    for sub in ["show", "set", "validate", "recover"]:
+      check sub in projectCandidates
     check "--tempo" in nonEmptyLines(runCli(["__complete", "--", "init", "--tem"]).output)
 
     let human = runCli(["help", "project"])
     check human.code == 0
-    check "show | set | validate" in human.output
+    check "show | set | validate | recover" in human.output
     check "project set" in human.output
 
     let machine = parseJson(runCli(["help", "project", "--json"]).output)
@@ -751,7 +753,7 @@ suite "CLI: проект — init/show/set/validate (#89)":
     var subs: seq[string] = @[]
     for sub in machine["subcommands"]:
       subs.add sub.getStr
-    check subs == @["show", "set", "validate"]
+    check subs == @["show", "set", "validate", "recover"]
 
 # =============================================================================
 # #258: настройки окружения
@@ -2221,7 +2223,8 @@ suite "CLI: спецификация команд — один источник 
       ("init", @[@["init", "fresh.eproj", "--force"]]),
       ("project", @[@["project", "show", "spec.eproj"],
                     @["project", "set", "spec.eproj", "tempo", "100"],
-                    @["project", "validate", "spec.eproj"]]),
+                    @["project", "validate", "spec.eproj"],
+                    @["project", "recover", "spec.eproj", "--list"]]),
       ("midi", @[@["midi", "spec.eproj", "--out", "spec.mid"],
                  @["midi", "import", "spec.eproj", "spec.mid", "--dry-run"],
                  @["midi", "list"],
@@ -3377,4 +3380,83 @@ suite "CLI: automation — линии параметров (#114)":
                            "--json"])
     check r.code == 0
     check readFile(dir / "a.eproj") == before
+
+
+# =============================================================================
+# Автосохранение и восстановление (#110)
+# =============================================================================
+
+suite "CLI: project recover и автосохранение (#110)":
+  let dir = getTempDir() / "euterpia_cli_recover"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  test "recover восстанавливает снимок, делает .bak и снимает маркер":
+    check runCliIn(dir, ["init", "p.eproj", "--name", "Original"]).code == 0
+    check runCliIn(dir, ["project", "set", "p.eproj", "name", "Broken"]).code == 0
+    # Снимок «аварии» и маркер: ровно то, что оставляет writer.
+    check runCliIn(dir, ["init", "p.autosave-5.eproj", "--force",
+                         "--name", "Recovered"]).code == 0
+    writeFile(dir / "p.eproj.autosave.lock",
+              """{"version":5,"snapshot":"p.autosave-5.eproj"}""")
+
+    let listed = runCliIn(dir, ["project", "recover", "p.eproj", "--list",
+                                "--json"])
+    check listed.code == 0
+    check parseJson(listed.output)["snapshots"].len == 1
+    check parseJson(listed.output)["snapshots"][0]["version"].getInt == 5
+
+    let r = runCliIn(dir, ["project", "recover", "p.eproj", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["recovered"].getBool
+    check node["version"].getInt == 5
+    check node["written"].getBool
+    check fileExists(dir / "p.eproj.bak")
+    check not fileExists(dir / "p.eproj.autosave.lock")
+    let shown = runCliIn(dir, ["project", "show", "p.eproj", "--json"])
+    check parseJson(shown.output)["metadata"]["name"].getStr == "Recovered"
+
+  test "без маркера восстанавливать нечего — код 0 и причина":
+    check runCliIn(dir, ["init", "clean.eproj"]).code == 0
+    let r = runCliIn(dir, ["project", "recover", "clean.eproj", "--json"])
+    check r.code == 0
+    check not parseJson(r.output)["recovered"].getBool
+    check parseJson(r.output)["reason"].getStr.len > 0
+
+  test "--from восстанавливает указанный снимок даже без маркера":
+    check runCliIn(dir, ["init", "pick.eproj", "--name", "Before"]).code == 0
+    check runCliIn(dir, ["init", "pick.autosave-9.eproj", "--force",
+                         "--name", "Chosen"]).code == 0
+    let r = runCliIn(dir, ["project", "recover", "pick.eproj", "--from",
+                           "pick.autosave-9.eproj", "--json"])
+    check r.code == 0
+    check parseJson(r.output)["version"].getInt == 9
+    let shown = runCliIn(dir, ["project", "show", "pick.eproj", "--json"])
+    check parseJson(shown.output)["metadata"]["name"].getStr == "Chosen"
+
+  when defined(posix):
+    test "SIGKILL сессии: recover возвращает правку не старше интервала":
+      let d = dir / "crash"
+      createDir(d)
+      check runCliIn(d, ["init", "a.eproj", "--tempo", "90"]).code == 0
+      let started = runCliIn(d, ["session", "start", "a.eproj",
+                                 "--autosave", "1", "--json"])
+      check started.code == 0
+      let pid = parseJson(started.output)["pid"].getInt
+
+      # Правка ДРУГИМ процессом: снимок обязан увидеть её, а не старт.
+      check runCliIn(d, ["project", "set", "a.eproj", "tempo", "111"]).code == 0
+      sleep(2200)
+      discard execShellCmd("kill -9 " & $pid)
+      sleep(300)
+
+      let r = runCliIn(d, ["project", "recover", "a.eproj", "--json"])
+      check r.code == 0
+      check parseJson(r.output)["recovered"].getBool
+      let shown = runCliIn(d, ["project", "show", "a.eproj", "--json"])
+      check parseJson(shown.output)["metadata"]["tempo"].getFloat == 111.0
+      check fileExists(d / "a.eproj.bak")
 

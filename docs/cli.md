@@ -206,12 +206,19 @@ euterpia init demo.eproj --name Demo --tempo 140
 euterpia project <show|set|validate>
 ```
 
-Подкоманды: show | set | validate
+Подкоманды: show | set | validate | recover
 
 Аргументы:
 
 - `файл` — проект: *.eproj или *.eut; по умолчанию project.eproj
 - `поле значение` — только `project set`: name, author, tempo, sample-rate, time-signature
+
+Ключи:
+
+| Ключ | Значение | Умолчание | Смысл |
+|---|---|---|---|
+| `--list` | — | — | `project recover`: перечислить снимки автосохранения |
+| `--from` | файл | — | `project recover`: конкретный снимок |
 
 Пример:
 
@@ -230,6 +237,10 @@ euterpia project show demo.eproj
 - `summary` — счётчики: ноды, связи, треки, клипы
 - `change` — что изменил `project set`: поле, до и после
 - `sections` — результат `project validate`: секции и проверки
+- `snapshots` — `project recover --list`: снимки автосохранения
+- `version` — версия восстановленного снимка
+- `backup` — резервная копия пользовательского файла перед восстановлением
+- `written` — файл проекта записан восстановлением
 
 Подробности:
 
@@ -237,6 +248,9 @@ euterpia project show demo.eproj
 - project set [файл] <поле> <значение> — поля: name, author, tempo, sample-rate, time-signature
 - project set пишет атомарно (tmp + rename) и обновляет metadata.modified
 - project validate [файл] — отчёт о формате и целостности: провал проверки даёт код 1
+- project recover [файл] — восстановить последний снимок автосохранения (маркер аварии)
+- project recover --list — перечислить снимки; --from <файл> — конкретный снимок
+- перед восстановлением файл пользователя копируется в `<проект>.bak`
 - без файла команды работают с `project.eproj` — как в примере MANIFEST §19
 
 ### `midi` — MIDI: экспорт проекта в SMF, список портов и монитор событий
@@ -374,6 +388,7 @@ euterpia session <подкоманда> [проект.eproj] [ключи]
 | `--sample-rate` | Гц | 48000 | частота сессии, если проекта нет |
 | `--block-size` | кадры | 512 | размер блока движка |
 | `--timeout` | мс | 3000 | сколько ждать запуска демона |
+| `--autosave` | секунды | 0 | автосохранение проекта раз в N секунд (0 — выключено) |
 
 Пример:
 
@@ -391,6 +406,7 @@ euterpia session start demo.eproj
 - `blockSize` — размер блока
 - `state` — состояние транспорта: `stopped`|`playing`|`paused`|`recording`
 - `stale` — файл состояния есть, но процесс не отвечает
+- `autosaveMs` — период автосохранения демона (0 — выключено)
 
 Подробности:
 

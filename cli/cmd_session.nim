@@ -28,6 +28,8 @@ import control_bridge
 import control/query
 import session_ipc
 import runtime_session
+import project
+import autosave
 
 const
   SessionSubcommands* = @["start", "stop", "status"]
@@ -49,6 +51,8 @@ const
           default = "512"),
       opt("--timeout", "сколько ждать запуска демона", value = "мс",
           default = "3000"),
+      opt("--autosave", "автосохранение проекта раз в N секунд (0 — выключено)",
+          value = "секунды", default = "0"),
     ],
     example: "euterpia session start demo.eproj",
     fields: @[
@@ -60,6 +64,7 @@ const
       field("blockSize", "размер блока"),
       field("state", "состояние транспорта: `stopped`|`playing`|`paused`|`recording`"),
       field("stale", "файл состояния есть, но процесс не отвечает"),
+      field("autosaveMs", "период автосохранения демона (0 — выключено)"),
     ],
     notes: @[
       "сессия живёт между вызовами CLI: `transport play` в одном запуске виден `transport state` в другом (#407)",
@@ -79,6 +84,7 @@ type
     sampleRateExplicit: bool
     blockSize: int32
     timeoutMs: int
+    autosaveMs: int64
 
 proc monoMs(): int64 {.inline.} =
   ## Монотонные миллисекунды: по ним считается время сессии, поэтому
@@ -89,6 +95,7 @@ proc scanArgs(args: seq[string]): SessionScan =
   result.sampleRate = DefaultSampleRate
   result.blockSize = 512
   result.timeoutMs = 3000
+  result.autosaveMs = 0
 
   var positionals: seq[string] = @[]
   var i = 0
@@ -132,6 +139,20 @@ proc scanArgs(args: seq[string]): SessionScan =
         return SessionScan(ok: false,
           rep: usageError("--block-size: ожидается целое, получено «" &
                           args[i] & "»"))
+    of "--autosave":
+      inc i
+      if i >= args.len:
+        return SessionScan(ok: false,
+          rep: usageError("--autosave: нужно значение в секундах"))
+      try:
+        let seconds = parseInt(args[i])
+        if seconds < 0 or seconds > 86_400:
+          return SessionScan(ok: false,
+            rep: usageError("--autosave: допустимо 0…86400 секунд"))
+        result.autosaveMs = int64(seconds) * 1000
+      except ValueError:
+        return SessionScan(ok: false,
+          rep: usageError("--autosave: ожидается целое число секунд"))
     of "--timeout":
       inc i
       if i >= args.len:
@@ -232,7 +253,8 @@ proc handleSessionSignal(sig: cint) {.noconv.} =
 
 proc daemonMain(paths: SessionPaths; projectPath: string;
                 sampleRate: float32; blockSize: int32;
-                tempo: float64; meterNum, meterDen: int32): int =
+                tempo: float64; meterNum, meterDen: int32;
+                autosaveMs: int64): int =
   ## Цикл демона: тик транспорта + обработка одного запроса за итерацию.
   ##
   ## `accept` с таймаутом (20 мс), а не блокирующий: иначе позиция «играет»
@@ -242,6 +264,25 @@ proc daemonMain(paths: SessionPaths; projectPath: string;
   if not session.isActive:
     return 2
   defer: session.closeRuntimeSession()
+
+  # --- автосохранение (issue #110) -----------------------------------------
+  # Демон — единственный долгоживущий процесс CLI, поэтому автосохранение
+  # имеет смысл именно здесь. Каждый тик перечитываем проект: правки идут
+  # другими вызовами CLI (`project set`, `param set`), и снимок должен
+  # содержать ИХ, а не состояние на старте. Маркер пишется сразу; штатный
+  # `session stop` его снимает, SIGKILL — оставляет для `project recover`.
+  var auto: AutoSave
+  var autoVersion = 0'u64
+  var nextAuto = 0'i64
+  if autosaveMs > 0 and projectPath.len > 0 and fileExists(projectPath):
+    var policy = defaultAutosavePolicy()
+    policy.intervalMs = autosaveMs
+    policy.minChanges = 1
+    auto = initAutoSave(projectPath, policy)
+    nextAuto = monoMs() + autosaveMs
+  defer:
+    if auto.isActive:
+      auto.closeAutoSave(graceful = true)
 
   let (listenFd, listenError) = listenUnix(paths.socketPath)
   if listenFd == SocketHandle(-1):
@@ -260,6 +301,14 @@ proc daemonMain(paths: SessionPaths; projectPath: string;
   var running = true
   while running and not gSessionStop:
     session.tickRuntimeSession(monoMs())
+
+    if auto.isActive and monoMs() >= nextAuto:
+      let loaded = loadProject(projectPath)
+      if loaded.success:
+        inc autoVersion
+        discard auto.submitSnapshot(autoVersion, $loaded.value.toJson,
+                                    monoMs())
+      nextAuto = monoMs() + autosaveMs
 
     let client = acceptClient(listenFd, 20)
     if client == SocketHandle(-1):
@@ -354,7 +403,7 @@ proc runSessionStart(ctx: var Ctx; sc: SessionScan): Report =
       for fd in 3 .. 255:
         discard close(cint(fd))
       let code = daemonMain(paths, path, sampleRate, sc.blockSize,
-                            tempo, meterNum, meterDen)
+                            tempo, meterNum, meterDen, sc.autosaveMs)
       quit(code)
 
     # --- родитель: ждём, пока демон начнёт отвечать --------------------

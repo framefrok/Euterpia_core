@@ -30,6 +30,7 @@
 import std/[algorithm, json, os, strutils, tables, times]
 
 import project
+import autosave
 import signal_types
 import handles
 import context
@@ -75,7 +76,7 @@ const
     ## Поля, которыми управляет `project set`. Один источник для разбора,
     ## текста ошибки и справки — подсказка не может разойтись с кодом.
 
-  ProjectSubcommands* = @["show", "set", "validate"]
+  ProjectSubcommands* = @["show", "set", "validate", "recover"]
     ## Подкоманды `project`: кандидаты автодополнения второго уровня (#259).
 
   DefaultTempo* = 120.0f
@@ -178,6 +179,10 @@ const
         "; по умолчанию " & DefaultProjectFile),
       arg("поле значение", "только `project set`: " & ProjectFields.join(", ")),
     ],
+    options: @[
+      switch("--list", "`project recover`: перечислить снимки автосохранения"),
+      opt("--from", "`project recover`: конкретный снимок", value = "файл"),
+    ],
     example: "euterpia project show demo.eproj",
     fields: @[
       field("path", "путь прочитанного проекта"),
@@ -189,12 +194,19 @@ const
       field("summary", "счётчики: ноды, связи, треки, клипы"),
       field("change", "что изменил `project set`: поле, до и после"),
       field("sections", "результат `project validate`: секции и проверки"),
+      field("snapshots", "`project recover --list`: снимки автосохранения"),
+      field("version", "версия восстановленного снимка"),
+      field("backup", "резервная копия пользовательского файла перед восстановлением"),
+      field("written", "файл проекта записан восстановлением"),
     ],
     notes: @[
       "project show [файл] — метаданные, граф, треки/клипы, автоматизация, состояния плагинов",
       "project set [файл] <поле> <значение> — поля: " & ProjectFields.join(", "),
       "project set пишет атомарно (tmp + rename) и обновляет metadata.modified",
       "project validate [файл] — отчёт о формате и целостности: провал проверки даёт код 1",
+      "project recover [файл] — восстановить последний снимок автосохранения (маркер аварии)",
+      "project recover --list — перечислить снимки; --from <файл> — конкретный снимок",
+      "перед восстановлением файл пользователя копируется в `<проект>.bak`",
       "без файла команды работают с `" & DefaultProjectFile &
         "` — как в примере MANIFEST §19",
     ])
@@ -1297,6 +1309,164 @@ proc runProjectValidate*(ctx: var Ctx; args: seq[string]): Report =
   okReport(body = body, lines = lines)
 
 # =============================================================================
+# project recover (#110)
+# =============================================================================
+
+proc snapshotVersion(path: string): uint64 =
+  ## Версия из имени `<stem>.autosave-<N><ext>`; 0 — не наш файл.
+  let name = extractFilename(path)
+  let infix = name.rfind(AutoSnapshotInfix)
+  if infix < 0:
+    return 0
+  var i = infix + AutoSnapshotInfix.len
+  var value = 0'u64
+  var digits = 0
+  while i < name.len and name[i] in {'0'..'9'}:
+    value = value * 10 + uint64(ord(name[i]) - ord('0'))
+    inc digits
+    inc i
+  if digits == 0: 0'u64 else: value
+
+proc listSnapshots(projectPath: string):
+    seq[tuple[version: uint64; path: string]] =
+  let parts = splitFile(projectPath)
+  let dir = if parts.dir.len > 0: parts.dir else: "."
+  let ext = if parts.ext.len > 0: parts.ext else: ".eproj"
+  let pattern = dir / (parts.name & AutoSnapshotInfix & "*" & ext)
+  for path in walkFiles(pattern):
+    let version = snapshotVersion(path)
+    if version > 0:
+      result.add (version, path)
+  result.sort(proc(a, b: tuple[version: uint64; path: string]): int =
+    cmp(a.version, b.version))
+
+proc runProjectRecover(ctx: var Ctx; args: seq[string]): Report =
+  var projectPath = ""
+  var fromPath = ""
+  var wantList = false
+  var i = 0
+  while i < args.len:
+    let key = args[i]
+    if key == "--list":
+      wantList = true
+    elif key == "--from":
+      if i + 1 >= args.len:
+        return usageError("--from: нужен путь к снимку",
+          "список: euterpia project recover --list")
+      fromPath = args[i + 1]
+      inc i
+    elif key.startsWith("-"):
+      return usageError("неизвестный ключ: " & key,
+        "ключи recover: --list, --from")
+    elif isProjectPath(key):
+      if projectPath.len > 0:
+        return usageError("проект указан дважды: " & projectPath & " и " & key)
+      projectPath = key
+    else:
+      return usageError("непонятный аргумент: " & key,
+        "форма: project recover [проект.eproj] [--list] [--from файл]")
+    inc i
+  if projectPath.len == 0:
+    projectPath = DefaultProjectFile
+
+  if wantList:
+    let snaps = listSnapshots(projectPath)
+    var arr = newJArray()
+    var lines = @["снимки автосохранения: " & projectPath]
+    for item in snaps:
+      var size = 0'i64
+      try:
+        size = getFileSize(item.path)
+      except CatchableError:
+        discard
+      arr.add %*{"version": item.version, "path": item.path, "bytes": size}
+      lines.add "  v" & $item.version & "  " & item.path & "  (" &
+        $size & " байт)"
+    let marker = markerPathFor(projectPath)
+    if snaps.len == 0:
+      lines.add "  (снимков нет)"
+    if fileExists(marker):
+      lines.add "маркер незакрытой сессии: " & marker
+    let body = %*{"project": projectPath, "action": "list",
+                  "snapshots": arr, "marker": marker,
+                  "version": 0, "backup": "", "written": false}
+    return okReport(body = body, lines = lines)
+
+  var source = ""
+  var version = 0'u64
+  if fromPath.len > 0:
+    if not fileExists(fromPath):
+      return envError("снимок не найден: " & fromPath,
+        "список: euterpia project recover --list", errorKind = "io")
+    source = fromPath
+    version = snapshotVersion(fromPath)
+  else:
+    let recovery = recoverAutosave(projectPath)
+    if not recovery.found:
+      let body = %*{"project": projectPath, "action": "recover",
+                    "snapshots": newJArray(), "marker": recovery.marker,
+                    "source": "", "version": 0, "backup": "",
+                    "written": false, "recovered": false,
+                    "reason": recovery.error}
+      return okReport(body = body,
+        lines = @["восстанавливать нечего: " & recovery.error])
+    source = recovery.path
+    version = recovery.version
+
+  let loaded = loadAutosave(source)
+  if not loaded.success:
+    return usageError("снимок не читается: " & loaded.error.message,
+      "выберите другой снимок: euterpia project recover --list")
+
+  var backup = ""
+  if fileExists(projectPath) and projectPath != source:
+    backup = projectPath & ".bak"
+    if not ctx.dryRun:
+      try:
+        if fileExists(backup):
+          removeFile(backup)
+        copyFile(projectPath, backup)
+      except CatchableError as e:
+        return envError("не удалось сохранить резервную копию: " & e.msg,
+          "проверьте права рядом с " & projectPath, errorKind = "io")
+
+  var written = false
+  if not ctx.dryRun:
+    let saved = writeAtomic(projectPath, loaded.value)
+    if not saved.success:
+      return saveError(saved, projectPath)
+    clearRecovery(projectPath)
+    written = true
+
+  var lines = @[
+    "восстановление из снимка",
+    "проект: " & projectPath,
+    "снимок: " & source & " (v" & $version & ")",
+  ]
+  if backup.len > 0:
+    lines.add "резервная копия: " & backup
+  if ctx.dryRun:
+    lines.add "не записан: " & projectPath & " (--dry-run)"
+  else:
+    lines.add "записан: " & projectPath
+    lines.add "маркер аварии снят"
+
+  okReport(
+    body = %*{
+      "project": projectPath,
+      "action": "recover",
+      "snapshots": newJArray(),
+      "marker": markerPathFor(projectPath),
+      "source": source,
+      "version": version,
+      "backup": backup,
+      "written": written,
+      "recovered": true,
+      "reason": "",
+    },
+    lines = lines)
+
+# =============================================================================
 # project
 # =============================================================================
 
@@ -1311,6 +1481,7 @@ proc runProject*(ctx: var Ctx; args: seq[string]): Report =
   of "show": runProjectShow(ctx, argsTail(args))
   of "set": runProjectSet(ctx, argsTail(args))
   of "validate": runProjectValidate(ctx, argsTail(args))
+  of "recover": runProjectRecover(ctx, argsTail(args))
   else:
     usageError("неизвестная подкоманда project: " & args[0],
                "подкоманды: " & ProjectSubcommands.join(", "))
