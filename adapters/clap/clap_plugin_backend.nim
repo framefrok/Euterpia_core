@@ -22,10 +22,12 @@
 #
 # MANIFEST §8, §40, §41, §42.
 
-import std/dynlib
+import std/[dynlib, atomics]
 import plugin_api
 import signal_types
 import node_interface
+import aligned_mem
+import ring_buffer
 import clap_host
 import clap_host_extensions
 import clap_plugin_extensions
@@ -37,13 +39,13 @@ const
   ## Максимум отложенных изменений параметров между вызовами flush/process.
   ## CLAP не имеет метода setValue: значения передаются событиями, поэтому
   ## `paramSet` копит их здесь, а применяет `paramFlush`/`process`.
+  ## Обязан быть степенью двойки — это размер MPSC-кольца.
   ClapMaxPendingParams = 32
 
 type
   PendingParam = object
     id: uint32
     value: float64
-    used: bool
 
   ClapSlot = object
     ## Состояние одного инстанса. POD; размещается в shared-куче.
@@ -56,12 +58,37 @@ type
     maxBlock: int32
     audioIn: int32
     audioOut: int32
-    pendingParams: array[ClapMaxPendingParams, PendingParam]
+    ## Отложенные параметры: MPSC-кольцо (аудит, P3).
+    ##
+    ## Consumer один — audio-поток в `clapProcess`/`clapParamFlush`.
+    ## Producers — control-поток (`paramSet`) и host-колбэки плагина.
+    ## Массив с флагом `used` был прямой гонкой данных; очередь её убирает
+    ## и не перезаписывает непрочитанное.
+    pendingParams: MpscRingBuffer[PendingParam, ClapMaxPendingParams]
+    ## Захват очереди параметров: у MPSC ровно один consumer, а забрать
+    ## отложенные значения могут и `process` (audio), и `params.flush`
+    ## (control). Кто захватил — тот и применяет; второй не ждёт и не
+    ## теряет данные: они останутся до следующего вызова.
+    pendingClaim: Atomic[bool]
     ## Слияние внешних событий блока с отложенными параметрами.
     mergedEvents: EventQueue
 
   ClapBackendImpl = object
     initCalls: int32
+
+proc takePendingParams(slot: ptr ClapSlot;
+                       outParams: var array[ClapMaxPendingParams, PendingParam]): int =
+  ## Забирает очередь параметров, если её не забирает другой поток.
+  ## Возвращает число элементов; 0 — очередь занята или пуста.
+  result = 0
+  var expected = false
+  if not slot.pendingClaim.compareExchange(expected, true, moAcquire, moRelaxed):
+    return
+  var p: PendingParam
+  while result < ClapMaxPendingParams and slot.pendingParams.pop(p):
+    outParams[result] = p
+    inc result
+  slot.pendingClaim.store(false, moRelease)
 
 proc implOf(api: ptr PluginApi): ptr ClapBackendImpl {.inline.} =
   if api.isNil: nil else: cast[ptr ClapBackendImpl](api.impl)
@@ -228,28 +255,36 @@ proc clapInstantiate(
     m.closeModule()
     return nil
 
-  let slot = cast[ptr ClapSlot](allocShared0(sizeof(ClapSlot)))
+  # `ClapSlot` содержит `EventQueue` с `{.align: 64.}` — `allocShared0` даёт
+  # только MemAlign (16), и под `-d:useMalloc` обращение к полю было бы UB
+  # (UBSan). Парная функция освобождения — `alignedSharedDealloc`.
+  let slot = cast[ptr ClapSlot](
+    alignedSharedAlloc0(sizeof(ClapSlot), alignof(ClapSlot)))
   if slot.isNil:
     m.closeModule()
     return nil
+  initRing(slot.pendingParams)
 
   # Хост-интерфейс плагина: базовые поля + host-расширения (#6).
   initHost(slot.inst.host)
   slot.hostCtx = newClapHostContext()
   if slot.hostCtx.isNil:
-    deallocShared(slot)
+    alignedSharedDealloc(slot)
     m.closeModule()
     return nil
   installClapHostExtensions(slot.inst.host, slot.hostCtx)
 
   let plugin = f.createPlugin(f, addr slot.inst.host, desc.id)
   if plugin.isNil:
-    deallocShared(slot)
+    # Контекст уже создан — без freeClapHostContext он утекал (аудит, P3).
+    freeClapHostContext(slot.hostCtx)
+    alignedSharedDealloc(slot)
     m.closeModule()
     return nil
   if not plugin.init(plugin):
     plugin.destroy(plugin)
-    deallocShared(slot)
+    freeClapHostContext(slot.hostCtx)
+    alignedSharedDealloc(slot)
     m.closeModule()
     return nil
 
@@ -272,7 +307,7 @@ proc clapDestroy(api: ptr PluginApi; handle: PluginHandle)
     return
   unloadClapPlugin(slot.inst)
   freeClapHostContext(slot.hostCtx)
-  deallocShared(slot)
+  alignedSharedDealloc(slot)
 
 proc clapActivate(
   api: ptr PluginApi;
@@ -335,16 +370,22 @@ proc clapProcess(
   # Отложенные параметры уезжают в плагин вместе с событиями блока: в CLAP
   # значения параметров передаются событиями, а не отдельным вызовом.
   clearEvents(addr slot.mergedEvents)
+  # Сначала параметры: их единицы, и они не должны потеряться из-за того, что
+  # блок уже насыщен нотами.
+  var pendingBatch: array[ClapMaxPendingParams, PendingParam]
+  let pendingCount = slot.takePendingParams(pendingBatch)
+  for i in 0 ..< pendingCount:
+    # `paramId` — 32 бита, поэтому BITCAST, а не численное `float32(id)`:
+    # мантисса float32 хранит точные целые только до 2^24, а плагины часто
+    # используют хэши (FNV/CRC32) — младшие 8 бит терялись (аудит, P3).
+    # Обратная сторона — `cast[uint32]` в convertRtEventToClap.
+    discard pushEvent(addr slot.mergedEvents, RealtimeEvent(
+      frameOffset: 0'u32, kind: evParamChange,
+      data: [cast[float32](pendingBatch[i].id),
+             float32(pendingBatch[i].value), 0.0f, 0.0f]))
   if not inEvents.isNil:
     for i in 0 ..< inEvents.count:
       discard pushEvent(addr slot.mergedEvents, inEvents.events[i])
-  for i in 0 ..< ClapMaxPendingParams:
-    if slot.pendingParams[i].used:
-      discard pushEvent(addr slot.mergedEvents, RealtimeEvent(
-        frameOffset: 0'u32, kind: evParamChange,
-        data: [float32(slot.pendingParams[i].id),
-               float32(slot.pendingParams[i].value), 0.0f, 0.0f]))
-      slot.pendingParams[i].used = false
 
   var evPorts: NodeEventPorts
   evPorts.inputs[0] = addr slot.mergedEvents
@@ -370,18 +411,6 @@ proc clapParamToFlags(flags: uint32): set[PluginParamFlag] {.inline.} =
   if (flags and ClapParamIsStepped) != 0'u32: result.incl ppfInteger
   if (flags and ClapParamIsEnum) != 0'u32: result.incl ppfChoice
   if (flags and ClapParamIsHidden) != 0'u32: result.incl ppfHidden
-
-proc pendingIndexOf(slot: ptr ClapSlot; paramId: uint32): int =
-  for i in 0 ..< ClapMaxPendingParams:
-    if slot.pendingParams[i].used and slot.pendingParams[i].id == paramId:
-      return i
-  -1
-
-proc pendingFreeIndex(slot: ptr ClapSlot): int =
-  for i in 0 ..< ClapMaxPendingParams:
-    if not slot.pendingParams[i].used:
-      return i
-  -1
 
 proc clapParamCount(api: ptr PluginApi; handle: PluginHandle): int32
     {.cdecl, raises: [], gcsafe.} =
@@ -448,16 +477,8 @@ proc clapParamSet(api: ptr PluginApi; handle: PluginHandle; paramId: uint32;
       return false
     v = raw.minValue + clamp(value, 0.0, 1.0) * (raw.maxValue - raw.minValue)
 
-  let existing = slot.pendingIndexOf(paramId)
-  if existing >= 0:
-    slot.pendingParams[existing].value = v
-    return true
-
-  let free = slot.pendingFreeIndex()
-  if free < 0:
-    return false
-  slot.pendingParams[free] = PendingParam(id: paramId, value: v, used: true)
-  true
+  # Очередь не перезаписывает непрочитанное: при переполнении честный false.
+  slot.pendingParams.push(PendingParam(id: paramId, value: v))
 
 proc clapParamFlush(api: ptr PluginApi; handle: PluginHandle;
   inEvents, outEvents: ptr EventQueue): bool {.cdecl, raises: [], gcsafe.} =
@@ -468,28 +489,32 @@ proc clapParamFlush(api: ptr PluginApi; handle: PluginHandle;
   if slot.isNil or slot.exts.params.isNil or slot.exts.params.flush.isNil:
     return false
 
-  # То же хранилище, что использует processPlugin: вызовы не пересекаются.
-  slot.inst.inputStorage.count = 0
-  slot.inst.outputStorage.count = 0
+  # СВОИ хранилища на стеке, а не `inst.inputStorage/outputStorage`: CLAP
+  # разрешает звать `params.flush` не из audio-потока, и общие буферы с
+  # `processPlugin` были бы второй гонкой данных (аудит, P3).
+  var inStorage: ClapEventStorage
+  var outStorage: ClapEventStorage
+  inStorage.count = 0
+  outStorage.count = 0
 
-  for i in 0 ..< ClapMaxPendingParams:
-    if slot.pendingParams[i].used:
-      discard pushParamToClap(slot.inst.inputStorage, 0'u32,
-        slot.pendingParams[i].id, slot.pendingParams[i].value)
-      slot.pendingParams[i].used = false
+  var pendingBatch: array[ClapMaxPendingParams, PendingParam]
+  let pendingCount = slot.takePendingParams(pendingBatch)
+  for i in 0 ..< pendingCount:
+    discard pushParamToClap(inStorage, 0'u32, pendingBatch[i].id,
+                            pendingBatch[i].value)
 
   if not inEvents.isNil:
     for i in 0 ..< inEvents.count:
-      discard convertRtEventToClap(inEvents.events[i], slot.inst.inputStorage)
+      discard convertRtEventToClap(inEvents.events[i], inStorage)
 
-  var inList = initInputEvents(addr slot.inst.inputStorage)
-  var outList = initOutputEvents(addr slot.inst.outputStorage)
+  var inList = initInputEvents(addr inStorage)
+  var outList = initOutputEvents(addr outStorage)
   slot.exts.params.flush(slot.inst.plugin, addr inList, addr outList)
 
   if not outEvents.isNil:
     clearEvents(outEvents)
-    for i in 0 ..< slot.inst.outputStorage.count:
-      let hdr = cast[ptr ClapEventHeader](addr slot.inst.outputStorage.events[i])
+    for i in 0 ..< outStorage.count:
+      let hdr = cast[ptr ClapEventHeader](addr outStorage.events[i])
       discard pushEvent(outEvents, convertClapEventToRt(hdr))
 
   true

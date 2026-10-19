@@ -183,3 +183,34 @@ suite "clap events: аудио-буферы и порты":
     check cast[uint](ptrs[0]) == cast[uint](addr data[0])
     check cast[uint](ptrs[1]) == cast[uint](addr data[1])
 
+
+suite "clap events: 32-битный paramId и неполный блок (аудит P3)":
+  test "clap_id с хэшем переживает RT → CLAP → RT без потери бит":
+    let id = 0xDEADBEEF'u32          # > 2^24: float32(id) исказил бы младшие биты
+    var storage: ClapEventStorage
+    let ev = RealtimeEvent(kind: evParamChange,
+                           data: [cast[float32](id), 0.5f, 0.0f, 0.0f])
+    check convertRtEventToClap(ev, storage)
+    let hdr = headerOf(storage)
+    check hdr.eventType == ClapEvtParamVal
+    check cast[ptr ClapEventParamVal](hdr).paramId == id
+
+    let back = convertClapEventToRt(hdr)
+    check back.kind == evParamChange
+    check cast[uint32](back.data[0]) == id
+
+  test "planar на неполном блоке: frames < stride, второй канал по stride":
+    var data: array[16, float32]
+    var buf = AudioBuffer(
+      data: cast[ptr UncheckedArray[float32]](addr data[0]),
+      channels: 2, frames: 2, stride: 4, layout: alPlanar)
+
+    var ptrs: ChannelPtrs
+    var clapBuf: ClapAudioBuffer
+    setupClapAudioBuffer(addr buf, ptrs, clapBuf)
+
+    check clapBuf.channelCount == 2'u32
+    check cast[uint](ptrs[0]) == cast[uint](addr data[0])
+    # Старое `stride == frames` ушло бы в interleaved и дало data[1].
+    check cast[uint](ptrs[1]) == cast[uint](addr data[4])
+

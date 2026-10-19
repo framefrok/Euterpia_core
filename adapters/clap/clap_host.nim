@@ -392,8 +392,10 @@ proc convertRtEventToClap*(ev: RealtimeEvent, storage: var ClapEventStorage): bo
                           ev.port.int16, ev.channel.int16,
                           ev.data[0].int16, ev.data[1].float64)
   of evParamChange:
+    # BITCAST обратной стороны `clapProcess`: все 32 бита `clap_id`
+    # сохраняются (численное `.uint32` после float32 теряло младшие биты).
     return pushParamToClap(storage, ev.frameOffset,
-                           ev.data[0].uint32, ev.data[1].float64)
+                           cast[uint32](ev.data[0]), ev.data[1].float64)
   of evCC:
     # data[0] — номер контроллера (0..127), data[1] — нормированное значение.
     return pushMidiToClap(storage, ev.frameOffset,
@@ -442,7 +444,9 @@ proc convertClapEventToRt*(header: ptr ClapEventHeader): RealtimeEvent =
   of ClapEvtParamVal:
     let param = cast[ptr ClapEventParamVal](header)
     result.kind = evParamChange
-    result.data[0] = param.paramId.float32
+    # Симметрично `convertRtEventToClap`: bitcast, чтобы 32-битный clap_id
+    # не терял младшие биты при хэш-идентификаторах (аудит, P3).
+    result.data[0] = cast[float32](param.paramId)
     result.data[1] = param.value.float32
 
   of ClapEvtMidi:
@@ -508,15 +512,22 @@ proc setupClapAudioBuffer*(buf: PAudioBuffer,
   # сообщался бы `channelCount` больше, чем реально есть указателей (он читал
   # бы мусор за границей). Конфигурации 1/1, 2/2, 2/4 обязаны оставаться в
   # границах (issue #7).
-  let ch = min(buf.channels.int, MaxAudioPorts)
-  let stride = buf.stride.int
+  let ch = max(0, min(buf.channels.int, MaxAudioPorts))
+  let frames = buf.frames.int
+  var stride = buf.stride.int
+  if stride <= 0:
+    stride = max(frames, 1)
+  # Раскладка — из явного поля (issue #392), а не из `stride == frames`:
+  # на неполном блоке planar-буфер имеет frames < stride, и старое сравнение
+  # отдавало плагину `data[1]` вместо второго канала (аудит, P3).
+  let planar =
+    case buf.layout
+    of alPlanar: true
+    of alInterleaved: false
+    of alAuto: stride >= max(frames, 1)
   for c in 0 ..< ch:
-    if stride == buf.frames.int:
-      # Planar layout: channel c starts at data[c * frames]
-      channelPtrs[c] = addr buf.data[c * stride]
-    else:
-      # Interleaved or single-channel
-      channelPtrs[c] = addr buf.data[c]
+    let offset = if planar: c * stride else: c
+    channelPtrs[c] = addr buf.data[offset]
 
   clapBuf.data32 = cast[ptr UncheckedArray[ptr float32]](addr channelPtrs)
   clapBuf.data64 = nil

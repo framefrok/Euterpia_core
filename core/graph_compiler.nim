@@ -205,7 +205,14 @@ proc processDelayComp*(ctx: ptr NodeProcessContext,
   if frames <= 0: return
   let channels = inBuf.channels
   let stride = if inBuf.stride > 0: inBuf.stride else: inBuf.frames
-  let planar = stride >= inBuf.frames
+  # Раскладка — из поля буфера (issue #392); эвристика остаётся только для
+  # `alAuto`. На неполном блоке planar-буфер имеет `frames < stride`, поэтому
+  # `stride >= frames` без проверки layout — лотерея (аудит, P3).
+  let planar =
+    case inBuf.layout
+    of alPlanar: true
+    of alInterleaved: false
+    of alAuto: stride >= inBuf.frames
 
   let state = cast[ptr DelayCompensationData](userData)
   if state == nil or state.buffer == nil or state.bufferSize <= 0 or
