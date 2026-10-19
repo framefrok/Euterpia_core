@@ -661,6 +661,70 @@ suite "CLI: проект — init/show/set/validate (#89)":
     check graphFacts != nil
     check graphFacts["dangling"].len == 1
 
+  test "validate: порт проверяется в namespace СВОЕГО сигнала (#399)":
+    let path = dir / "ports.eut"
+    # У ноды 1 есть audioOut=1 и ctrlOut=1. Индекс 1 для audio НЕ существует,
+    # хотя сумма счётчиков (2) его пропускала. sigType 0 = audio.
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "metadata":{"name":"Ports","sampleRate":48000,"tempo":120},
+      "graph":{"nodes":[
+        {"id":1,"nodeType":"fx.gain","audioInCount":1,"audioOutCount":1,
+         "ctrlInCount":1,"ctrlOutCount":1},
+        {"id":2,"nodeType":"fx.gain","audioInCount":1,"audioOutCount":1}],
+        "connections":[
+          {"srcNodeId":1,"srcPortIdx":1,"dstNodeId":2,"dstPortIdx":0,
+           "sigType":0}]}}""")
+
+    let human = runCli(["project", "validate", path])
+    check human.code == 1
+    check "порт вне диапазона своего вида" in human.output
+
+    let node = parseJson(runCli(["project", "validate", path, "--json"]).output)
+    var facts: JsonNode = nil
+    for section in node["sections"]:
+      if section["id"].getStr != "graph":
+        continue
+      for checkItem in section["checks"]:
+        if checkItem["id"].getStr == "connections":
+          facts = checkItem["facts"]
+    check facts != nil
+    check facts["outOfRange"].len == 1
+
+    # Неизвестный вид сигнала — тоже отказ данных.
+    let badSignal = dir / "bad-signal.eut"
+    writeFile(badSignal, """{"format":"euterpia-project","version":1,
+      "metadata":{"name":"Ports","sampleRate":48000,"tempo":120},
+      "graph":{"nodes":[
+        {"id":1,"nodeType":"fx.gain","audioOutCount":1},
+        {"id":2,"nodeType":"fx.gain","audioInCount":1}],
+        "connections":[
+          {"srcNodeId":1,"srcPortIdx":0,"dstNodeId":2,"dstPortIdx":0,
+           "sigType":9}]}}""")
+    let bad = parseJson(runCli(["project", "validate", badSignal,
+                                "--json"]).output)
+    check bad["summary"]["fail"].getInt > 0
+    var badFacts: JsonNode = nil
+    for section in bad["sections"]:
+      if section["id"].getStr != "graph":
+        continue
+      for checkItem in section["checks"]:
+        if checkItem["id"].getStr == "connections":
+          badFacts = checkItem["facts"]
+    check badFacts != nil
+    check badFacts["badSignal"].len == 1
+
+    # Корректный порт того же вида — без провалов.
+    let okPath = dir / "ports-ok.eut"
+    writeFile(okPath, """{"format":"euterpia-project","version":1,
+      "metadata":{"name":"Ports","sampleRate":48000,"tempo":120},
+      "graph":{"nodes":[
+        {"id":1,"nodeType":"fx.gain","audioOutCount":1,"ctrlOutCount":1},
+        {"id":2,"nodeType":"fx.gain","audioInCount":1}],
+        "connections":[
+          {"srcNodeId":1,"srcPortIdx":0,"dstNodeId":2,"dstPortIdx":0,
+           "sigType":0}]}}""")
+    check runCli(["project", "validate", okPath]).code == 0
+
   test "новые команды видны в справке, машинной справке и автодополнении":
     let names = machineCommandNames()
     check "init" in names
