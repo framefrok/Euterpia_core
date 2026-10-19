@@ -36,6 +36,35 @@
   `MaxAudioChannels`, нода с `maxChannels > 2` отвергается `validateChannelModel`
   и вердиктом `graph check` `unsupportedChannels`
   ([#401](https://github.com/framefrok/Euterpia_core/issues/401)).
+- **Оркестратор/параметры: удалены вторые системы** (issue #396):
+  `core/dsp_scheduler.nim`, `core/param_registry.nim` и `core/audio_params.nim`
+  удалены как неинтегрированные в `AudioEngine`; тесты и CI-проверки,
+  ссылавшиеся на них, убраны. WAV-писатель остаётся один — `wav_codec`
+  (рекордер использует его с #356)
+  ([#396](https://github.com/framefrok/Euterpia_core/issues/396)).
+- **`setFixed` больше не оставляет битый UTF-8** (issue #398): обрезка идёт
+  по последней ЦЕЛОЙ последовательности, включая проверку overlong-форм и
+  суррогатов; `readFixed` всегда декодируется
+  ([#398](https://github.com/framefrok/Euterpia_core/issues/398)).
+- **`project validate` проверяет порт в namespace своего сигнала** (issue
+  #399): audio/control/event — разные пространства индексов; `sigAudio` на
+  control-порт и индекс вне счётчика своего вида — ошибка данных
+  ([#399](https://github.com/framefrok/Euterpia_core/issues/399)).
+- **Сборка без `-fno-strict-aliasing`** (issue #400): флаг убран; unit,
+  integration, CLI и ASan/UBSan проходят без него
+  ([#400](https://github.com/framefrok/Euterpia_core/issues/400)).
+- **Лимиты компилятора графа** (issue #404): `MaxSubgraphDepth`,
+  `MaxFlattenedNodes`, `MaxGraphConnections`, бюджет памяти PDC. Превышение —
+  ошибка компиляции/вердикт `graph check`, а не stack overflow или OOM
+  ([#404](https://github.com/framefrok/Euterpia_core/issues/404)).
+- **Latency-арифметика без `uint32`-wrap** (issue #405): сумма в `uint64`,
+  предел `MaxLatencyFrames`, насыщение при разборе проекта; превышение —
+  `cekLatencyOverflow`
+  ([#405](https://github.com/framefrok/Euterpia_core/issues/405)).
+- **#406 закрыт удалением orphan-планировщика**: destructive API
+  `deinitScheduler`, который мог уничтожить состояние во время рендера,
+  больше не существует; вместе с #396 удалён и сам модуль
+  ([#406](https://github.com/framefrok/Euterpia_core/issues/406)).
 
 
 Версия пакета — `0.3.2` (релиз). Шаг линии **v0.3.2** («критическое и

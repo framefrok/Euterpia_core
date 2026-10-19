@@ -41,15 +41,12 @@ import test_graph_compiler
 import test_pipeline_ownership
 import test_runtime_session
 import test_pdc
-import test_scheduler_stop
-import test_scheduler_pool
 import test_rt_guard
 import test_engine_retire
 import test_realtime_gcsafe
 import test_recorder
 import test_sequencer
 import test_project
-import test_param_registry
 import test_param_flags
 import test_memory_pool
 import test_aligned_mem
@@ -68,6 +65,7 @@ import test_instruments
 import test_mix
 import test_audio_inspect
 import test_graph_check
+import test_node_api_fixed
 import test_render_progress
 import test_compose_diagnostics
 import test_compose_musical
