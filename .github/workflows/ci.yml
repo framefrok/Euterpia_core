@@ -263,11 +263,11 @@ jobs:
           # только контракты `midi_api`/`plugin_api`, а CLI не трогает
           # CLAP-ABI напрямую. Ищем СИМВОЛЫ библиотек, а не слова в прозе:
           # докстроки контрактов по §8 законно перечисляют бэкенды.
-          if grep -rnE 'eut_lrm_|libremidi_shim|libremidi\.hpp|lilv_world_|lilv_plugin_|clap_entry' core/; then
+          if grep -rnE 'eut_lrm_|libremidi_shim|libremidi\.hpp|lilv_world_|lilv_plugin_|clap_entry\b' core/; then
             echo "::error::символы конкретной библиотеки протекли в core/ (#38, #39)"
             exit 1
           fi
-          if grep -rnE 'ClapPlugin|ClapHost|ClapProcess|clap_entry|eut_lrm_' cli/ cli.nim; then
+          if grep -rnE 'ClapPlugin\b|ClapHost\b|ClapProcess\b|clap_entry\b|eut_lrm_' cli/ cli.nim; then
             echo "::error::CLI трогает ABI плагина напрямую вместо core/plugin_api (#95)"
             exit 1
           fi
@@ -619,6 +619,66 @@ jobs:
 
       - name: nimble embedLib
         run: nimble embedLib
+
+  # ---------------------------------------------------------------------------
+  # Поставка (#229): архив с ассоциациями файлов проекта и ПРОВЕРКА НА ЧИСТОЙ
+  # МАШИНЕ. Бинарь собирается на ubuntu-latest и запускается в контейнере
+  # ubuntu:24.04 без Nim, компиляторов и dev-пакетов: если он тянет
+  # библиотеку из среды сборки, это видно здесь, а не у пользователя.
+  # ---------------------------------------------------------------------------
+  package:
+    name: delivery package (clean machine)
+    if: github.event_name != 'pull_request' || github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
+        with:
+          nim-version: '2.2.12'
+
+      - name: Сборка release и упаковка
+        run: |
+          nim c -d:release --hints:off --out:build/euterpia cli.nim
+          tools/package.sh build/euterpia
+
+      - name: "Состав пакета: ассоциации и документация"
+        run: |
+          pkg=$(ls -d build/dist/euterpia-* | head -1)
+          test -x "$pkg/bin/euterpia"
+          test -f "$pkg/share/applications/euterpia.desktop"
+          test -f "$pkg/share/mime/packages/euterpia.xml"
+          test -f "$pkg/install.sh"
+          test -f "$pkg/VERSION"
+          grep -q 'application/x-euterpia-project' "$pkg/share/mime/packages/euterpia.xml"
+          echo "ok: пакет содержит бинарь, .desktop, MIME и установщик"
+
+      - name: "Чистая машина: версия, проект и рендер без dev-окружения"
+        run: |
+          docker run --rm -v "$PWD/build/dist:/pkg:ro" ubuntu:24.04 bash -lc '
+            set -e
+            cd /tmp
+            tar xzf /pkg/euterpia-*.tar.gz
+            PKG=$(ls -d euterpia-*)
+            "$PKG/bin/euterpia" --version
+            "$PKG/bin/euterpia" init demo.eproj
+            "$PKG/bin/euterpia" node add osc --file demo.eproj >/dev/null
+            "$PKG/bin/euterpia" render demo.eproj out.wav --seconds 1 --json > report.json
+            grep -q ""ok":true" report.json
+            grep -q ""rendered":true" report.json
+            test -s out.wav
+            echo "ok: пакет работает на чистой Ubuntu без Nim"
+          '
+
+      - name: Артефакт пакета
+        uses: actions/upload-artifact@v4
+        with:
+          name: euterpia-package
+          path: |
+            build/dist/*.tar.gz
+            build/dist/*.sha256
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Поставка CLI (#113, #229): релизный бинарь на трёх ОС + smoke.

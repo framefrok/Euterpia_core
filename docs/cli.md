@@ -317,6 +317,53 @@ euterpia midi ensemble.eproj --out ensemble.mid
 - импорт — одна транзакция истории: `euterpia undo` возвращает проект до него
 - раскодировать обратно можно тем же кодеком: `commons/midi_io.parseSmf`
 
+### `plugin` — внешние плагины: scan/info/params/save/validate
+
+```text
+euterpia plugin <scan|info|params|save|validate> [аргументы] [ключи]
+```
+
+Подкоманды: scan | info | params | save | validate
+
+Аргументы:
+
+- `подкоманда` — scan | info | params | save | validate
+- `аргументы` — путь к .clap/каталогу или проект и id ноды
+
+Ключи:
+
+| Ключ | Значение | Умолчание | Смысл |
+|---|---|---|---|
+| `--index` | N | — | индекс плагина в библиотеке (по умолчанию 0) |
+| `--validator` | путь | — | путь к clap-validator (иначе поиск в PATH) |
+
+Пример:
+
+```text
+euterpia plugin scan /usr/lib/clap --json
+```
+
+Поля ответа `--json`:
+
+- `subcommand` — выполненная подкоманда
+- `files` — библиотеки/бандлы, которые просмотрены
+- `plugins` — найденные плагины: id, name, vendor, порты, параметры
+- `plugin` — подробности одного плагина (`info`)
+- `node` — нода проекта (`params`/`save`)
+- `params` — параметры инстанса: id, имя, значение
+- `state` — сохранённое состояние: bytes, sha1 (`save`)
+- `validator` — путь и код возврата внешнего валидатора
+- `checks` — проверки валидатора: id, status, message
+- `passed` — валидатор: все проверки пройдены
+- `failed` — валидатор: сколько проверок упало
+
+Подробности:
+
+- нет CLAP-адаптера — код 2, а не паника: `plugin scan` честно говорит, чего нет
+- `save` пишет непрозрачный блоб состояния в проект; байты в `project show` не печатаются — только размер и хеш
+- `validate` не подменяет валидатор своим кодом: нет инструмента — код 2 с подсказкой установки (#260)
+- валидатор запускается на control-path; аудиоустройство не открывается, плагин в процесс CLI не грузится (#260)
+
 ### `transport` — транспорт: темп, размер, позиция, воспроизведение, цикл
 
 ```text
@@ -472,10 +519,14 @@ euterpia play [проект.eproj] [ключи]
 | `--file` | проект.eproj | — | проект, если он не задан позиционно |
 | `--backend` | имя | — | аудио-бэкенд: miniaudio |
 | `--device` | N|имя | — | индекс или имя устройства вывода |
-| `--sample-rate` | Гц | — | частота дискретизации; без ключа — из проекта |
+| `--sample-rate` | Гц | — | частота ПРОЕКТА; без ключа — из проекта |
+| `--device-rate` | Гц | — | частота УСТРОЙСТВА; без ключа — родная частота устройства |
+| `--src` | auto|on|off | auto | ресемплинг между устройством и проектом: auto|on|off |
 | `--block` | кадры | 512 | размер блока |
 | `--seconds` | секунды | — | играть N секунд; без ключа — до SIGINT |
 | `--master` | id ноды | — | id ноды, подключённой к мастеру |
+| `--midi-in` | N|имя | — | MIDI-порт для живой игры (индекс или имя) |
+| `--midi-target` | id ноды | — | id ноды-приёмника MIDI; по умолчанию — единственный инструмент |
 
 Пример:
 
@@ -488,8 +539,12 @@ euterpia play demo.eproj --seconds 10
 - `path` — проект
 - `backend` — открытый бэкенд
 - `device` — индекс устройства вывода
-- `sampleRate` — частота сеанса
-- `blockSize` — размер блока
+- `sampleRate` — частота проекта
+- `deviceSampleRate` — частота устройства
+- `resampling` — мост частот включён (устройство ≠ проект)
+- `resamplerLatency` — задержка моста, кадров устройства
+- `blockSize` — размер блока драйвера
+- `engineBlockSize` — размер блока движка (может отличаться при SRC)
 - `seconds` — сколько длился сеанс
 - `frames` — отрендерено кадров
 - `xruns` — xrun'ы за сеанс
@@ -499,6 +554,12 @@ euterpia play demo.eproj --seconds 10
 - `rmsL` — последний RMS левого канала
 - `rmsR` — последний RMS правого канала
 - `graphVersion` — версия играющего графа
+- `midiPort` — открытый MIDI-вход (пусто — живого входа нет)
+- `midiTarget` — нода-приёмник MIDI
+- `midiEvents` — принято MIDI-событий
+- `midiDropped` — события, не влезшие в очередь блока
+- `midiLate` — события вне текущего блока
+- `automationLanes` — линий автоматизации в живом пути
 - `position` — позиция: `frames`, `bar`, `beat`, `tick`
 - `state` — состояние транспорта
 - `exitReason` — `seconds`|`signal`|`transport-stopped`
@@ -691,6 +752,7 @@ euterpia node <list|types|add|rm|show> [аргументы] [--file проект
 | `--type` | id типа | — | только ноды этого типа (`node list`) |
 | `--limit` | число | — | сколько нод показать (`node list`) |
 | `--offset` | число | — | сколько нод пропустить (`node list`) |
+| `--path` | файл.clap | — | файл .clap для `node add plugin:<id>` |
 
 Пример:
 
@@ -739,6 +801,7 @@ euterpia connect <источник> <приёмник> [--file проект.epro
 | `--type` | id типа | — | только ноды этого типа (`node list`) |
 | `--limit` | число | — | сколько нод показать (`node list`) |
 | `--offset` | число | — | сколько нод пропустить (`node list`) |
+| `--path` | файл.clap | — | файл .clap для `node add plugin:<id>` |
 
 Пример:
 
@@ -782,6 +845,7 @@ euterpia disconnect <источник>[:порт] <приёмник>[:порт] 
 | `--type` | id типа | — | только ноды этого типа (`node list`) |
 | `--limit` | число | — | сколько нод показать (`node list`) |
 | `--offset` | число | — | сколько нод пропустить (`node list`) |
+| `--path` | файл.clap | — | файл .clap для `node add plugin:<id>` |
 
 Пример:
 
@@ -826,6 +890,7 @@ euterpia param <list|get|set> [аргументы] [--file проект.eproj]
 | `--type` | id типа | — | только ноды этого типа (`node list`) |
 | `--limit` | число | — | сколько нод показать (`node list`) |
 | `--offset` | число | — | сколько нод пропустить (`node list`) |
+| `--path` | файл.clap | — | файл .clap для `node add plugin:<id>` |
 
 Пример:
 
@@ -869,6 +934,7 @@ euterpia graph check [--file проект.eproj]
 | `--type` | id типа | — | только ноды этого типа (`node list`) |
 | `--limit` | число | — | сколько нод показать (`node list`) |
 | `--offset` | число | — | сколько нод пропустить (`node list`) |
+| `--path` | файл.clap | — | файл .clap для `node add plugin:<id>` |
 
 Пример:
 
@@ -1101,7 +1167,9 @@ euterpia master [проект.eproj | вход.wav] [ключи]
 | Ключ | Значение | Умолчание | Смысл |
 |---|---|---|---|
 | `--file` | путь | — | вход, если он не задан позиционно |
-| `--out` | файл.wav | — | файл мастера |
+| `--out` | файл.wav | — | файл мастера; расширение должно совпадать с --format |
+| `--format` | wav|flac|ogg|mp3 | wav | формат сдачи: wav|flac (lossless) или ogg|mp3 (превью) |
+| `--preview-bitrate` | кбит/с | 192 | битрейт lossy-превью, кбит/с |
 | `--dir` | каталог | — | каталог сдачи (мастер + стемы + манифест) |
 | `--target` | LUFS | -14.0 | целевая громкость, LUFS |
 | `--ceiling` | dBTP | -1.0 | потолок true peak, dBTP |
@@ -1126,7 +1194,11 @@ euterpia master demo.eproj --target -14 --stems --dir delivery
 
 - `input` — вход: проект или WAV
 - `out` — файл мастера
-- `format` — формат вывода: `wav`
+- `format` — формат вывода: wav|flac|ogg|mp3
+- `codec` — кодек результата: pcm|flac|vorbis|mp3
+- `lossless` — lossless-сдача (wav/flac) или превью
+- `role` — `master` (сдача) или `preview`
+- `bitrate` — битрейт превью, кбит/с (0 у lossless)
 - `bitsPerSample` — глубина итогового файла
 - `sampleRate` — частота
 - `dither` — включён ли TPDF-dither
@@ -1150,7 +1222,8 @@ euterpia master demo.eproj --target -14 --stems --dir delivery
 - dither — TPDF, детерминированный: повторная сдача даёт те же байты
 - стемы рендерятся по дорожкам проекта (render --solo-track) и суммируются в мастер
 - манифест содержит SHA-1 каждого файла: это контроль целостности пакета, не подпись
-- FLAC-энкодера в ядре нет; формат отвергается с указанием причины (#10)
+- FLAC пишется встроенным lossless-энкодером (#411); OGG/MP3 — превью через ffmpeg/lame/oggenc
+- для lossy-превью dither не применяется: шум квантования не имеет смысла перед сжатием
 
 ### `notation` — текстовая нотация: проверка файла и импорт в проект
 

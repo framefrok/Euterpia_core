@@ -335,8 +335,8 @@ CLI — полноценный интерфейс управления (MANIFEST
 - [ ] #91 offline-рендер в WAV: `render` (детерминизм + CI-проверка)
 - [ ] #92 живое воспроизведение: `device list`, `play` через
       `backend_manager` (метрики, SIGINT)
-- [ ] #94 `record` (запись входа), #93 `midi` (list/monitor), #95 `plugin`
-      (scan/info + состояние плагина в проект)
+- [x] #94 `record` (запись входа), #93 `midi` (list/monitor), #95 `plugin`
+      (scan/info/params/save + хостинг `plugin:<id>` в графе) — ✅ сделано
 - [ ] #107 импорт аудио; #108 экспорт стемов и батч-рендер; #209 экспорт и
       сдача (LUFS/true peak, dither, метаданные)
 - [ ] #111 MIDI-файлы (импорт/экспорт SMF); #114 автоматизация; #112 метроном;
@@ -372,7 +372,8 @@ CLI — полноценный интерфейс управления (MANIFEST
 - [x] #258 `config` (умолчания окружения) — ✅ сделано: `config
       list/get/set/unset/path`, приоритет argv > env (`EUTERPIA_*`) > файл >
       умолчание, источник значения в выводе, битый конфиг — предупреждение;
-      остаётся #260 `plugin validate`
+      #260 `plugin validate` — ✅ сделано: `plugin validate` оборачивает
+      официальный `clap-validator` (#260)
 - [ ] #87 sequencer player (Nodes) — зависимость: клипы проекта пока не
       попадают в граф
 
@@ -391,9 +392,14 @@ CLI — полноценный интерфейс управления (MANIFEST
 
 **Зависимости и экосистема**
 
-- [ ] #8 ресемплинг при несовпадении SR; #10 реальные кодеки (FLAC/OGG/MP3/AIFF)
-- [ ] #38 libremidi как MIDI-бэкенд (MIDI 1.0 + 2.0/UMP); #39 LV2 (Lilv) за
-      `plugin_api` (VST3, #40, отклонён — MANIFEST §104)
+- [x] #8 ресемплинг при несовпадении SR; #10 реальные кодеки (FLAC/OGG/MP3/AIFF)
+      — ✅ сделано: `core/src_api` + мост «устройство ↔ проект» (#8),
+      FLAC-энкодер и lossy-превью сдачи (#411); #10 остаётся открытым
+      только как «чтение MP3/OGG/AIFF» — оно уже есть (`audio_file_io`)
+- [x] #38 libremidi как MIDI-бэкенд (MIDI 1.0 + 2.0/UMP); #39 LV2 (Lilv) за
+      `plugin_api` (VST3, #40, отклонён — MANIFEST §104) — ✅ сделано: UMP в
+      Core, адаптеры `adapters/libremidi` и `adapters/lilv` с ленивой
+      загрузкой и честным отказом без библиотеки
 - [x] #52 miniaudio: сборка и smoke на Windows/macOS — ✅ сделано: CI-джоб
       `miniaudio` — матрица Linux/macOS/Windows (сборка, линковка, smoke)
 - [ ] #5 убрать остаточную зависимость Commons → Core; #50 расширить
@@ -401,7 +407,8 @@ CLI — полноценный интерфейс управления (MANIFEST
 - [x] #113 релиз 0.3: версия пакета, CHANGELOG, артефакты CLI, установка —
       ✅ сделано: `CHANGELOG.md`, версия `0.3.1` == `--version`, раздел
       «Установка», CI-джоб `artifacts` (Linux/macOS/Windows + smoke);
-      [ ] #229 поставка (инсталлятор, ассоциации файлов, чистая машина)
+      [x] #229 поставка: архивы Linux/Windows/macOS, ассоциации `*.eproj`,
+      проверка на чистой машине (`docs/delivery.md`, джоб `package`)
 
 ### Линия v0.4 — Фундамент и скелет GUI
 
@@ -744,13 +751,41 @@ Support/euterpia/config.json`, Windows: `%APPDATA%\euterpia\config.json`);
 
 ## Установка
 
-Готовых установщиков пока нет — установка из исходников (для пользователя
-и для разработки одинаково). Требования:
+Есть два пути: готовый архив (пользователю) и из исходников (разработке).
+
+### Готовый архив (Linux, Windows, macOS)
+
+Архивы собираются workflow `Release` по тегу `v*` и лежат в GitHub Releases.
+Внутри — бинарь, документация, файлы ассоциации проектов (`*.eproj`, `*.eut`)
+и установщик без пакетного менеджера:
+
+```bash
+# Linux/macOS: распаковать архив, затем
+./install.sh                  # в ~/.local (системно: PREFIX=/usr/local sudo -E ./install.sh)
+euterpia --version
+```
+
+```powershell
+# Windows: распаковать zip, затем (без админских прав)
+powershell -ExecutionPolicy Bypass -File install.ps1
+euterpia --version
+```
+
+`install.sh` регистрирует MIME-тип `application/x-euterpia-project` и
+`.desktop`-файл (freedesktop); `install.ps1` пишет ассоциации в `HKCU`,
+поэтому права администратора не нужны. Удаление — `uninstall.sh` /
+`uninstall.ps1`. Подробности, состав пакета и проверка на чистой машине —
+**[docs/delivery.md](docs/delivery.md)**.
+
+### Из исходников
+
+Для пользователя и разработки одинаково. Требования:
 
 - **Nim >= 2.0.0** (проверено на 2.2.12) и C-компилятор (gcc/clang/msvc);
 - внешние библиотеки **опциональны**: `libportaudio` (аудио),
-  `librtmidi` (MIDI), CLAP-плагины — подхватываются в рантайме через
-  `dynlib`; miniaudio вендорен и внешних зависимостей не требует.
+  `librtmidi` (MIDI), `liblilv` (LV2), фасад libremidi — подхватываются в
+  рантайме через `dynlib`; miniaudio и FLAC-энкодер вендорены и внешних
+  зависимостей не требуют.
 
 ```bash
 # из каталога репозитория — ставит пакет и бинарь euterpia в PATH
@@ -764,10 +799,9 @@ euterpia --help             # поверхность команд
 
 - Поверхность команд и JSON-схемы — **[docs/cli.md](docs/cli.md)**.
 - Действия интерфейса и их паритет с CLI — **[docs/clients.md](docs/clients.md)**.
+- Поставка, ассоциации и чистая машина — **[docs/delivery.md](docs/delivery.md)**.
 - История версий — **[CHANGELOG.md](CHANGELOG.md)**.
 - Сборка без установки: `nimble cli` → `build/euterpia`.
-- Проверка на чистой машине (инсталляторы, ассоциации файлов) и сборки под
-  три ОС — в работе: [#229](https://github.com/framefrok/Euterpia_core/issues/229).
 
 ## Сборка и тесты
 
