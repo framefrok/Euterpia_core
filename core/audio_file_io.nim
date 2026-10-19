@@ -281,11 +281,22 @@ proc seekAudioFile*(decoder: var AudioDecoder; frame: int64) =
   ## Устанавливает позицию чтения в КАДРАХ (issue #356). Раньше фасад не давал
   ## seek, и вызывающие (`waveform_cache`) читали весь файл целиком, комментируя
   ## отсутствие API. Теперь seek — часть фасада.
+  ##
+  ## Сжатые/чужие форматы декодированы в `packed` целиком, поэтому позиция —
+  ## это индекс в `packed` (аудит, P2): раньше ветка `else: discard` молча
+  ## оставляла чтение на старом месте.
   case decoder.format
   of afWav:
     seek(decoder.wavReader, frame)
-  else:
-    discard
+  of afFlac, afMp3, afOgg, afAiff:
+    let ch = int(decoder.packedInfo.channels)
+    let totalFrames = if ch > 0: decoder.packed.len div ch else: 0
+    var target = frame
+    if target < 0:
+      target = 0
+    elif target > int64(totalFrames):
+      target = int64(totalFrames)
+    decoder.packedPos = int(target)
 
 proc readAllAudioFile*(path: string): tuple[samples: seq[float32], info: AudioFileInfo] =
   ## Прочитать файл целиком в interleaved float32 (issue #356). Раньше это

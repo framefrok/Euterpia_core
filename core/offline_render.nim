@@ -134,12 +134,12 @@ proc defaultRenderOptions*(sampleRate: int32 = 48000; blockSize: int32 = 512;
 proc automationValueAt*(lane: OfflineAutomationLane; tick: float64): float32 =
   ## Значение дорожки на тике. Вне диапазона точек — крайние значения
   ## (параметр держится, а не «прыгает в ноль»), между точками — по кривой:
-  ## ступенькой, линейно или сглаженно.
+  ## ступенькой, линейно, косинусно (`acSmooth`) или Эрмитом (`acBezier`).
   ##
-  ## `acBezier` считается сглаженно: кривые Безье из редактора задают форму
-  ## между точками, но на рендере разница со сглаживанием — на уровне
-  ## слышимости только у длинных переходов, а лишняя математика в этом
-  ## цикле не нужна.
+  ## Кривая и поиск сегмента — ОБЩИЕ с воспроизведением (аудит, P2):
+  ## `sequencer.interpolateAutomation` + бинарный поиск. Раньше здесь жила
+  ## своя формула (Эрмит для `acSmooth`) и линейный перебор, поэтому рендер
+  ## в файл математически расходился с тем, что слышно в реальном времени.
   if lane.points.len == 0:
     return 0.0f
   if tick <= float64(lane.points[0].tick):
@@ -148,25 +148,22 @@ proc automationValueAt*(lane: OfflineAutomationLane; tick: float64): float32 =
   if tick >= float64(lane.points[last].tick):
     return lane.points[last].value
 
-  var i = 0
-  while i < last:
-    let a = lane.points[i]
-    let b = lane.points[i + 1]
-    if tick >= float64(a.tick) and tick < float64(b.tick):
-      let span = float64(b.tick - a.tick)
-      if span <= 0.0:
-        return b.value
-      let t = (tick - float64(a.tick)) / span
-      case a.curve
-      of acStep:
-        return a.value
-      of acLinear:
-        return float32(float64(a.value) + (float64(b.value) - float64(a.value)) * t)
-      of acSmooth, acBezier:
-        let s = t * t * (3.0 - 2.0 * t)
-        return float32(float64(a.value) + (float64(b.value) - float64(a.value)) * s)
-    inc i
-  lane.points[last].value
+  var lo = 0
+  var hi = last
+  while hi - lo > 1:
+    let mid = (lo + hi) div 2
+    if float64(lane.points[mid].tick) <= tick:
+      lo = mid
+    else:
+      hi = mid
+
+  let a = lane.points[lo]
+  let b = lane.points[hi]
+  let span = float64(b.tick - a.tick)
+  if span <= 0.0:
+    return b.value
+  let t = (tick - float64(a.tick)) / span
+  interpolateAutomation(a.value, b.value, float32(t), a.curve)
 
 # ==============================================================================
 # Рендер

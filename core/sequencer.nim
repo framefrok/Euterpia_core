@@ -321,7 +321,13 @@ proc processBlock*(rt: var SequencerRuntime,
 # Automation — RT read
 # =============================================================================
 
-proc interpolate(v1, v2: float32, t: float32, curve: AutomationCurve): float32 {.inline.} =
+proc interpolateAutomation*(v1, v2: float32; t: float32;
+                            curve: AutomationCurve): float32 {.inline.} =
+  ## Значение между двумя точками автоматизации (аудит, P2).
+  ##
+  ## Экспортируется, чтобы офлайн-рендер считал ТУ ЖЕ кривую, что и
+  ## воспроизведение: раньше `offline_render` использовал Эрмита для
+  ## `acSmooth`, и файл расходился со звуком в реальном времени.
   case curve
   of acLinear:
     v1 + (v2 - v1) * t
@@ -367,7 +373,7 @@ proc getAutomationValue*(c: CompiledSequencer,
   let span = float32(p2.tick - p1.tick)
   if span <= 0.0f: return p1.value
   let frac = float32(t - p1.tick) / span
-  interpolate(p1.value, p2.value, frac, p1.curve)
+  interpolateAutomation(p1.value, p2.value, frac, p1.curve)
 
 proc fillAutomationBlock*(c: CompiledSequencer,
                           nodeId: int32, paramId: uint32,
@@ -410,6 +416,6 @@ proc fillAutomationBlock*(c: CompiledSequencer,
       output[s] = p1.value
     else:
       let frac = float32(t - p1.tick) / span
-      output[s] = interpolate(p1.value, p2.value, frac, p1.curve)
+      output[s] = interpolateAutomation(p1.value, p2.value, frac, p1.curve)
 
 {.pop.}

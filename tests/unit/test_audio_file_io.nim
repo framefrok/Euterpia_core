@@ -543,3 +543,47 @@ suite "audio_file_io: RF64":
     check got.numFrames == 64
     check samples.len == 64
 
+
+# =============================================================================
+# seek для декодированных форматов (аудит, P2)
+# =============================================================================
+
+suite "audio_file_io: seek (аудит P2)":
+  test "seekAudioFile позиционирует FLAC/MP3/OGG/AIFF, а не игнорируется":
+    for name in ["tone.flac", "tone.mp3", "tone.ogg", "tone.aiff"]:
+      let path = "tests/fixtures" / name
+      let (all, info) = loadAudioFile(path)
+      let ch = int(info.channels)
+      check ch > 0
+      check all.len > 300 * ch
+
+      var dec = openDecoder(path)
+      var raw = newSeq[uint8](4096)
+      var head = newSeq[float32](64 * ch)
+      check dec.readFrames(cast[ptr UncheckedArray[uint8]](addr raw[0]),
+                           cast[ptr UncheckedArray[float32]](addr head[0]),
+                           64) == 64
+
+      let target = 200
+      dec.seekAudioFile(int64(target))
+      var got = newSeq[float32](32 * ch)
+      check dec.readFrames(cast[ptr UncheckedArray[uint8]](addr raw[0]),
+                           cast[ptr UncheckedArray[float32]](addr got[0]),
+                           32) == 32
+      for i in 0 ..< 32 * ch:
+        check abs(got[i] - all[target * ch + i]) < 1e-6f
+      dec.close()
+
+  test "seekAudioFile клампится к концу файла":
+    let path = "tests/fixtures" / "tone.flac"
+    let (all, info) = loadAudioFile(path)
+    let ch = int(info.channels)
+    var dec = openDecoder(path)
+    dec.seekAudioFile(int64(high(int64)))
+    var raw = newSeq[uint8](64)
+    var got = newSeq[float32](16 * ch)
+    check dec.readFrames(cast[ptr UncheckedArray[uint8]](addr raw[0]),
+                         cast[ptr UncheckedArray[float32]](addr got[0]),
+                         16) == 0
+    dec.close()
+

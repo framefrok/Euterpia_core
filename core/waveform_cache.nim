@@ -70,16 +70,26 @@ proc evictLru(cache: WaveformCache) =
     if lruKey != "":
       cache.entries.del(lruKey)
 
-proc generateWaveformData(filepath: string, numPoints: int32): WaveformData =
+proc generateWaveformData(filepath: string; numPoints: int32;
+                          data: var WaveformData): bool =
+  ## true — данные построены (в том числе для честно пустого файла);
+  ## false — файл не читается или аргумент некорректен.
+  ##
+  ## Ошибка НЕ глотается внутри: раньше `except CatchableError: discard`
+  ## съедал I/O-исключение, `workerLoop` видел успех и ставил `wsReady`
+  ## с пустыми массивами — `wsFailed` был недостижим (аудит, P2).
+  if numPoints <= 0:
+    return false
+
   try:
     # Читаем файл целиком через фасад (issue #356). Для построения пиков на
-    # весь файл удобнее `loadAudioFile`; для частичного чтения у фасада теперь
-    # есть `seekAudioFile`.
+    # весь файл удобнее `loadAudioFile`; для частичного чтения у фасада есть
+    # `seekAudioFile`.
     let (samples, info) = loadAudioFile(filepath)
     let totalFrames = info.numFrames
     let channels = int32(info.channels)
     
-    result = WaveformData(
+    data = WaveformData(
       minValues: newSeq[float32](int(numPoints)),
       maxValues: newSeq[float32](int(numPoints)),
       rmsValues: newSeq[float32](int(numPoints)),
@@ -89,8 +99,8 @@ proc generateWaveformData(filepath: string, numPoints: int32): WaveformData =
       totalFrames: totalFrames
     )
     
-    if totalFrames == 0 or samples.len == 0:
-      return
+    if totalFrames == 0 or samples.len == 0 or channels <= 0:
+      return true
       
     let framesPerPoint = totalFrames div int64(numPoints)
     
@@ -105,10 +115,10 @@ proc generateWaveformData(filepath: string, numPoints: int32): WaveformData =
           if sample < minVal: minVal = sample
           if sample > maxVal: maxVal = sample
           rmsSum += sample * sample
-        result.minValues[p] = minVal
-        result.maxValues[p] = maxVal
-        result.rmsValues[p] = sqrt(rmsSum / float32(channels))
-      return
+        data.minValues[p] = minVal
+        data.maxValues[p] = maxVal
+        data.rmsValues[p] = sqrt(rmsSum / float32(channels))
+      return true
       
     for p in 0 ..< numPoints:
       let startFrame = int64(p) * framesPerPoint
@@ -127,13 +137,14 @@ proc generateWaveformData(filepath: string, numPoints: int32): WaveformData =
         if sample > maxVal: maxVal = sample
         rmsSum += sample * sample
       
-      result.minValues[p] = minVal
-      result.maxValues[p] = maxVal
-      result.rmsValues[p] = sqrt(rmsSum / float32(framesToRead * channels))
-      
+      data.minValues[p] = minVal
+      data.maxValues[p] = maxVal
+      data.rmsValues[p] = sqrt(rmsSum / float32(framesToRead * channels))
+    return true
+
   except CatchableError:
-    # Возвращаем пустую структуру при ошибках I/O
-    discard
+    data = WaveformData()
+    return false
 
 # --- Background Worker ---
 
@@ -156,13 +167,9 @@ proc workerLoop(cache: WaveformCache) {.thread.} =
     release(cache.lock)
     
     if entry != nil:
-      # Тяжелая генерация происходит ЗДЕСЬ, не блокируя UI
+      # Тяжелая генерация происходит ЗДЕСЬ, не блокируя UI.
       var data: WaveformData
-      var success = true
-      try:
-        data = generateWaveformData(entry.path, entry.numPoints)
-      except CatchableError:
-        success = false
+      let success = generateWaveformData(entry.path, entry.numPoints, data)
         
       acquire(cache.lock)
       if success:
@@ -210,7 +217,10 @@ proc getWaveform*(cache: WaveformCache, filepath: string, numPoints: int32 = 102
     return nil # Файл не найден
     
   let mtime = toUnix(info.lastWriteTime)
-  let key = makeKey(filepath, int64(info.size), mtime, numPoints)
+  # Ноль/отрицательное число точек — не «сколько получится», а неизбежное
+  # деление на ноль в генераторе. Один пик — минимальный осмысленный запрос.
+  let points = max(1'i32, numPoints)
+  let key = makeKey(filepath, int64(info.size), mtime, points)
   
   acquire(cache.lock)
   if key in cache.entries:
@@ -226,7 +236,7 @@ proc getWaveform*(cache: WaveformCache, filepath: string, numPoints: int32 = 102
     path: filepath,
     fileSize: int64(info.size),
     mtime: mtime,
-    numPoints: numPoints,
+    numPoints: points,
     refCount: 1,
     state: wsPending,
     lastAccessed: cache.accessCounter
@@ -259,6 +269,19 @@ proc waveformReady*(cache: WaveformCache, entry: WaveformCacheEntry): bool =
     return
   acquire(cache.lock)
   result = entry.state == wsReady
+  release(cache.lock)
+
+proc waveformFailed*(cache: WaveformCache; entry: WaveformCacheEntry): bool =
+  ## Провалилась ли генерация. Читает `state` под локом, как `waveformReady`.
+  ##
+  ## Нужен, чтобы отличить «ещё считаем» от «файл битый/удалён»: до фикса
+  ## (аудит, P2) ошибка I/O съедалась внутренним `except`, и запись навсегда
+  ## оставалась `wsReady` с пустыми массивами.
+  result = false
+  if cache.isNil or entry.isNil:
+    return
+  acquire(cache.lock)
+  result = entry.state == wsFailed
   release(cache.lock)
 
 proc waveformSnapshot*(cache: WaveformCache; entry: WaveformCacheEntry;

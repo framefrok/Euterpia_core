@@ -32,6 +32,28 @@
       QueryPerformanceCounter(&counter);
       return (double)counter.QuadPart / (double)freq.QuadPart;
   }
+
+  /* MSVC: C11-атомики есть не везде, поэтому Interlocked-семейство. */
+  static long long eut_ma_atomic_load64(volatile long long* p)
+  {
+      return (long long)InterlockedCompareExchange64((volatile LONG64*)p, 0, 0);
+  }
+  static void eut_ma_atomic_add64(volatile long long* p, long long v)
+  {
+      (void)InterlockedExchangeAdd64((volatile LONG64*)p, v);
+  }
+  static void eut_ma_atomic_store64(volatile long long* p, long long v)
+  {
+      (void)InterlockedExchange64((volatile LONG64*)p, v);
+  }
+  static int eut_ma_atomic_load32(volatile int* p)
+  {
+      return (int)InterlockedCompareExchange((volatile LONG*)p, 0, 0);
+  }
+  static void eut_ma_atomic_store32(volatile int* p, int v)
+  {
+      (void)InterlockedExchange((volatile LONG*)p, (LONG)v);
+  }
 #else
   #include <time.h>
   static double eut_ma_now_seconds(void)
@@ -41,6 +63,28 @@
           return 0.0;
       }
       return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+  }
+
+  /* GCC/Clang: __atomic_* — без <stdatomic.h>, чтобы не менять стандарт TU. */
+  static long long eut_ma_atomic_load64(volatile long long* p)
+  {
+      return __atomic_load_n(p, __ATOMIC_RELAXED);
+  }
+  static void eut_ma_atomic_add64(volatile long long* p, long long v)
+  {
+      (void)__atomic_add_fetch(p, v, __ATOMIC_RELAXED);
+  }
+  static void eut_ma_atomic_store64(volatile long long* p, long long v)
+  {
+      __atomic_store_n(p, v, __ATOMIC_RELAXED);
+  }
+  static int eut_ma_atomic_load32(volatile int* p)
+  {
+      return __atomic_load_n(p, __ATOMIC_RELAXED);
+  }
+  static void eut_ma_atomic_store32(volatile int* p, int v)
+  {
+      __atomic_store_n(p, v, __ATOMIC_RELAXED);
   }
 #endif
 
@@ -61,13 +105,11 @@ struct eut_ma_dev {
     int                latencyFrames;
     double             sampleRate;
 
-    /* Диагностика: пишется из audio-потока, читается с control-path.
-     *
-     * У miniaudio 0.11.25 нет публичного API статуса драйвера
-     * (underflow/overflow) и счётчика xrun: backend восстанавливается
-     * после xrun сам. Поэтому xrun здесь — это (а) вызов render, не
-     * уложившийся в длительность блока, и (б) notification
-     * interruption_began. Счётчик монотонный, один писатель. */
+    /* Диагностика: пишется из audio-потока и notification-колбэка,
+     * читается с control-path. `volatile` здесь НЕ даёт атомарности —
+     * доступ идёт только через eut_ma_atomic_* (аудит, P2): иначе TSan
+     * видел гонку, а на 32-битных целях 64-битное чтение могло быть
+     * «рваным». */
     volatile long long xruns;
     volatile int       lastFlag;
 };
@@ -98,10 +140,10 @@ static void eut_ma_data_callback(ma_device* pDevice, void* pOutput,
         const double elapsed = eut_ma_now_seconds() - t0;
         const double budget  = (double)frameCount / d->sampleRate;
         if (elapsed > budget) {
-            d->xruns += 1;
-            d->lastFlag = (d->outputChannels > 0)
+            eut_ma_atomic_add64(&d->xruns, 1);
+            eut_ma_atomic_store32(&d->lastFlag, (d->outputChannels > 0)
                         ? EUT_MA_FLAG_OUTPUT_UNDERFLOW
-                        : EUT_MA_FLAG_INPUT_OVERFLOW;
+                        : EUT_MA_FLAG_INPUT_OVERFLOW);
         }
     }
 }
@@ -120,8 +162,8 @@ static void eut_ma_notification_callback(const ma_device_notification* pNotifica
     }
 
     if (pNotification->type == ma_device_notification_type_interruption_began) {
-        d->xruns += 1;
-        d->lastFlag = EUT_MA_FLAG_OUTPUT_UNDERFLOW;
+        eut_ma_atomic_add64(&d->xruns, 1);
+        eut_ma_atomic_store32(&d->lastFlag, EUT_MA_FLAG_OUTPUT_UNDERFLOW);
     }
 }
 
@@ -304,8 +346,8 @@ eut_ma_dev* eut_ma_device_open(eut_ma_ctx* c,
     d->outputChannels = outputChannels;
     d->sampleRate     = sampleRate;
     d->latencyFrames  = blockSize;
-    d->xruns          = 0;
-    d->lastFlag       = EUT_MA_FLAG_NONE;
+    eut_ma_atomic_store32(&d->lastFlag, EUT_MA_FLAG_NONE);
+    eut_ma_atomic_store64(&d->xruns, 0);
 
     cfg = ma_device_config_init(type);
     cfg.sampleRate = (ma_uint32)sampleRate;
@@ -383,7 +425,7 @@ unsigned long long eut_ma_device_xruns(eut_ma_dev* d)
     if (d == NULL) {
         return 0ULL;
     }
-    return (unsigned long long)d->xruns;
+    return (unsigned long long)eut_ma_atomic_load64(&d->xruns);
 }
 
 int eut_ma_device_last_flag(eut_ma_dev* d)
@@ -391,7 +433,7 @@ int eut_ma_device_last_flag(eut_ma_dev* d)
     if (d == NULL) {
         return EUT_MA_FLAG_NONE;
     }
-    return d->lastFlag;
+    return eut_ma_atomic_load32(&d->lastFlag);
 }
 
 int eut_ma_device_latency_frames(eut_ma_dev* d)
