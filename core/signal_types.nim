@@ -7,6 +7,19 @@ const
   MaxBlockSize* = 4096
   MaxBlockEvents* = 128
 
+  MaxAudioChannels* = 2
+    ## Модель каналов EUTERPIA Core v0.x — **стерео** (issue #401).
+    ##
+    ## Это ЕДИНСТВЕННЫЙ источник правды о ширине сигнала в ядре: арена
+    ## графа, PDC-кольцо, мастер-выход и офлайн-рендер обязаны использовать
+    ## именно это значение. `NodeDesc.maxChannels` — обещание ноды, а не
+    ## разрешение рантайма: нода с `maxChannels > MaxAudioChannels` не
+    ## компилируется в пайплайн (см. `nodes/sdk/pipeline_builder`).
+    ##
+    ## Многоканальность (surround/Ambisonics) — отдельная линия (#200):
+    ## пока она не реализована, честнее отказать, чем молча свести всё к
+    ## двум каналам.
+
 type
   SignalType* = enum
     sigAudio
@@ -79,21 +92,51 @@ type
 proc clearEvents*(q: ptr EventQueue) {.cdecl, inline.} =
   q.count = 0
 
-proc pushEvent*(q: ptr EventQueue, ev: RealtimeEvent): bool {.cdecl, inline.} =
-  if q.count < MaxBlockEvents:
-    q.events[q.count] = ev
-    inc q.count
-    return true
-  return false
+proc comesAfter*(a, b: RealtimeEvent): bool {.inline.} =
+  ## Строгий порядок событий: сначала `frameOffset`, затем `subFrame`.
+  ## Равенство обоих — «не позже»: при равном времени сохраняется порядок
+  ## вставки (устойчивость), иначе два note-on на одном кадре могли бы
+  ## поменяться местами между запусками.
+  a.frameOffset > b.frameOffset or
+    (a.frameOffset == b.frameOffset and a.subFrame > b.subFrame)
+
+proc pushEvent*(q: ptr EventQueue, ev: RealtimeEvent): bool {.cdecl.} =
+  ## Добавить событие, СОХРАНЯЯ инвариант «очередь отсортирована».
+  ##
+  ## Раньше `pushEvent` просто дописывал в конец, а `sortEvents` был
+  ## отдельной обязанностью потребителя (issue #397). Забытый вызов давал
+  ## тихую неверную обработку: `findEventAtFrame` и инструменты считают
+  ## порядок гарантированным. Теперь порядок — свойство очереди, а не
+  ## соглашение: вставка идёт по месту, а `sortEvents` остаётся
+  ## идемпотентным (для батчей, собранных вручную).
+  ##
+  ## Стоимость на типичном пути (события уже по возрастанию) — одно
+  ## сравнение: цикл сдвига не выполняется. Вставка в середину двигает
+  ## максимум `MaxBlockEvents` POD-элементов; аллокаций нет, поэтому
+  ## функция пригодна для realtime-пути.
+  if q.count >= MaxBlockEvents:
+    return false
+
+  var i = int(q.count)
+  while i > 0 and comesAfter(q.events[i - 1], ev):
+    q.events[i] = q.events[i - 1]
+    dec i
+
+  q.events[i] = ev
+  inc q.count
+  true
 
 proc sortEvents*(q: ptr EventQueue) {.cdecl.} =
+  ## Привести очередь к отсортированному виду. После перехода `pushEvent`
+  ## на вставку по месту это no-op для очередей, собранных через него;
+  ## функция сохранена для совместимости и для кода, который пишет
+  ## `q.events` напрямую (такого в проекте быть не должно).
   for i in 1 ..< q.count:
     var j = i
     while j > 0:
       let a = q.events[j-1]
       let b = q.events[j]
-      if a.frameOffset > b.frameOffset or 
-         (a.frameOffset == b.frameOffset and a.subFrame > b.subFrame):
+      if comesAfter(a, b):
         q.events[j-1] = b
         q.events[j] = a
         dec j
@@ -109,6 +152,17 @@ proc clipEvents*(q: ptr EventQueue, maxFrames: uint32) {.cdecl.} =
       inc writeIdx
   q.count = writeIdx.int32
 
+proc finalizeEvents*(q: ptr EventQueue, maxFrames: uint32): int32 {.cdecl.} =
+  ## Единственная точка «сделать очередь готовой к потреблению» (issue #397).
+  ##
+  ## Отбрасывает события за пределами блока и возвращает число событий.
+  ## Порядок после неё гарантирован: его поддерживает `pushEvent`, а
+  ## `sortEvents` оставлен как страховка для очередей, заполненных вручную.
+  ## Потребителю больше не нужно помнить про сортировку — достаточно
+  ## вызвать `finalizeEvents` (или просто читать очередь: она уже упорядочена).
+  clipEvents(q, maxFrames)
+  q.count
+
 proc findEventAtFrame*(q: ptr EventQueue, frame: uint32): int32 {.cdecl.} =
   ## Индекс первого события, чей `frameOffset` НЕ РАНЬШЕ `frame`.
   ##
@@ -118,7 +172,9 @@ proc findEventAtFrame*(q: ptr EventQueue, frame: uint32): int32 {.cdecl.} =
   ##
   ## Это позиция вставки по времени, а не «ошибка»: -1 здесь равнозначен
   ## «все события уже в прошлом относительно кадра». Порядок событий
-  ## подразумевается отсортированным (`sortEvents`).
+  ## ГАРАНТИРОВАН очередью (issue #397): `pushEvent` вставляет по месту, а
+  ## `finalizeEvents`/`sortEvents` лишь подтверждают инвариант. Потребитель
+  ## не обязан помнить про сортировку.
   for i in 0 ..< q.count:
     if q.events[i].frameOffset >= frame:
       return i.int32

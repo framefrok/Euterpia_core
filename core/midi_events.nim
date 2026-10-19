@@ -127,9 +127,9 @@ proc pollMidiEvents*(
 ): int32 =
   ## Realtime-path: слить порт и разложить сообщения по очереди событий.
   ##
-  ## НЕ очищает и НЕ сортирует `output`: этим владеет вызывающий (см.
-  ## прежний `pollMidiEvents`, который сам делал clearEvents/sortEvents
-  ## по всем портам сразу).
+  ## НЕ очищает `output`: границу блока задаёт вызывающий (обычно
+  ## `clearEvents` до всех портов и `finalizeEvents` после). Сортировать
+  ## очередь не нужно: `pushEvent` держит инвариант порядка сам (issue #397).
   if output.isNil:
     return 0
 
