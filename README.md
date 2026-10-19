@@ -1,7 +1,8 @@
 # EUTERPIA — ядро DAW
 
 Ядро модульного DAW: realtime audio engine, компилятор графа, планировщик
-DSP-воркеров, transport, node SDK, встроенные DSP-ноды и хост плагинов CLAP.
+DSP-воркеров, transport, node SDK, встроенные DSP-ноды и хост плагинов
+(CLAP, EUT; LV2 — опционально через Lilv).
 
 Архитектурные правила (границы слоёв, запреты realtime-пути, принципы
 заменяемости) описаны в **[MANIFEST.md](MANIFEST.md)** — это основной
@@ -17,13 +18,14 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | Ядро: runtime, граф, планировщик, память, IPC | ✅ `nimble test` (unit + integration) |
 | Realtime-дисциплина | ✅ TSan-джоб (блокирует merge), UBSan/ASan-джобы, аудит `gcsafe` (#16) |
 | Аудио-бэкенды | ✅ PortAudio (`dynlib`) **и** miniaudio 0.11.25 (вендорен, #31) |
-| MIDI | ✅ `midi_api` + RtMidi-адаптер, SMF-кодек в Commons |
+| MIDI | ✅ `midi_api` + RtMidi-адаптер, UMP/MIDI 2.0 в Core (`core/ump`), libremidi-адаптер (C-фасад, ленивая загрузка), SMF-кодек в Commons |
 | Входной тракт и запись | ✅ вход → ноды/рекордер, RT-кольцо → worker → WAV |
-| Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
+| Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте), EUT (#6, #53), LV2 через Lilv (#39); CLI: `plugin scan/info/params/save/validate`, `node add plugin:<id> --path` (#95, #260) |
 | DSP-ноды | ✅ 11 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise, metronome) + **17 инструментов** (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`, `strings`, `bell`, `harp`, `harpsichord`, `recorder`, `brass`, `timpani`, `choir`, `ukulele`, `accordion`, `harmonica`) + нотный секвенсор `notes`, плеер секвенсора `sequencer` и плеер аудиоклипов `clip`; всего 31 тип, полный каталог с параметрами — [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md); C-ядра с SIMD-дисплеями (#274, #301, #303, #321) |
-| Кодеки | ✅ WAV 16/24/32-бит, FLAC, MP3, OGG Vorbis (чтение), AIFF/AIFC (чтение и запись), Standard MIDI File (#10) |
-| Тесты | ✅ 300+ unit-проверок + интеграционный набор; Core/Commons/инструменты покрыты (#57, #274, #290) |
-| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate|recover` (#89, #110), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись входа `record` (#94), MIDI-порты/монитор (#93), импорт SMF (#111), метроном и count-in (#112), автоматизация `automation` (#114), восстановление `project recover` (#110), стемы и батч `render --stems|--batch` (#108); плагины — впереди; справочник команд и JSON-схем — **[docs/cli.md](docs/cli.md)** |
+| Кодеки | ✅ WAV 16/24/32-бит (чтение и запись), FLAC (чтение и запись встроенным lossless-энкодером), MP3/OGG Vorbis (чтение; lossy-превью сдачи — CLI через ffmpeg/lame/oggenc), AIFF/AIFC (чтение и запись), Standard MIDI File (#10, #411) |
+| Тесты | ✅ 700+ unit-проверок (180+ suite) + интеграционный набор + 170+ CLI smoke; Core/Commons/инструменты покрыты (#57, #274, #290) |
+| CLI | 🟡 линия v0.3 (#86): шаг v0.3.5 закрыт; впереди v0.3.6–v0.3.11; каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate|recover` (#89, #110), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись входа `record` (#94), MIDI-порты/монитор (#93), импорт SMF (#111), метроном и count-in (#112), автоматизация `automation` (#114), восстановление `project recover` (#110), стемы и батч `render --stems|--batch` (#108), плагины `plugin scan/info/params/save/validate` и `node add plugin:<id>` (#95, #260), живой MIDI-вход `play --midi-in/--midi-target` (#413), ресемплинг `--device-rate/--src` (#8), сдача `master --format wav|flac|ogg|mp3` (#411); справочник команд и JSON-схемы — **[docs/cli.md](docs/cli.md)** |
+| Поставка | ✅ архивы Linux/Windows/macOS, `install.sh`/`install.ps1`, ассоциации `*.eproj`/`*.eut`, проверка на чистой `ubuntu:24.04` (#229) |
 | Инспектор аудио | 🟡 пассивный анализ WAV: клиппинг, DC, щелчки, провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость; отчёт с локализацией (#290); позже — помощник в v0.7 (#178) |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
 | Надёжность и диагностика | 🟡 план линии v0.5 — библиотека тестов ядра (golden, Node Contract Suite, fault injection, санитайзеры) и «отказ вместо краха»: модель ошибок, чёрный ящик, crash guard, containment нод и плагинов, изоляция скана (#115) |
@@ -55,8 +57,13 @@ oversampling), приводит её к цели и держит потолок 
 | глубина | 16 бит (24 — сдача, 32 — промежуточный) | `--bits` |
 | dither | включён для 16 бит | `--dither` / `--no-dither` |
 
-FLAC-энкодера в ядре нет (FLAC читается, но не пишется): `master` честно
-отказывает вместо «почти lossless». Подробности — `euterpia help master` и
+FLAC пишется **встроенным lossless-энкодером** (`core/flac_codec`: VERBATIM-
+кадры, CRC-8/CRC-16, точный `total_samples`): round-trip ≤ 1 LSB, файл
+принимает `flac -t`. Формат выбирается `--format wav|flac|ogg|mp3`:
+WAV/FLAC — сдача (`lossless: true`), OGG/MP3 — превью через внешний
+кодировщик (`ffmpeg`/`lame`/`oggenc`), и манифест помечает его
+`role: preview`, `lossless: false`. Dither применяется только к
+целочисленным lossless-форматам. Подробности — `euterpia help master` и
 [docs/cli.md](docs/cli.md).
 
 ## Инспектор аудио и эталонная пьеса
@@ -205,17 +212,21 @@ nodes/builtin/csrc/   — C-ядра DSP, собираются в ABI-совме
 nodes/metronome.nim, nodes/mixer_console.nim — прикладные узлы
 ```
 
-Хостинг плагинов живёт НЕ здесь: форматы (CLAP, EUT, в будущем LV2)
-подключаются за контрактом `core/plugin_api` из `adapters/` (issue #29).
+Хостинг плагинов живёт НЕ здесь: форматы (CLAP, EUT, LV2 через Lilv)
+подключаются за контрактом `core/plugin_api` из `adapters/` (issue #29);
+хост-обёртка плагина как ноды графа — в CLI (`cli/plugin_host.nim`, #95).
 
 ### `adapters/` — реализации контрактов Core
 
 ```text
 adapters/portaudio/ — реализация audio_backend_api (libportaudio, dynlib)
 adapters/miniaudio/ — реализация audio_backend_api (miniaudio, вендорен в дерево)
+adapters/resample/  — реализация src_api (polyphase-sinc, без внешних библиотек)
 adapters/rtmidi/    — реализация midi_api (librtmidi, dynlib)
+adapters/libremidi/ — реализация midi_api (libremidi через C-фасад, UMP/MIDI 2.0)
 adapters/clap/      — CLAP 1.2: ABI, хостинг за plugin_api, host extensions
 adapters/eut/       — собственный ABI EUT-плагинов за plugin_api
+adapters/lilv/      — LV2 через Lilv за plugin_api (динамическая загрузка)
 adapters/reference/ — эталонный адаптер plugin_api (в памяти, для тестов)
 ```
 
@@ -224,7 +235,9 @@ adapters/reference/ — эталонный адаптер plugin_api (в пам�
 бинарник и не тянет ни одной внешней библиотеки. Core видит только
 `AudioBackendApi` и не знает, какой из них выбран (issue #31).
 
-Внешние плагины: **только CLAP** (`.clap`) и собственный EUT. Формат VST
+Внешние плагины: **CLAP** (`.clap`), собственный EUT и **LV2** (через Lilv;
+адаптер компилируется всегда, а хостинг требует установленной `liblilv`).
+Формат VST
 (VST2/VST3) не поддерживается и не будет поддерживаться: проприетарный
 SDK-контракт Steinberg, отсутствие стабильного C ABI и аллокации внутри
 callback (причины — MANIFEST §104).
@@ -331,16 +344,16 @@ CLI — полноценный интерфейс управления (MANIFEST
       живут в offline-сессии ядра (`core/transport`), BBT считает Core;
       runtime-контракт движка `postPlay/postPause/postStop/postSeek*/postSetLoop`
       (пауза бережёт позицию, стоп возвращает в 0) покрыт unit-тестом;
-      живой Play на устройстве — за #92
-- [ ] #91 offline-рендер в WAV: `render` (детерминизм + CI-проверка)
-- [ ] #92 живое воспроизведение: `device list`, `play` через
-      `backend_manager` (метрики, SIGINT)
+      живой Play на устройстве — `play` (#92)
+- [x] #91 offline-рендер в WAV: `render` (детерминизм + CI-проверка) — ✅
+- [x] #92 живое воспроизведение: `device list`, `play` через
+      `backend_manager` (метрики, SIGINT) — ✅
 - [x] #94 `record` (запись входа), #93 `midi` (list/monitor), #95 `plugin`
       (scan/info/params/save + хостинг `plugin:<id>` в графе) — ✅ сделано
-- [ ] #107 импорт аудио; #108 экспорт стемов и батч-рендер; #209 экспорт и
-      сдача (LUFS/true peak, dither, метаданные)
-- [ ] #111 MIDI-файлы (импорт/экспорт SMF); #114 автоматизация; #112 метроном;
-      #109 undo/redo; #110 автосохранение и восстановление проекта
+- [x] #107 импорт аудио; #108 экспорт стемов и батч-рендер; #209 экспорт и
+      сдача (LUFS/true peak, dither, метаданные) — ✅
+- [x] #111 MIDI-файлы (импорт/экспорт SMF); #114 автоматизация; #112 метроном;
+      #109 undo/redo; #110 автосохранение и восстановление проекта — ✅
 - [x] #96 справочник CLI и JSON-схемы — ✅ сделано: **[docs/cli.md](docs/cli.md)**
       (команды, режимы вывода, конверт `--json`, коды возврата, сценарии)
 - [x] #330 описание команды в одном месте — ✅ сделано: спецификация
@@ -374,21 +387,21 @@ CLI — полноценный интерфейс управления (MANIFEST
       умолчание, источник значения в выводе, битый конфиг — предупреждение;
       #260 `plugin validate` — ✅ сделано: `plugin validate` оборачивает
       официальный `clap-validator` (#260)
-- [ ] #87 sequencer player (Nodes) — зависимость: клипы проекта пока не
-      попадают в граф
+- [x] #87 sequencer player (Nodes) — ✅ клипы проекта играет нода
+      `euterpia.sequencer`
 
 **Минимум ядра, который нужен CLI**
 
-- [ ] #139 Control Core: единая командная модель (§65) + транзакции (#127) и
-      undo (#109)
-- [ ] #141 Query API чтения модели; #143 стабильные handle-ID (§35/§36)
-- [ ] #148 «GUI-действие = команда»: ✅ контракт готов — перечень действий
+- [x] #139 Control Core: единая командная модель (§65) + транзакции (#127) и
+      undo (#109) — ✅
+- [x] #141 Query API чтения модели; #143 стабильные handle-ID (§35/§36) — ✅
+- [x] #148 «GUI-действие = команда»: ✅ контракт готов — перечень действий
       (`core/control/actions.nim`) и машинная сверка паритета с CLI
-      (**[docs/clients.md](docs/clients.md)**); остаются палитра, запись сессии
-      и attach (линия v0.4); #147 автосохранение
-      без блокировок (writer thread)
-- [ ] #213 встраивание ядра в сторонний движок: публичный API и сборка как
-      библиотеки
+      (**[docs/clients.md](docs/clients.md)**); #147 автосохранение без
+      блокировок (writer thread) — ✅ (v0.3.4); остаются палитра, запись сессии
+      и attach (линия v0.4)
+- [x] #213 встраивание ядра в сторонний движок: публичный API и сборка как
+      библиотеки — ✅ (`nimble embedExample`, `nimble embedLib`)
 
 **Зависимости и экосистема**
 
@@ -402,10 +415,11 @@ CLI — полноценный интерфейс управления (MANIFEST
       загрузкой и честным отказом без библиотеки
 - [x] #52 miniaudio: сборка и smoke на Windows/macOS — ✅ сделано: CI-джоб
       `miniaudio` — матрица Linux/macOS/Windows (сборка, линковка, smoke)
-- [ ] #5 убрать остаточную зависимость Commons → Core; #50 расширить
-      architecture-guards на направление зависимостей
+- [x] #5 убрать остаточную зависимость Commons → Core; #50 расширить
+      architecture-guards на направление зависимостей — ✅ (`nimble archGuard`,
+      джоб `architecture`)
 - [x] #113 релиз 0.3: версия пакета, CHANGELOG, артефакты CLI, установка —
-      ✅ сделано: `CHANGELOG.md`, версия `0.3.1` == `--version`, раздел
+      ✅ сделано: `CHANGELOG.md`, версия `0.3.5` == `--version`, раздел
       «Установка», CI-джоб `artifacts` (Linux/macOS/Windows + smoke);
       [x] #229 поставка: архивы Linux/Windows/macOS, ассоциации `*.eproj`,
       проверка на чистой машине (`docs/delivery.md`, джоб `package`)
@@ -577,7 +591,8 @@ Tracking: #152.
 - [ ] #238 боли коммерческих DAW и наш ответ (плагины, задержка, форматы, MIDI, обновления)
 - [ ] #206 синхронизация по MIDI clock / master-slave; #216 «перебивка» и слайсы
 - [ ] #265 импорт чужих проектов: MIDI/аудио, темп, размер, раскладка партий
-- [ ] #211 форматы и прокси: lossless (FLAC), превью, контроль «что попадёт в рендер»
+- [ ] #211 форматы и прокси: lossless (FLAC — сдача и превью уже есть, #411),
+      прокси для тяжёлых файлов и контроль «что попадёт в рендер»
 - [ ] #240 мастер-тракт и A/B-сравнение версий; #236 видео-дорожка и тайм-код
 - [ ] #218 матрица совместимости устройств (class-compliant MIDI, ASIO/WASAPI/CoreAudio/ALSA)
 
@@ -610,12 +625,15 @@ realtime-дисциплина и сборка. Milestone закрыт целик
   блокирует merge, UBSan/ASan собираются и проходят. Это фундамент низкой
   latency (мониторинг, live) без «магических» отладок в будущем.
 - **Примитивы готовы к масштабированию:** арены, пулы с generation-handle и
-  единое кольцо — на них уже ложатся постоянный многопоточный планировщик
-  (#9) и, при необходимости, изоляция плагина в отдельный процесс (#230)
-  без смены модели памяти.
-- **Вендоренный miniaudio — короткий путь к кодекам и SRC:** декодеры
-  WAV/FLAC/MP3 и ресемплер уже в дереве, поэтому #10/#8 не требуют новых
-  внешних зависимостей (важно для сборки «без сети» и для поставки).
+  единое кольцо. Модуль `DspScheduler` (#9) удалён в #396 как неинтегрированный:
+  граф исполняется шагами внутри audio-callback, а кольца и пулы остаются
+  основой для изоляции плагина в отдельном процессе (#230) без смены модели
+  памяти.
+- **Кодеки и SRC без внешних зависимостей:** miniaudio вендорен, декодеры
+  FLAC/MP3/OGG — `dr_flac`/`dr_mp3`/`stb_vorbis` в `commons/codecs`,
+  FLAC-энкодер (`core/flac_codec`) и ресемплер (`adapters/resample`) —
+  собственные. Сборка «без сети» и поставка не тянут libFLAC/libsamplerate;
+  lossy-превью вызывает внешний кодировщик только по явному запросу.
 - **Node SDK разделяет descriptor и state** — SDK можно открывать для
   сторонних DSP-нод, не трогая граф и планировщик.
 - **CLI строится поверх готовых контрактов** — каркас (`cli.nim` + `cli/`)
@@ -755,9 +773,10 @@ Support/euterpia/config.json`, Windows: `%APPDATA%\euterpia\config.json`);
 
 ### Готовый архив (Linux, Windows, macOS)
 
-Архивы собираются workflow `Release` по тегу `v*` и лежат в GitHub Releases.
-Внутри — бинарь, документация, файлы ассоциации проектов (`*.eproj`, `*.eut`)
-и установщик без пакетного менеджера:
+Архивы собираются workflow `Release` по тегу `v*` и лежат в
+**[GitHub Releases](https://github.com/framefrok/Euterpia_core/releases)**
+(текущая версия — `v0.3.5`). Внутри — бинарь, документация, файлы ассоциации
+проектов (`*.eproj`, `*.eut`) и установщик без пакетного менеджера:
 
 ```bash
 # Linux/macOS: распаковать архив, затем
@@ -809,8 +828,10 @@ euterpia --help             # поверхность команд
 Внешние библиотеки — опциональные, загружаются в рантайме через `dynlib`:
 
 ```text
-libportaudio   (аудио-устройства, альтернатива miniaudio)
-librtmidi      (MIDI-устройства)
+libportaudio          (аудио-устройства, альтернатива miniaudio)
+librtmidi             (MIDI-устройства)
+liblilv (+ sord/serd/sratom/zix)  (LV2-хостинг, #39)
+libeuterpia_libremidi (фасад libremidi, #38 — собирается по README адаптера)
 ```
 
 miniaudio-бэкенд **не требует** внешних библиотек: `miniaudio.h`
@@ -828,7 +849,7 @@ nimble cliDocs         # пересобрать раздел справочни�
 nimble miniaudioSmoke  # сборка TU miniaudio + smoke-прогон адаптера (#31)
 nimble ubsan           # unit-набор под UndefinedBehaviorSanitizer (#13)
 nimble asan            # unit-набор под AddressSanitizer (#13)
-nimble clapMock        # сборка mock CLAP-плагина + сквозной тест хостинга (#53)
+nimble clapMock        # mock CLAP: сквозной тест хостинга (#53) + CLI-сценарий плагинов (#95, #260)
 nimble archGuard       # направление зависимостей слоёв (§27, #50)
 ```
 
@@ -864,12 +885,11 @@ python3 tools/check_architecture.py
 перезаписан»), команды графа (#90: `node add/list/rm`, `connect`,
 `disconnect`, `param set/get`, `graph check` с вердиктами компилятора) и
 настройки окружения (`config`, включая приоритет
-argv > env > файл). `euterpia` линкует
-ТОЛЬКО статически собираемые адаптеры (miniaudio): `{.dynlib.}`-адаптеры
-(PortAudio, RtMidi) резолвят символы внешней библиотеки на старте процесса,
-поэтому их отсутствие уронило бы CLI ещё до `main()`. Именно поэтому
-`doctor` проверяет такие библиотеки пробой `dlopen` и честно сообщает
-«адаптер в CLI не залинкован», а не падает.
+argv > env > файл). `euterpia` линкует статически только miniaudio и
+собственные адаптеры (ресемплер, кодеки); PortAudio, RtMidi, libremidi и Lilv
+грузятся лениво при первом обращении (#267), поэтому их отсутствие не роняет
+процесс до `main()`. `doctor` проверяет такие библиотеки пробой `dlopen` и
+честно сообщает «адаптер недоступен», а не падает.
 
 Бинарники тестов кладутся в `build/` (каталог в `.gitignore`).
 
@@ -978,8 +998,10 @@ callback» (`rtScope`/`rtEnter`), а точки риска — `rtAssertNoAlloc`
   Трансляция событий (#7) — `EventQueue` ↔ CLAP в обе стороны, включая
   MIDI-сообщения для CC/pitch bend/aftertouch/program change; тесты
   `tests/unit/test_clap_events.nim` + сквозные. Прогон официального
-  `clap-validator` — ручной: он требует реальных `.clap` и сети и в CI
-  невозможен;
+  `clap-validator` — через `euterpia plugin validate` (#260): команда
+  запускает официальный инструмент и разбирает вывод; сам инструмент в CI
+  не ставится (нужны реальные `.clap` и сеть), поэтому проверка парсера идёт
+  на фиксированном выводе;
 - доступ к параметрам/состоянию/latency/аудио-портам ПЛАГИНА
   (plugin-side расширения) реализован в
   `adapters/clap/clap_plugin_extensions.nim` (#49) и покрыт
@@ -987,9 +1009,18 @@ callback» (`rtScope`/`rtEnter`), а точки риска — `rtAssertNoAlloc`
   `clap_plugin_host.nim` удалён — в нём было две ошибки ABI
   (`clap_istream`/`clap_ostream` были склеены в одну структуру, поля
   `clap_audio_port_info` переставлены);
-- #8 — нет ресемплинга при несовпадении SR устройства и проекта;
-- #10 — закрыто: FLAC/MP3/OGG читаются (dr_flac/dr_mp3/stb_vorbis), AIFF/AIFC
-  читаются и пишутся; сжатие в FLAC/MP3/OGG (энкодеров нет) — вне ядра;
+- #8 — ресемплинг есть (`core/src_api` + мост «устройство ↔ проект»), но
+  он собственный: отношение частот ограничено 1/16…16, добавляет задержку
+  полуокна (входит в `resamplerLatency`) и не заменяется внешней библиотекой;
+- #10 — FLAC/MP3/OGG читаются (dr_flac/dr_mp3/stb_vorbis), AIFF/AIFC читаются
+  и пишутся; FLAC теперь и **пишется** встроенным энкодером (#411). MP3/OGG
+  остаются только чтением в ядре: lossy-превью делает CLI внешним
+  кодировщиком, а не Core;
+- libremidi и Lilv **не вендорены**: адаптеры `adapters/libremidi` и
+  `adapters/lilv` компилируются всегда и честно отдают «недоступно» без
+  библиотеки; для реального хостинга библиотеку нужно установить/собрать
+  (`adapters/libremidi/README.md`), а LV2 Atom/MIDI-порты и состояние пока
+  не поддержаны (ограничение адаптера, не Core);
 - у miniaudio 0.11.25 нет публичного статуса драйвера/xrun-счётчика:
   `xrunCount` считается C-шимом как вызов рендера, не уложившийся в
   длительность блока, плюс `interruption_began`, а адаптер превращает

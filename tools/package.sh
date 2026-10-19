@@ -153,7 +153,14 @@ fi
 # --- архив и контрольная сумма ---------------------------------------------
 ARCHIVE="$OUTDIR/$NAME.tar.gz"
 tar -C "$OUTDIR" -czf "$ARCHIVE" "$NAME"
-( cd "$OUTDIR" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+# macOS не содержит sha256sum: там есть shasum -a 256. Формат вывода у обоих
+# одинаков ("хеш  файл"), поэтому контрольная сумма остаётся проверяемой
+# одной командой на любой ОС.
+if command -v sha256sum >/dev/null 2>&1; then
+  ( cd "$OUTDIR" && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+else
+  ( cd "$OUTDIR" && shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256" )
+fi
 
 echo "пакет: $ARCHIVE"
 echo "sha256: $(cut -d' ' -f1 "$OUTDIR/$NAME.tar.gz.sha256")"
