@@ -87,6 +87,11 @@ type
 
   # Pipeline step - представляет одну DSP-ноду в графе
   PipelineStep* = object
+    nodeId*: int32
+      ## Идентификатор ноды проекта (issue #413). Раньше шаг нёс только
+      ## `userData`, и связать внешнее событие (MIDI-вход) с конкретной
+      ## нодой было нельзя без таблицы «состояние → id». Поле заполняет
+      ## компилятор графа; Core его не интерпретирует.
     processProc*: ProcessProc
     userData*: pointer
     audio*: NodeAudioPorts

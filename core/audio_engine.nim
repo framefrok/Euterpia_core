@@ -8,6 +8,9 @@ import
   node_interface,
   compiled_pipeline,
   audio_recorder,
+  live_automation,
+  midi_api,
+  midi_events,
   rt_guard
 
 # Единый расчёт музыкальной позиции (issue #387). Импортируем ТОЛЬКО функцию и
@@ -24,6 +27,10 @@ from transport import positionFromSeconds, TransportPosition
 const
   AudioCommandQueueCapacity = 1024
   AudioMetricQueueCapacity = 256
+
+  ## Живой MIDI-вход (issue #413): сообщения, пришедшие между блоками.
+  ## 1024 сообщения — больше, чем физически может прийти за один callback.
+  MidiInputQueueCapacity = 1024
 
   ## Ёмкость SPSC-очереди утилизированных пайплайнов: столько смен графа
   ## движок готов отдать control-plane через `pollReclamation` (issue #73).
@@ -157,6 +164,32 @@ type
     # Опциональная маршрутизация входа: input -> TrackInputRouting -> AudioRecorder.
     # Движок владеет только указателем; временем жизни рекордера владеет хост.
     recorder: ptr AudioRecorder
+
+    # =========================================================================
+    # Живой MIDI-вход и автоматизация (issue #413)
+    # =========================================================================
+    #
+    # MIDI приходит из control-потока (CLI опрашивает порт) в SPSC-очередь.
+    # Движок сливает её в начало блока и подаёт в event-вход ноды-цели.
+    # `midiEvents` — предвыделенная очередь блока: она подставляется шагу как
+    # `events.inputs[0]` на время вызова, поэтому не конфликтует с очередями
+    # графа.
+    midiIn: SpscQueue[ExternalMidiEvent, MidiInputQueueCapacity]
+    midiEvents: EventQueue
+    midiTarget: Atomic[int32]
+      ## id ноды-приёмника; -1 — живого MIDI-входа нет.
+    midiLate: Atomic[uint32]
+      ## События вне текущего блока (опоздали / из будущего).
+    midiDropped: Atomic[uint32]
+      ## События, не влезшие в очередь блока.
+    midiDelivered: Atomic[uint32]
+      ## События, доставленные ноде-цели за всё время (диагностика).
+
+    # Двойной буфер автоматизации. `liveAutoActive` — индекс активного
+    # набора; -1 — автоматизации нет. Публикация только через atomic store
+    # (release), чтение — один load (acquire) на блок.
+    liveAuto: array[2, LiveAutomationSet]
+    liveAutoActive: Atomic[int32]
 
 
 # ==============================================================================
@@ -449,6 +482,14 @@ proc createAudioEngine*(
   result.pendingXruns.store(0'u32, moRelaxed)
   result.totalXruns.store(0'u32, moRelaxed)
   result.recorder = nil
+
+  result.midiTarget.store(-1'i32, moRelaxed)
+  result.midiLate.store(0'u32, moRelaxed)
+  result.midiDropped.store(0'u32, moRelaxed)
+  result.midiDelivered.store(0'u32, moRelaxed)
+  initSpscQueue(result.midiIn)
+  clearEvents(addr result.midiEvents)
+  result.liveAutoActive.store(-1'i32, moRelaxed)
 
   initSharedPool(result.sharedPool)
 
@@ -750,19 +791,40 @@ proc processPipeline(
     return
 
   if p.steps != nil and p.stepCount > 0:
+    let midiTarget = engine.midiTarget.load(moAcquire)
+    let deliverMidi = midiTarget >= 0 and engine.midiEvents.count > 0
     var i = 0
 
     while i < p.stepCount:
       let step = addr p.steps[i]
 
       if step.processProc != nil:
-        step.processProc(
-          addr ctx,
-          addr step.audio,
-          addr step.ctrl,
-          addr step.events,
-          step.userData
-        )
+        if deliverMidi and step.nodeId == midiTarget and
+           step.events.inputCount > 0:
+          # Внешний MIDI-вход (issue #413): очередь блока подставляется
+          # ровно на время вызова ноды-цели и восстанавливается сразу.
+          # Маршруты графа не меняются, чужие события не теряются.
+          let savedQueue = step.events.inputs[0]
+          let savedCount = step.events.inputCount
+          step.events.inputs[0] = addr engine.midiEvents
+          step.events.inputCount = 1
+          step.processProc(
+            addr ctx,
+            addr step.audio,
+            addr step.ctrl,
+            addr step.events,
+            step.userData
+          )
+          step.events.inputs[0] = savedQueue
+          step.events.inputCount = savedCount
+        else:
+          step.processProc(
+            addr ctx,
+            addr step.audio,
+            addr step.ctrl,
+            addr step.events,
+            step.userData
+          )
 
       inc i
 
@@ -1006,6 +1068,81 @@ proc hasRecorder*(engine: ptr AudioEngine): bool {.inline.} =
 # Main block renderer
 # ==============================================================================
 
+
+# ==============================================================================
+# Живой MIDI-вход и автоматизация (issue #413)
+# ==============================================================================
+
+proc applyLiveAutomation(engine: ptr AudioEngine) {.rt.} =
+  ## Продюсер автоматизации на границе блока: значение линии на текущем
+  ## тике применяется прямо в пайплайн (без очереди команд).
+  ##
+  ## Тик считается из кадра транспорта той же формулой, что у
+  ## офлайн-рендера (`liveAutomationTickForFrame`), поэтому живой и offline
+  ## результат совпадают. Аллокаций нет: набор линий предвыделен.
+  let idx = engine.liveAutoActive.load(moAcquire)
+  if idx < 0 or idx > 1:
+    return
+  let p = engine.activePipeline
+  if p == nil or p.applyParamProc == nil:
+    return
+  let set = addr engine.liveAuto[idx]
+  if set.laneCount <= 0:
+    return
+  let tick = liveAutomationTickForFrame(
+    engine.transport.frame,
+    float64(engine.transport.sampleRate),
+    engine.transport.tempo)
+  var i = 0'i32
+  while i < set.laneCount:
+    let lane = addr set.lanes[i]
+    p.applyParamProc(
+      p, lane.nodeId, lane.paramId,
+      liveAutomationValueAt(lane[], tick), false)
+    inc i
+
+proc drainMidiInput(engine: ptr AudioEngine; frames: int32) {.rt.} =
+  ## Слить внешний MIDI-вход в очередь блока.
+  ##
+  ## Привязка к блоку: событие несёт АБСОЛЮТНЫЙ кадр проекта, движок
+  ## вычитает текущую позицию транспорта. Опоздавшие (кадр в прошлом)
+  ## подаются с offset 0 — лучше сыграть на границе блока, чем потерять
+  ## ноту; события из будущего за пределами блока отбрасываются со
+  ## счётчиком `midiLate`, а не «переносятся» молча.
+  clearEvents(addr engine.midiEvents)
+  let target = engine.midiTarget.load(moAcquire)
+  var evt: ExternalMidiEvent
+
+  if target < 0 or engine.activePipeline == nil:
+    var dropped = 0'u32
+    while engine.midiIn.pop(evt):
+      inc dropped
+    if dropped > 0:
+      discard engine.midiLate.fetchAdd(dropped, moRelaxed)
+    return
+
+  let sr = float64(engine.transport.sampleRate)
+  if sr <= 0.0:
+    return
+  while engine.midiIn.pop(evt):
+    var rel = evt.frame - engine.transport.frame
+    if rel < 0:
+      rel = 0
+      discard engine.midiLate.fetchAdd(1'u32, moRelaxed)
+    elif rel >= int64(frames):
+      discard engine.midiLate.fetchAdd(1'u32, moRelaxed)
+      continue
+    let msg = MidiMessage(
+      status: evt.status, data1: evt.data1, data2: evt.data2,
+      timestamp: float64(engine.transport.frame + rel) / sr)
+    var ev: RealtimeEvent
+    if midiToEvent(msg, 0'u8, sr,
+                   float64(engine.transport.frame) / sr, ev):
+      if pushEvent(addr engine.midiEvents, ev):
+        discard engine.midiDelivered.fetchAdd(1'u32, moRelaxed)
+      else:
+        discard engine.midiDropped.fetchAdd(1'u32, moRelaxed)
+
 proc renderBlockInternal(
   engine: ptr AudioEngine;
   driverIn: ptr UncheckedArray[float32];
@@ -1045,6 +1182,13 @@ proc renderBlockInternal(
     # Пауза и стоп — не идут: одновременно это «состояние без продвижения».
     let transportActive =
       engine.transport.state in {tsPlaying, tsRecording} or forceAdvance
+
+    # Живой MIDI-вход и автоматизация (issue #413): оба продюсера работают
+    # на границе блока, до обработки графа. Автоматизация — только когда
+    # транспорт идёт: на паузе параметр не должен «догонять» позицию.
+    if transportActive:
+      applyLiveAutomation(engine)
+    drainMidiInput(engine, frames)
 
     # Входной тракт: раскладываем драйверный вход в арену ДО рендера графа,
     # чтобы input-ноды увидели актуальный блок. Offline-путь передаёт driverIn
@@ -1662,6 +1806,90 @@ proc postSharedCommand*(
   engine.sharedPool.releaseBlock(id)
   return false
 
+
+# ==============================================================================
+# Живой MIDI-вход (issue #413)
+# ==============================================================================
+
+proc setMidiInputTarget*(engine: ptr AudioEngine; nodeId: int32) =
+  ## Нода-приёмник внешнего MIDI. Control-path. -1 — вход отключён.
+  if engine == nil:
+    return
+  engine.midiTarget.store(nodeId, moRelease)
+
+proc midiInputTarget*(engine: ptr AudioEngine): int32 =
+  if engine == nil:
+    return -1
+  engine.midiTarget.load(moAcquire)
+
+proc postMidiEventAtFrame*(
+  engine: ptr AudioEngine;
+  status, data1, data2: uint8;
+  frame: int64
+): bool =
+  ## Положить внешнее MIDI-событие в очередь audio-потока.
+  ##
+  ## `frame` — абсолютный кадр проекта (CLI считает его из timestamp порта:
+  ## `timestamp * projectRate`). Очередь SPSC: producer — control-поток,
+  ## consumer — audio callback; аллокаций и локов нет.
+  if engine == nil or status < 0x80'u8:
+    return false
+  let evt = ExternalMidiEvent(
+    status: status, data1: data1, data2: data2, frame: frame)
+  if engine.midiIn.push(evt):
+    return true
+  discard engine.midiDropped.fetchAdd(1'u32, moRelaxed)
+  false
+
+proc midiQueuedCount*(engine: ptr AudioEngine): int32 =
+  ## Сколько внешних событий ещё не забрано audio-потоком (диагностика).
+  if engine == nil: 0'i32 else: int32(engine.midiIn.size)
+
+proc midiLateCount*(engine: ptr AudioEngine): uint32 =
+  if engine == nil: 0'u32 else: engine.midiLate.load(moRelaxed)
+
+proc midiDroppedCount*(engine: ptr AudioEngine): uint32 =
+  if engine == nil: 0'u32 else: engine.midiDropped.load(moRelaxed)
+
+proc midiDeliveredCount*(engine: ptr AudioEngine): uint32 =
+  ## Сколько событий реально попало в event-вход ноды-цели.
+  if engine == nil: 0'u32 else: engine.midiDelivered.load(moRelaxed)
+
+# ==============================================================================
+# Живая автоматизация (issue #413)
+# ==============================================================================
+
+proc postLiveAutomation*(
+  engine: ptr AudioEngine;
+  lanes: openArray[LiveAutomationLane]
+): int32 =
+  ## Опубликовать набор линий для живого пути. Control-path.
+  ##
+  ## Двойной буфер: пишем в неактивный набор, затем атомарно публикуем
+  ## индекс. Audio-поток либо видит старый набор целиком, либо новый —
+  ## «половины» линии он не увидит никогда. Возвращает число принятых
+  ## линий (лимит `MaxLiveAutomationLanes`).
+  if engine == nil:
+    return 0
+  let cur = engine.liveAutoActive.load(moRelaxed)
+  let next = if cur == 0: 1 else: 0
+  let accepted = fillLiveAutomationSet(engine.liveAuto[next], lanes)
+  if accepted > 0:
+    engine.liveAutoActive.store(int32(next), moRelease)
+  else:
+    engine.liveAutoActive.store(-1'i32, moRelease)
+  accepted
+
+proc clearLiveAutomation*(engine: ptr AudioEngine) =
+  if engine == nil:
+    return
+  engine.liveAutoActive.store(-1'i32, moRelease)
+
+proc liveAutomationLaneCount*(engine: ptr AudioEngine): int32 =
+  if engine == nil:
+    return 0
+  let idx = engine.liveAutoActive.load(moAcquire)
+  if idx < 0 or idx > 1: 0'i32 else: engine.liveAuto[idx].laneCount
 
 # ==============================================================================
 # Control-plane polling / queries

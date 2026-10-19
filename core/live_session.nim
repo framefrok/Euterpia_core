@@ -21,7 +21,12 @@ import
   compiled_pipeline,
   ipc_bus,
   live_resampler,
+  live_automation,
   src_api
+
+# Живой путь принимает линии автоматизации и MIDI-события теми же типами,
+# что и Core: CLI не заводит вторую копию DTO.
+export live_automation
 
 {.push raises: [].}
 
@@ -269,6 +274,37 @@ proc currentFrame*(s: LiveSession): int64 = currentFrame(s.engine)
 proc xrunCount*(s: LiveSession): uint32 = xrunCount(s.engine)
 
 proc droppedMetrics*(s: LiveSession): uint32 = droppedMetricsCount(s.engine)
+
+# ==============================================================================
+# Живой MIDI-вход и автоматизация (issue #413)
+# ==============================================================================
+
+proc setMidiInputTarget*(s: LiveSession; nodeId: int32) =
+  ## Направить внешний MIDI в ноду графа. Control-path, до/во время игры.
+  setMidiInputTarget(s.engine, nodeId)
+
+proc postMidiEventAtFrame*(s: LiveSession; status, data1, data2: uint8;
+                           frame: int64): bool =
+  ## Событие в очередь audio-потока. `frame` — абсолютный кадр проекта:
+  ## CLI считает его из timestamp порта (`timestamp * projectRate`).
+  postMidiEventAtFrame(s.engine, status, data1, data2, frame)
+
+proc midiLateCount*(s: LiveSession): uint32 =
+  midiLateCount(s.engine)
+
+proc midiDroppedCount*(s: LiveSession): uint32 =
+  midiDroppedCount(s.engine)
+
+proc postLiveAutomation*(s: LiveSession;
+                         lanes: openArray[LiveAutomationLane]): int32 =
+  ## Опубликовать линии автоматизации в движок (двойной буфер).
+  postLiveAutomation(s.engine, lanes)
+
+proc clearLiveAutomation*(s: LiveSession) =
+  clearLiveAutomation(s.engine)
+
+proc liveAutomationLaneCount*(s: LiveSession): int32 =
+  liveAutomationLaneCount(s.engine)
 
 proc pollMetrics*(s: LiveSession; m: var LiveMetrics): bool =
   ## Прочитать последнюю метрику из очереди. `false` — новых снимков нет

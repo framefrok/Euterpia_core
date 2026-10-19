@@ -74,6 +74,18 @@ type
     else:
       discard
 
+  ExternalMidiEvent* {.bycopy.} = object
+    ## Внешнее MIDI-событие для живого пути (issue #413).
+    ##
+    ## Строго POD: едет в SPSC-очереди из control-потока (CLI) в
+    ## audio-поток. `frame` — АБСОЛЮТНЫЙ кадр проекта (не смещение блока):
+    ## привязку к блоку делает движок, зная текущую позицию транспорта.
+    status*: uint8
+    data1*: uint8
+    data2*: uint8
+    reserved*: uint8
+    frame*: int64
+
   TransportState* = enum
     ## Состояние транспорта в audio-потоке. `tsPaused` отличается от
     ## `tsStopped` ТЕМ, ЧТО позиция сохраняется (#257): пауза — остановка без

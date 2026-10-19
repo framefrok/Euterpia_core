@@ -44,7 +44,16 @@ type
     sigType*: SignalType
 
   EditorNode* = object
-    id*: int               
+    id*: int
+    sourceId*: int
+      ## Идентификатор ноды В ПРОЕКТЕ (issue #413).
+      ##
+      ## `flattenGraph` переприсваивает внутренние id (начиная с 100000),
+      ## чтобы развести совпадающие локальные id субграфов. Хосту же нужен
+      ## исходный id: по нему адресуются параметры, автоматизация и
+      ## внешний MIDI-вход. Для листьев верхнего уровня `sourceId == id`.
+      ## Для нод внутри субграфа это локальный id (внешний адрес — субграф).
+               
     name*: string
     nodeType*: string
     processProc*: ProcessProc
@@ -390,6 +399,8 @@ proc flattenContainer(
       let safeId = allocator.nextId()
       idRemap[key] = safeId
       var leaf = child
+      if leaf.sourceId == 0:
+        leaf.sourceId = child.id
       leaf.id = safeId
       leaf.isSubgraph = false
       leaf.subgraphNodes = @[]
@@ -981,6 +992,7 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
 
   for stepIdx, id in order:
     let node = g.nodes.getOrDefault(id, EditorNode())
+    p.steps[stepIdx].nodeId = int32(node.sourceId)
     p.steps[stepIdx].processProc = node.processProc
     p.steps[stepIdx].userData = node.userData
     

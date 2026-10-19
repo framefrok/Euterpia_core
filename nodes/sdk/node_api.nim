@@ -380,6 +380,7 @@ proc makeEditorNode*(desc: ptr NodeDesc; factory: ptr NodeFactory;
   ## на состояние. Владение состоянием остаётся у вызывающего.
   EditorNode(
     id: nodeId,
+    sourceId: nodeId,
     name: readFixed(desc.name),
     nodeType: readFixed(desc.id),
     processProc: factory.process,
