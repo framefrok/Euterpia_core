@@ -55,6 +55,11 @@ type
     gvMasterInvalid      ## мастер-нода не может быть мастером
     gvUnsupportedChannels ## нода обещает больше каналов, чем умеет Core (#401)
     gvInvalidSubgraphPort ## связь через границу субграфа не разрешилась (#403)
+    gvSubgraphDepth      ## вложенность субграфов больше предела (#404)
+    gvNodeLimit          ## после flattening слишком много нод (#404)
+    gvConnectionLimit    ## после разрешения портов слишком много связей (#404)
+    gvLatencyOverflow    ## сумма latency вышла за предел (#405)
+    gvPdcLimit           ## суммарный размер PDC-колец больше бюджета (#404)
 
   GraphVerdict* = object
     kind*: GraphVerdictKind
@@ -87,6 +92,11 @@ proc verdictName*(k: GraphVerdictKind): string =
   of gvMasterInvalid: "masterInvalid"
   of gvUnsupportedChannels: "unsupportedChannels"
   of gvInvalidSubgraphPort: "invalidSubgraphPort"
+  of gvSubgraphDepth: "subgraphDepth"
+  of gvNodeLimit: "nodeLimit"
+  of gvConnectionLimit: "connectionLimit"
+  of gvLatencyOverflow: "latencyOverflow"
+  of gvPdcLimit: "pdcLimit"
 
 proc describe*(v: GraphVerdict): string =
   ## Человекочитаемое объяснение вердикта: причина и что она означает.
@@ -131,6 +141,20 @@ proc describe*(v: GraphVerdict): string =
   of gvInvalidSubgraphPort:
     "связь через границу субграфа не разрешилась: проверьте subgraphInputs/" &
     "subgraphOutputs и локальные id"
+  of gvSubgraphDepth:
+    "вложенность субграфов больше " & $MaxSubgraphDepth & ": разверните вручную"
+  of gvNodeLimit:
+    "после flattening больше " & $MaxFlattenedNodes &
+    " нод: граф слишком велик"
+  of gvConnectionLimit:
+    "после разрешения портов больше " & $MaxGraphConnections &
+    " связей: граф слишком велик"
+  of gvLatencyOverflow:
+    "суммарная latency цепи больше " & $MaxLatencyFrames & " кадров: " &
+    "проверьте latency нод/плагинов"
+  of gvPdcLimit:
+    "PDC требует больше " & $MaxPdcBufferSamples &
+    " сэмплов памяти: уменьшите задержки или число ветвей"
 
 proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
                   conns: seq[GraphConnSpec];
@@ -229,6 +253,16 @@ proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
       GraphVerdict(kind: gvMasterInvalid, nodeId: e.nodeId, portIdx: -1)
     of cekInvalidSubgraphPort:
       GraphVerdict(kind: gvInvalidSubgraphPort, nodeId: e.nodeId, portIdx: -1)
+    of cekSubgraphDepthExceeded:
+      GraphVerdict(kind: gvSubgraphDepth, nodeId: e.nodeId, portIdx: -1)
+    of cekNodeLimitExceeded:
+      GraphVerdict(kind: gvNodeLimit, nodeId: e.nodeId, portIdx: -1)
+    of cekConnectionLimitExceeded:
+      GraphVerdict(kind: gvConnectionLimit, nodeId: e.nodeId, portIdx: -1)
+    of cekLatencyOverflow:
+      GraphVerdict(kind: gvLatencyOverflow, nodeId: e.nodeId, portIdx: -1)
+    of cekPdcLimitExceeded:
+      GraphVerdict(kind: gvPdcLimit, nodeId: e.nodeId, portIdx: -1)
 
   verdictFor(cr.error)
 

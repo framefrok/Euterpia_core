@@ -1,5 +1,6 @@
 # project.nim
 import std/[algorithm, json, tables, os]
+import signal_types
 
 {.push raises: [].}
 
@@ -400,6 +401,22 @@ proc safeInt(n: JsonNode, key: string, def: int = 0): int =
   let val = n{key}
   if val != nil and val.kind == JInt: int(val.num) else: def
 
+proc latencyValue(n: JsonNode; key: string): uint32 =
+  ## Latency из файла с насыщением на пределе (issue #405).
+  ##
+  ## `uint32(-1)` или гигантское число из повреждённого проекта раньше
+  ## заворачивались в «маленькую» задержку. Теперь любое значение вне
+  ## `0 .. MaxLatencyFrames` превращается в предел, и компилятор честно
+  ## отказывает `cekLatencyOverflow`, а не компенсирует мусор.
+  let value = safeInt(n, key)
+  if value == 0:
+    return 0'u32
+  if value < 0 or uint64(value) > uint64(MaxLatencyFrames):
+    # Маркер «заведомо больше предела»: компилятор вернёт
+    # `cekLatencyOverflow`, а не примет мусор за валидную задержку.
+    return MaxLatencyFrames + 1'u32
+  uint32(value)
+
 proc safeFloat(n: JsonNode, key: string, def: float = 0.0): float =
   let val = n{key}
   if val != nil:
@@ -449,8 +466,8 @@ proc parseNode(n: JsonNode, err: var string): NodeFormat =
   result.ctrlOutCount = safeInt(n, "ctrlOutCount")
   result.eventInCount = safeInt(n, "eventInCount")
   result.eventOutCount = safeInt(n, "eventOutCount")
-  result.latencyReported = uint32(narrowInt(n, "latencyReported", 0, int64(high(uint32)), 0, err))
-  result.latencyIntrinsic = uint32(narrowInt(n, "latencyIntrinsic", 0, int64(high(uint32)), 0, err))
+  result.latencyReported = latencyValue(n, "latencyReported")
+  result.latencyIntrinsic = latencyValue(n, "latencyIntrinsic")
   result.isSubgraph = safeBool(n, "isSubgraph")
   
   let paramsNode = n{"parameters"}

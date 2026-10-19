@@ -4,6 +4,20 @@ import signal_types, node_interface, compiled_pipeline, aligned_mem
 
 {.push raises: [].}
 
+const
+  MaxSubgraphDepth* = 32
+    ## Максимальная вложенность субграфов (issue #404). Рекурсивный
+    ## flattening не должен зависеть от глубины проекта: иначе враждебный
+    ## файл роняет компилятор stack overflow.
+  MaxFlattenedNodes* = 4096
+    ## Предел числа ЛИСТЬЕВ после flattening. Субграфы могут скрывать
+    ## сколько угодно узлов, поэтому проверяется уже результат.
+  MaxGraphConnections* = 16_384
+    ## Предел числа связей после разрешения портов субграфов.
+  MaxPdcBufferSamples* = 8_000_000
+    ## Бюджет памяти PDC-колец в СЛОТАХ float32 (~32 МБ). Сумма считается
+    ## ДО аллокации: повреждённый граф не должен приводить к OOM.
+
 # ============================================================================
 # CORE TYPES
 # ============================================================================
@@ -73,6 +87,18 @@ type
       ## Связь через границу субграфа не разрешилась: нет объявленного порта,
       ## порт указывает на несуществующую ноду или вид сигнала не совпал
       ## (issue #403). Молча выбросить связь нельзя — это тихая потеря звука.
+    cekSubgraphDepthExceeded
+      ## Вложенность субграфов больше `MaxSubgraphDepth` (issue #404).
+    cekNodeLimitExceeded
+      ## После flattening больше `MaxFlattenedNodes` листьев (issue #404).
+    cekConnectionLimitExceeded
+      ## После разрешения портов больше `MaxGraphConnections` связей (#404).
+    cekLatencyOverflow
+      ## Суммарная latency цепи вышла за `MaxLatencyFrames` (issue #405).
+      ## Переполнение `uint32` дало бы «отрицательную» компенсацию.
+    cekPdcLimitExceeded
+      ## Суммарный размер PDC-колец больше `MaxPdcBufferSamples` (issue #404):
+      ## компилятор отказывает до аллокации, а не падает по OOM.
 
 
   ## Ошибка компиляции с адресом поломки (issue #391).
@@ -315,6 +341,7 @@ proc resolveEndpoint(
 proc flattenContainer(
   container: EditorNode;
   scopeId: int;
+  depth: int;
   allocator: var IdAllocator;
   idRemap: var Table[ScopeKey, int];
   scopeIds: var Table[ScopeKey, int];
@@ -325,6 +352,10 @@ proc flattenContainer(
   ## Развернуть один контейнер: его листья — в `outNodes`, внутренние связи —
   ## в `outConnections`. Сам контейнер шагом пайплайна не становится.
   if error != cekNone:
+    return
+
+  if depth > MaxSubgraphDepth:
+    error = cekSubgraphDepthExceeded
     return
 
   var seen = initTable[int, bool]()
@@ -341,11 +372,14 @@ proc flattenContainer(
     if child.isSubgraph:
       let childScope = allocator.nextId()
       scopeIds[key] = childScope
-      flattenContainer(child, childScope, allocator, idRemap, scopeIds,
-                       outNodes, outConnections, error)
+      flattenContainer(child, childScope, depth + 1, allocator, idRemap,
+                       scopeIds, outNodes, outConnections, error)
       if error != cekNone:
         return
     else:
+      if outNodes.len >= MaxFlattenedNodes:
+        error = cekNodeLimitExceeded
+        return
       let safeId = allocator.nextId()
       idRemap[key] = safeId
       var leaf = child
@@ -371,6 +405,9 @@ proc flattenContainer(
                               idRemap = idRemap, scopeIds = scopeIds,
                               error = error)
     if not dst.ok:
+      return
+    if outConnections.len >= MaxGraphConnections:
+      error = cekConnectionLimitExceeded
       return
     outConnections.add(EditorConnection(
       srcNodeId: src.globalId,
@@ -407,7 +444,7 @@ proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator;
   var idRemap = initTable[ScopeKey, int]()
   var scopeIds = initTable[ScopeKey, int]()
 
-  flattenContainer(root, 0, allocator, idRemap, scopeIds,
+  flattenContainer(root, 0, 0, allocator, idRemap, scopeIds,
                    result.nodes, result.connections, error)
 
 proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator): NodeGraph =
@@ -489,35 +526,45 @@ proc topologicalSort*(g: NodeGraph, adj: AdjacencyList, sortedIds: var seq[int])
 # остаются абсолютно стабильными, так как массив никогда не переаллоцируется и не
 # перемещается. Право владения массивом передается 1:1 в pipeline.delayStates в конце
 # сборки. Освобождение памяти контролируется функцией destroyPipeline.
-proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int], compiler: var GraphCompiler) =
-  var nodeTotalLatency = initTable[int, uint32]()
+proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int],
+                compiler: var GraphCompiler): CompileErrorKind =
+  var nodeTotalLatency = initTable[int, uint64]()
   
   for id in sortedIds:
-    var maxParentLatency: uint32 = 0
+    var maxParentLatency: uint64 = 0
     for srcId in adj.incoming.getOrDefault(id, @[]):
-      let pLat = nodeTotalLatency.getOrDefault(srcId, 0'u32)
+      let pLat = nodeTotalLatency.getOrDefault(srcId, 0'u64)
       if pLat > maxParentLatency:
         maxParentLatency = pLat
     
     if g.nodes.hasKey(id):
       let node = g.nodes.getOrDefault(id, EditorNode())
-      let currentLatency = maxParentLatency + node.latency.reported + node.latency.intrinsic
+      let currentLatency = maxParentLatency +
+        uint64(node.latency.reported) + uint64(node.latency.intrinsic)
+      if currentLatency > uint64(MaxLatencyFrames):
+        return cekLatencyOverflow
       nodeTotalLatency[id] = currentLatency
 
-  var maxGraphLatency: uint32 = 0
+  var maxGraphLatency: uint64 = 0
   for id in sortedIds:
-    let total = nodeTotalLatency.getOrDefault(id, 0'u32)
+    let total = nodeTotalLatency.getOrDefault(id, 0'u64)
     if total > maxGraphLatency:
       maxGraphLatency = total
 
   var newConnections: seq[EditorConnection] = @[]
   var delayStateCount = 0
-  
+  var totalRingSamples: uint64 = 0
+
   for c in g.connections:
     if c.sigType == sigAudio:
-      let srcLat = nodeTotalLatency.getOrDefault(c.srcNodeId, 0'u32)
+      let srcLat = nodeTotalLatency.getOrDefault(c.srcNodeId, 0'u64)
       if srcLat < maxGraphLatency:
         inc(delayStateCount)
+        let diff = int(maxGraphLatency - srcLat)
+        let ringFrames = max(diff + 256, 1024)
+        totalRingSamples += uint64(ringFrames * DelayCompensationRingChannels)
+        if totalRingSamples > uint64(MaxPdcBufferSamples):
+          return cekPdcLimitExceeded
 
   compiler.delayStateCount = delayStateCount
   if delayStateCount > 0:
@@ -528,7 +575,7 @@ proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int], co
   var currentDelayIdx = 0
   for c in g.connections:
     if c.sigType == sigAudio:
-      let srcLat = nodeTotalLatency.getOrDefault(c.srcNodeId, 0'u32)
+      let srcLat = nodeTotalLatency.getOrDefault(c.srcNodeId, 0'u64)
       if srcLat < maxGraphLatency:
         let diff = int(maxGraphLatency - srcLat)
         # Кольцо per-frame: ёмкость в СЛОТАХ = кадры × каналы. Раньше считалось
@@ -568,6 +615,7 @@ proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int], co
 
   g.connections = newConnections
   adj = initAdjacencyList(g)
+  cekNone
 
 # ============================================================================
 # 4. BUFFER ALLOCATION & LIFETIME ANALYSIS 
@@ -766,7 +814,14 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
     return CompileResult(success: false,
       error: CompileError(kind: cekCycleDetected, portIdx: -1, connection: -1))
 
-  applyPDC(g, adj, order, compiler)
+  let pdcError = applyPDC(g, adj, order, compiler)
+  if pdcError != cekNone:
+    if compiler.delayStates != nil:
+      for i in 0 ..< compiler.delayStateCount:
+        if compiler.delayStates[i].buffer != nil:
+          deallocShared(compiler.delayStates[i].buffer)
+      deallocShared(compiler.delayStates)
+    return CompileResult(success: false, error: CompileError(kind: pdcError))
   
   if not topologicalSort(g, adj, order):
     if compiler.delayStates != nil:
