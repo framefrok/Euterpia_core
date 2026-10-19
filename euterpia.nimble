@@ -242,6 +242,18 @@ task clapMock, "Сборка mock CLAP-плагина и сквозной тес
     " tests/mock/mock_clap_plugin.nim"
   buildLog "clap host end-to-end test"
   exec "nim c -r --hints:off --out:build/clap_mock_test tests/clap_mock_test.nim"
+  # Пользовательский путь (#95): scan → node add plugin → save → render.
+  buildLog "cli build"
+  exec "nim c --hints:off --out:" & cliBin & " cli.nim"
+  buildLog "plugin cli scenario"
+  let mockPath =
+    when defined(windows): "build/mockclap.dll"
+    elif defined(macosx): "build/libmockclap.dylib"
+    else: "build/libmockclap.so"
+  when defined(windows):
+    echo "skip: shell-сценарий плагинов исполняется в Linux-джобе clap (#95)"
+  else:
+    exec "bash tools/plugin_cli_scenario.sh " & cliBin & " " & mockPath
 
 # ---------------------------------------------------------------------------
 # Встраивание ядра (#213). Ядро без GUI проверяется не словами, а двумя

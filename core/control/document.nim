@@ -201,6 +201,7 @@ proc applyCreateNode(doc: var Document; cmd: ControlCommand): ErrorFrame =
     latencyReported: uint32(max(0, spec.latencyFrames)),
     latencyIntrinsic: 0,
     isSubgraph: false,
+    pluginPath: cmd.pluginPath,
     parameters: initTable[string, float32]()
   )
   for p in spec.params:

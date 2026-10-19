@@ -257,6 +257,22 @@ jobs:
           fi
           echo "ok: portaudio/rtmidi грузят внешние библиотеки лениво (#267)"
 
+      - name: Библиотеки плагинов и MIDI не протекают в Core/CLI (#38, #39, #95)
+        run: |
+          # Критерии приёмки #38/#39/#95 в исполняемом виде: Core знает
+          # только контракты `midi_api`/`plugin_api`, а CLI не трогает
+          # CLAP-ABI напрямую. Ищем СИМВОЛЫ библиотек, а не слова в прозе:
+          # докстроки контрактов по §8 законно перечисляют бэкенды.
+          if grep -rnE 'eut_lrm_|libremidi_shim|libremidi\.hpp|lilv_world_|lilv_plugin_|clap_entry' core/; then
+            echo "::error::символы конкретной библиотеки протекли в core/ (#38, #39)"
+            exit 1
+          fi
+          if grep -rnE 'ClapPlugin|ClapHost|ClapProcess|clap_entry|eut_lrm_' cli/ cli.nim; then
+            echo "::error::CLI трогает ABI плагина напрямую вместо core/plugin_api (#95)"
+            exit 1
+          fi
+          echo "ok: плагины и MIDI живут только за контрактами core/"
+
       - name: Команды проекта не создают движок и не открывают устройство (#89)
         run: |
           # Критерий #89 «команды не создают движок и не открывают устройство»

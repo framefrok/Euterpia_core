@@ -33,6 +33,7 @@ import project
 import catalog
 import control/query
 import control_bridge
+import plugin_host
 import control/document
 import control/commands
 import control/history
@@ -784,13 +785,15 @@ type
     name: string
     index: int
 
-proc autoMidiTarget(proj: ProjectFormat): tuple[ok: bool; nodeId: int;
-                                               message: string] =
+proc autoMidiTarget(doc: Document): tuple[ok: bool; nodeId: int;
+                                        message: string] =
   ## Нода-приёмник MIDI по умолчанию — единственная нода с event-входом.
   ## Угадывать среди нескольких нельзя: ноты ушли бы не в тот инструмент.
   var reg = builtinRegistry()
   var candidates: seq[int] = @[]
-  for node in proj.graph.nodes:
+  # Чтение — через Query API (§63): DTO уже содержит тип ноды.
+  let nodes = queryNodes(doc)
+  for node in nodes.nodes:
     let entry = reg.findNodeType(node.nodeType)
     if not entry.isNil and entry.desc.eventInCount > 0:
       candidates.add node.id
@@ -951,7 +954,15 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
 
   # --- сцена --------------------------------------------------------------
   var reg = builtinRegistry()
-  var scene = loadScene(reg, proj, scan.master, int32(sr), parentDir(path))
+  # Плагины проекта: тип-обёртка и сохранённое состояние (#95).
+  let doc = openDocument(path, proj)
+  var pluginErr = ""
+  discard registerProjectPlugins(reg, doc, pluginErr)
+  if pluginErr.len > 0:
+    return usageError("плагины проекта не загружены: " & pluginErr,
+      "проверьте путь и `euterpia plugin scan`")
+  var scene = loadScene(reg, proj, scan.master, int32(sr), parentDir(path),
+                        pluginStateHook = pluginStateHookFor(doc))
   if not scene.ok:
     return usageError(scene.error,
       "проверьте граф: euterpia graph check " & path)
@@ -1046,7 +1057,7 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   var midiAccepted = 0
   if scan.haveMidiIn:
     if midiTarget < 0:
-      let target = autoMidiTarget(proj)
+      let target = autoMidiTarget(doc)
       if not target.ok:
         discard session.postStop()
         mgr.closeBackend()
@@ -1430,7 +1441,15 @@ proc runRecord(ctx: var Ctx; scan: RecordScan): Report =
   var session: LiveSession
   if haveProject:
     var reg = builtinRegistry()
-    scene = loadScene(reg, proj, -1, int32(sr), parentDir(scan.project))
+    let doc = openDocument(scan.project, proj)
+    var pluginErr = ""
+    discard registerProjectPlugins(reg, doc, pluginErr)
+    if pluginErr.len > 0:
+      destroyScene(scene)
+      return usageError("плагины проекта не загружены: " & pluginErr,
+        "проверьте путь и `euterpia plugin scan`")
+    scene = loadScene(reg, proj, -1, int32(sr), parentDir(scan.project),
+                      pluginStateHook = pluginStateHookFor(doc))
     if not scene.ok:
       closeLiveRecorder(rec)
       return usageError(scene.error,

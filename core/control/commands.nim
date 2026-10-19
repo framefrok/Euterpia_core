@@ -112,6 +112,10 @@ type
     case kind*: ControlCommandKind
     of ccCreateNode:
       nodeType*: string
+      pluginPath*: string
+        ## Путь к файлу внешнего плагина (`plugin:<id>`, issue #95).
+        ## Core формат не знает — это непрозрачная строка для хоста.
+
       name*: string
         ## Пустое имя — имя типа (как в `node add osc`).
       newNodeId*: int32
@@ -229,10 +233,12 @@ proc createNode*(nodeType: string; name: string = "";
                  newNodeId: int32 = 0;
                  parameters: Table[string, float32] =
                    default(Table[string, float32]);
-                 id: uint32 = 0'u32): ControlCommand =
+                 id: uint32 = 0'u32;
+                 pluginPath: string = ""): ControlCommand =
   result = newCommand(ccCreateNode, id)
   result.nodeType = nodeType
   result.name = name
+  result.pluginPath = pluginPath
   result.newNodeId = newNodeId
   result.parameters = parameters
 
@@ -444,6 +450,8 @@ proc toJson*(cmd: ControlCommand): JsonNode =
   case cmd.kind
   of ccCreateNode:
     result["nodeType"] = %cmd.nodeType
+    if cmd.pluginPath.len > 0:
+      result["pluginPath"] = %cmd.pluginPath
     if cmd.name.len > 0: result["name"] = %cmd.name
     if cmd.newNodeId != 0: result["newNodeId"] = %cmd.newNodeId
     if cmd.parameters.len > 0:
@@ -572,7 +580,8 @@ proc fromJson*(node: JsonNode; cmd: var ControlCommand): bool =
     cmd = createNode(field(node, "nodeType", newJString("")).getStr,
                      field(node, "name", newJString("")).getStr,
                      int32(field(node, "newNodeId", newJInt(0)).getInt),
-                     params, id)
+                     params, id,
+                     field(node, "pluginPath", newJString("")).getStr)
   of ccDeleteNode:
     cmd = deleteNode(int32(node["nodeId"].getInt), id)
   of ccSetParameter:
