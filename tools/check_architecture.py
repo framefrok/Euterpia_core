@@ -271,6 +271,9 @@ DOCUMENT_ACCESS_ALLOWED: dict[str, dict[str, str]] = {
     "cli/cmd_import.nim": {
         "runImport": "создание аудиоресурса и audio-клипа (`import`, #107)",
     },
+    "cli/cmd_midi.nim": {
+        "runMidiImport": "импорт SMF создаёт дорожки и клипы (`midi import`, #111)",
+    },
     "cli/cmd_transport.nim": {
         "setProjectField": "запись темпа и размера в документ (`transport tempo/meter`, #257)",
     },

@@ -242,7 +242,7 @@ euterpia project show demo.eproj
 ### `midi` — MIDI: экспорт проекта в SMF, список портов и монитор событий
 
 ```text
-euterpia midi <проект.eproj> [--out файл.mid] [--split каталог] | midi list | midi monitor [--in N] [--seconds S]
+euterpia midi <проект.eproj> [--out файл.mid] [--split каталог] | midi import <проект> <файл.mid> | midi list | midi monitor [--in N] [--seconds S]
 ```
 
 Аргументы:
@@ -260,6 +260,8 @@ euterpia midi <проект.eproj> [--out файл.mid] [--split каталог]
 | `--seconds` | секунды | — | сколько слушать `monitor`; без ключа — до SIGINT |
 | `--channel` | N | — | фильтр `monitor` по MIDI-каналу 1…16 |
 | `--only` | типы | — | фильтр `monitor` по типу: note,cc,pitchbend,aftertouch,program |
+| `--track` | N | — | `import`: дорожка проекта (по умолчанию — в конец) |
+| `--map` | SMF:проект | — | `import`: сопоставление SMF:проект (можно несколько) |
 
 Пример:
 
@@ -277,6 +279,11 @@ euterpia midi ensemble.eproj --out ensemble.mid
 - `inputs` — порты входа `midi list`
 - `outputs` — порты выхода `midi list`
 - `events` — сколько событий напечатал `monitor`
+- `importedTracks` — `import`: сколько SMF-дорожек попало в проект
+- `importedNotes` — `import`: сколько нот создано
+- `ignoredEvents` — `import`: CC/PB и прочее, что формат клипа не хранит
+- `ppq` — `import`: разрешение SMF и пересчёт в PPQ проекта
+- `tempo` — `import`: темп из SMF, записанный в проект
 
 Подробности:
 
@@ -289,6 +296,11 @@ euterpia midi ensemble.eproj --out ensemble.mid
 - `midi list`: нет librtmidi — пустой список и код 0; это «адаптера нет», а не ошибка данных
 - `midi monitor` печатает относительное время от открытия порта (без времени суток)
 - `--json` у monitor — NDJSON: одна строка на событие, затем итоговый конверт
+- `midi import` берёт ноты, имя дорожки, первый темп и размер; PPQ пересчитывается в 960
+- CC/PB/aftertouch/program не входят в формат клипа: их число печатается в `ignoredEvents`
+- SMF format 2, SMPTE-тайминг и несколько темпов/размеров отвергаются явно
+- `--map SMF:проект` адресует дорожки; `--track N` — только для одной дорожки
+- импорт — одна транзакция истории: `euterpia undo` возвращает проект до него
 - раскодировать обратно можно тем же кодеком: `commons/midi_io.parseSmf`
 
 ### `transport` — транспорт: темп, размер, позиция, воспроизведение, цикл

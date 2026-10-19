@@ -2219,6 +2219,7 @@ suite "CLI: спецификация команд — один источник 
                     @["project", "set", "spec.eproj", "tempo", "100"],
                     @["project", "validate", "spec.eproj"]]),
       ("midi", @[@["midi", "spec.eproj", "--out", "spec.mid"],
+                 @["midi", "import", "spec.eproj", "spec.mid", "--dry-run"],
                  @["midi", "list"],
                  @["midi", "monitor", "--seconds", "0.05"]]),
       ("node", @[@["node", "list", "spec.eproj"], @["node", "types"],
@@ -3133,3 +3134,76 @@ suite "CLI: render — стемы и батч (#108)":
     check node["batch"].len == 2
     check fileExists(dir / "badout" / "ok.wav")
 
+
+
+# =============================================================================
+# Импорт SMF (#111)
+# =============================================================================
+
+suite "CLI: MIDI import — SMF в клипы проекта (#111)":
+  let dir = getTempDir() / "euterpia_cli_midi_import"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  # Источник: проект с двумя дорожками и нотами. Г экспорт → импорт.
+  check runCliIn(dir, ["init", "src.eproj"]).code == 0
+  writeFile(dir / "a.notes", "c4/4 d e f\n")
+  writeFile(dir / "b.notes", "g3/2 a b\n")
+  check runCliIn(dir, ["notation", "import", "a.notes", "--file", "src.eproj",
+                       "--name", "A"]).code == 0
+  check runCliIn(dir, ["notation", "import", "b.notes", "--file", "src.eproj",
+                       "--name", "B", "--track", "1"]).code == 0
+  check runCliIn(dir, ["midi", "src.eproj", "--out", "src.mid"]).code == 0
+  check runCliIn(dir, ["init", "dst.eproj"]).code == 0
+
+  test "импорт создаёт дорожки и клипы; round-trip сохраняет ноты":
+    let r = runCliIn(dir, ["midi", "import", "dst.eproj", "src.mid", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["importedTracks"].getInt == 2
+    check node["importedNotes"].getInt == 7
+    check node["ppq"]["source"].getInt == 960
+    check node["ignoredEvents"].getInt == 0
+
+    # Обратный экспорт: число нот совпадает — структура не потерялась.
+    let back = runCliIn(dir, ["midi", "dst.eproj", "--out", "dst.mid", "--json"])
+    check back.code == 0
+    check parseJson(back.output)["notes"].getInt == 7
+
+  test "импорт — одна транзакция истории: undo возвращает пустой проект":
+    # dst.eproj уже содержит импорт из предыдущего теста.
+    let r = runCliIn(dir, ["undo", "dst.eproj", "--json"])
+    check r.code == 0
+    check parseJson(r.output)["description"].getStr.contains("midi import")
+    let shown = runCliIn(dir, ["project", "show", "dst.eproj", "--json"])
+    check shown.code == 0
+    check parseJson(shown.output)["sequencer"]["tracks"].len == 0
+
+  test "--track при нескольких дорожках SMF — явный отказ":
+    check runCliIn(dir, ["init", "one.eproj"]).code == 0
+    let r = runCliIn(dir, ["midi", "import", "one.eproj", "src.mid",
+                           "--track", "0", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["hint"].getStr.contains("--map")
+
+  test "--map кладёт две SMF-дорожки в одну дорожку двумя клипами":
+    check runCliIn(dir, ["init", "mapped.eproj"]).code == 0
+    let r = runCliIn(dir, ["midi", "import", "mapped.eproj", "src.mid",
+                           "--map", "1:0", "--map", "2:0", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["importedTracks"].getInt == 2
+    check node["map"][0]["projectTrack"].getInt == 0
+    check node["map"][1]["projectTrack"].getInt == 0
+    check node["map"][0]["clip"].getInt == 0
+    check node["map"][1]["clip"].getInt == 1
+
+  test "битый SMF не меняет проект":
+    writeFile(dir / "bad.mid", "not a midi file")
+    check runCliIn(dir, ["init", "keep.eproj"]).code == 0
+    let before = readFile(dir / "keep.eproj")
+    let r = runCliIn(dir, ["midi", "import", "keep.eproj", "bad.mid", "--json"])
+    check r.code == 1
+    check readFile(dir / "keep.eproj") == before
