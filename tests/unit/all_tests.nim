@@ -41,6 +41,7 @@ import test_delay
 import test_graph_compiler
 import test_pipeline_ownership
 import test_runtime_session
+import test_live_session
 import test_pdc
 import test_rt_guard
 import test_engine_retire

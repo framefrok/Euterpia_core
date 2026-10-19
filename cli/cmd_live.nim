@@ -36,8 +36,7 @@ import control_bridge
 import audio_backend_api
 import backend_manager
 import backend_registry
-import audio_engine
-import ipc_bus
+import live_session
 import transport
 import signal_types
 import logger
@@ -383,28 +382,6 @@ proc validateDevice(backend: string; device: int): string =
 
 var gStop {.volatile.}: bool
 
-proc liveRender(
-  engineCtx: pointer;
-  driverIn: ptr UncheckedArray[float32];
-  driverOut: ptr UncheckedArray[float32];
-  frames: int32;
-  inputChannels: int32;
-  outputChannels: int32
-) {.cdecl, raises: [], gcsafe.} =
-  ## Audio callback: только рендер, без `$`, логов и аллокаций (#4, §20).
-  discard outputChannels
-  if engineCtx.isNil or driverOut.isNil:
-    return
-  renderBlock(cast[ptr AudioEngine](engineCtx), driverIn, inputChannels,
-              driverOut)
-
-proc liveStatus(engineCtx: pointer; statusFlags: uint32)
-    {.cdecl, raises: [], gcsafe.} =
-  ## Приёмник xrun'ов драйвера → счётчик движка (`noteStatus`, #4).
-  if engineCtx.isNil:
-    return
-  noteStatus(cast[ptr AudioEngine](engineCtx), statusFlags)
-
 when defined(posix):
   proc onStopSignal(sig: cint) {.noconv.} =
     gStop = true
@@ -468,14 +445,7 @@ proc positionJson(frame: int64; tempo: float64; sr: float32;
     "quarter": snap.quarterNotePosition,
   }
 
-proc stateName(s: uint8): string =
-  case s
-  of 1: "playing"
-  of 2: "recording"
-  of 3: "paused"
-  else: "stopped"
-
-proc metricSnapshot(m: EngineMetric; frame: int64; tempo: float64;
+proc metricSnapshot(m: LiveMetrics; frame: int64; tempo: float64;
                     sr: float32; num, den: int32;
                     xrunsTotal, xrunsDelta: uint64): JsonNode =
   %*{
@@ -489,7 +459,7 @@ proc metricSnapshot(m: EngineMetric; frame: int64; tempo: float64;
     "graphVersion": m.graphVersion,
     "currentFrame": frame,
     "position": positionJson(frame, tempo, sr, num, den),
-    "state": stateName(m.transportState),
+    "state": m.transportState,
   }
 
 proc metricLine(snap: JsonNode): string =
@@ -570,24 +540,18 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   let num = if meta.tsNumerator > 0: meta.tsNumerator else: 4'i32
   let den = if meta.tsDenominator > 0: meta.tsDenominator else: 4'i32
 
-  let engine = createAudioEngine(float32(sr), int32(bs))
-  if engine.isNil:
-    destroyScene(scene)
-    return panicError("не удалось создать AudioEngine",
-      "проверьте sampleRate/blockSize: " & $sr & "/" & $bs)
-
-  # Пайплайн переходит движку; сцена остаётся владельцем состояний нод и
-  # скомпилированных секвенсоров, поэтому живёт до `destroyAudioEngine`.
+  # Пайплайн переходит живому сеансу; сцена остаётся владельцем состояний
+  # нод и скомпилированных секвенсоров, поэтому живёт до `closeLiveSession`.
   var pipeline = detachPipeline(scene)
-  if not engine.postGraphUpdate(move(pipeline)):
-    destroyAudioEngine(engine)
+  var session = initLiveSession(float32(sr), int32(bs), move(pipeline))
+  if not session.isActive:
     destroyScene(scene)
-    return panicError("не удалось опубликовать граф движку",
-      "это баг: приложите вывод `euterpia --version` и команду")
-  discard engine.postSetTempo(tempo)
-  discard engine.postSetMeter(num, den)
-  discard engine.postPlay()
-  engine.flushQueuedCommands()
+    return panicError("не удалось создать живой сеанс",
+      "проверьте sampleRate/blockSize: " & $sr & "/" & $bs)
+  discard session.postSetTempo(tempo)
+  discard session.postSetMeter(num, den)
+  discard session.postPlay()
+  session.flushQueuedCommands()
 
   var cfg = AudioStreamConfig(
     sampleRate: float64(sr),
@@ -605,14 +569,14 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
                  ctx.config.entry("backend").value.len > 0
   let openErr =
     if explicit:
-      mgr.openBackend(backend, cfg, liveRender, cast[pointer](engine))
+      mgr.openBackend(backend, cfg, liveRender, cast[pointer](addr session))
     else:
-      mgr.openPreferred(cfg, liveRender, cast[pointer](engine),
+      mgr.openPreferred(cfg, liveRender, cast[pointer](addr session),
                         ["miniaudio"])
 
   if openErr != bmOk:
-    discard engine.postStop()
-    destroyAudioEngine(engine)
+    discard session.postStop()
+    session.closeLiveSession()
     destroyScene(scene)
     let reason =
       case openErr
@@ -632,7 +596,7 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   let limitMs = if scan.haveSeconds: int64(scan.seconds * 1000.0) else: -1'i64
   var nextReport = 0'i64
   var lastXruns = 0'u64
-  var lastMetric: EngineMetric
+  var lastMetric: LiveMetrics
   var haveMetric = false
   var snapshots = 0
   var exitReason = "signal"
@@ -643,16 +607,16 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
       exitReason = "seconds"
       break
 
-    engine.pollReclamation()
-    var m: EngineMetric
-    while engine.pollMetrics(m):
+    session.pollReclamation()
+    var m: LiveMetrics
+    while session.pollMetrics(m):
       lastMetric = m
       haveMetric = true
 
     if haveMetric and elapsed >= nextReport:
       nextReport += MetricsIntervalMs
-      let frame = engine.currentFrame()
-      let total = uint64(engine.xrunCount())
+      let frame = session.currentFrame()
+      let total = uint64(session.xrunCount())
       let delta = if total >= lastXruns: total - lastXruns else: 0'u64
       lastXruns = total
       let snap = metricSnapshot(lastMetric, frame, tempo, float32(sr),
@@ -668,13 +632,13 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   # --- завершение: транспорт → адаптер → движок → сцена --------------------
   # Итоговую позицию снимаем ДО `postStop`: стоп сбрасывает её в ноль, и
   # отчёт «кадров: 0» после минутного сеанса был бы ложью.
-  let finalFrame = engine.currentFrame()
-  let totalXruns = uint64(engine.xrunCount())
-  let dropped = engine.droppedMetricsCount()
-  discard engine.postStop()
-  engine.flushQueuedCommands()
+  let finalFrame = session.currentFrame()
+  let totalXruns = uint64(session.xrunCount())
+  let dropped = session.droppedMetrics()
+  discard session.postStop()
+  session.flushQueuedCommands()
   mgr.closeBackend()
-  destroyAudioEngine(engine)
+  session.closeLiveSession()
   destroyScene(scene)
 
   let elapsedMs = (getMonoTime() - started).inMilliseconds
