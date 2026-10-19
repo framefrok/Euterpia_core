@@ -153,7 +153,6 @@ MANIFEST.md  — архитектурный манифест
 | `audio_engine` | рендер блока, apply команд, retirement пайплайнов |
 | `graph_compiler` | сборка `CompiledPipeline`, PDC, отказ на циклах |
 | `compiled_pipeline` | неизменяемый объект графа: шаги, арены, версия |
-| `dsp_scheduler` | уровневый планировщик задач по воркерам |
 | `ipc_bus` | MPSC/SPSC очереди поверх `ring_buffer`, `EngineCommand`, `EngineMetric` |
 | `ring_buffer` | единое lock-free кольцо SPSC/MPSC (issue #37) |
 | `memory_pool` | фиксированные пулы, generation-handle против ABA/double-free |
@@ -161,7 +160,6 @@ MANIFEST.md  — архитектурный манифест
 | `project` | сериализация проекта (не runtime) |
 | `audio_recorder` | запись: RT-кольцо → worker thread → WAV |
 | `audio_buffer`, `signal_types`, `node_interface` | контракты буферов, событий, нод |
-| `param_registry`, `audio_params` | реестр параметров |
 | `wav_codec` | WAV read/write |
 | `audio_file_io` | фасад чтения/записи аудиофайлов (issue #5: перенесён из `commons/`) |
 | `waveform_cache` | кэш пиков волновой формы для таймлайна (issue #5) |
@@ -246,7 +244,7 @@ GUI**, **v0.5 — тесты ядра и надёжность**, **v0.6 — GUI:
 - [x] #43 инвалидация кэша C-ядер при правке `eut_dsp.h` (хеш заголовка в имени объекта)
 - [x] #12 CI-матрица, LICENSE, шаблоны; #14 `Logger` вместо `echo` в Core
 - [x] #57 unit-тесты на непокрытые модули (`sequencer`, `project`,
-      `param_registry`, `memory_pool`, `logger`, `undo_redo`,
+      `memory_pool`, `logger`, `undo_redo`,
       `waveform_cache`, `audio_file_io`, `transport`)
 - [x] #13 UBSan/ASan-цели: `nimble ubsan` / `nimble asan` + одноимённые CI-джобы
 - [x] #6 CLAP: host- и plugin-side расширения + сквозной mock-плагин и
@@ -263,7 +261,8 @@ GUI**, **v0.5 — тесты ядра и надёжность**, **v0.6 — GUI:
 - [x] #73 `retirePipelineRT`: аварийное освобождение вместо утечки при
       переполнении обоих уровней утилизации
 - [x] #74 `dsp_scheduler.renderBlock`: прерывание по `stopFlag` вместо
-      вечного spin-loop (+ `inRender`-инвариант для `deinit`)
+      вечного spin-loop (+ `inRender`-инвариант для `deinit`) — модуль удалён
+      в #396 как неинтегрированный (см. CHANGELOG)
 - [x] #75–#80 надёжность и долг: `parseNode` не создаёт «мусорные» ноды из
       не-объектов; `openWavWriter` пишет 0 вместо 0xFFFFFFFF (оборванный
       файл читается как пустой); кламп таймстампа MIDI ДО приведения
@@ -554,7 +553,7 @@ realtime-дисциплина и сборка. Milestone закрыт целик
 архитектурный долг #5 виден в линии v0.3.
 
 - [x] #9 persistent worker pool и двойной буфер расписания в `DspScheduler`
-      (`swapSchedule` меняет граф на ходу — без teardown и без разрыва звука)
+      (модуль удалён в #396 как неинтегрированный в AudioEngine)
 - [x] #11 `DEBUG_ASSERT_REALTIME_SAFE`: guard на аллокации и локи в
       audio-потоке (`core/rt_guard.nim`)
 - [x] #42 кэш Nim в macOS-джобе; Windows делегирован проверенному экшену
@@ -819,13 +818,18 @@ unit-, integration- и realtime-тестов:
 
 ```text
 --mm:orc --threads:on
--fno-strict-aliasing -fno-math-errno
+-fno-math-errno
 -O3 + -DNDEBUG        (release/danger)
 ```
 
 `-ffast-math` **не используется никогда**: он разрешает компилятору считать
 NaN/Inf невозможными, что срезает защитные проверки в DSP и делает результат
 зависимым от порядка векторизации. Для ядра DAW детерминизм важнее скорости.
+
+`-fno-strict-aliasing` тоже не используется (issue #400): аудиоарены — это
+`ptr UncheckedArray[float32]`, доступ идёт по объектам одного типа, а
+межтиповые передачи — через `copyMem`. Сборка с включённым strict-aliasing
+проходит unit/integration/CLI, release и ASan/UBSan.
 
 ## Realtime-контракт
 
