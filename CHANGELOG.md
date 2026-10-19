@@ -8,7 +8,35 @@
 Версия пакета — единственная константа `euterpia_version.nim`, поэтому
 `euterpia --version`, поле `version` пакета и имя тега совпадают.
 
-## [0.3.2] — Импорт аудио, клип-плеер, история, транспорт, кодеки и реальное время
+## [Unreleased]
+
+### Добавлено
+- **Headless runtime-сессия** (`euterpia session start|stop|status`, issue
+  #407): долгоживущий процесс-демон владеет `AudioEngine`, CLI общается с ним
+  по Unix-socket. `transport play` в одном запуске виден `transport state` в
+  другом, позиция идёт по стенным часам, `session stop` закрывает движок и
+  записывает финальное состояние в offline-сессию
+  ([#407](https://github.com/framefrok/Euterpia_core/issues/407)).
+- **`OwnedPipeline`/`BorrowedPipeline`** (issue #402): владение пайплайном
+  выражено move-only типом; передача — `sink`, повторная передача или
+  двойное освобождение отвергаются API, а не обычаем
+  ([#402](https://github.com/framefrok/Euterpia_core/issues/402)).
+- **Порты субграфов и namespace `(scopeId, localId)`** (issue #403): два
+  вложенных субграфа с одинаковыми локальными id больше не collide; внешние
+  связи разрешаются через `subgraphInputs`/`subgraphOutputs`, неразрешимая
+  связь — ошибка компиляции `cekInvalidSubgraphPort`
+  ([#403](https://github.com/framefrok/Euterpia_core/issues/403)).
+
+### Изменено
+- **`EventQueue` держит порядок сам** (issue #397): `pushEvent` вставляет по
+  `frameOffset`/`subFrame`, `finalizeEvents` — единая точка подготовки
+  очереди. Забытый `sortEvents` больше не даёт тихую неверную обработку
+  ([#397](https://github.com/framefrok/Euterpia_core/issues/397)).
+- **Модель каналов зафиксирована как стерео** (issue #401): один источник
+  `MaxAudioChannels`, нода с `maxChannels > 2` отвергается `validateChannelModel`
+  и вердиктом `graph check` `unsupportedChannels`
+  ([#401](https://github.com/framefrok/Euterpia_core/issues/401)).
+
 
 Версия пакета — `0.3.2` (релиз). Шаг линии **v0.3.2** («критическое и
 архитектурное») закрыт (см. `docs/versions.md` §1 — версия растёт на последнем

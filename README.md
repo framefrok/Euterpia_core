@@ -657,6 +657,26 @@ CLI — процесс на одну команду, поэтому истори
 правка сбрасывает повтор (как в Commons); «отменять нечего» и битый файл истории
 дают код 1 с причиной, а `--dry-run` показывает действие, не трогая диск.
 
+### Headless runtime-сессия (#407)
+
+```bash
+euterpia session start demo.eproj      # демон: процесс живёт после выхода CLI
+euterpia transport play demo.eproj     # команда уходит в демон через IPC
+euterpia transport state demo.eproj    # позиция видна в ДРУГОМ запуске CLI
+euterpia transport stop demo.eproj     # стоп: позиция 0, движок жив
+euterpia session stop demo.eproj       # закрыть движок и сокет
+```
+
+CLI остаётся процессом на одну команду, но **транспорт больше не умирает вместе
+с ним**: `session start` порождает демона, который владеет `AudioEngine`, а
+`transport play/pause/stop/seek/loop/state` разговаривают с ним по Unix-socket
+(0600, `/tmp/euterpia-session-*`). Позиция идёт по стенным часам: `transport
+state` в новом процессе показывает `playing` и растущие кадры. `session stop`
+уничтожает движок (закрывает устройство, если оно было открыто) и записывает
+финальное состояние в offline-сессию — после остановки `transport state` не
+показывает устаревшее «играет». Схема ответа — та же `euterpia.transport.v1`,
+что у offline-транспорта, поэтому клиенту не нужно различать два режима.
+
 ### Настройки окружения (#258)
 
 ```bash
@@ -946,6 +966,23 @@ driverIn (interleaved) ──▶ input arena (planar) ──▶ ctx.input
 Входной поток не отдаёт ноду-источник: `inputChannels == 0` (устройство
 без входов или offline-рендер) означает «тишина». Метрики `inputPeakL/R`
 считаются по сырому входу до нод.
+
+## Модель каналов: Core v0.x — стерео
+
+Ширина сигнала в ядре зафиксирована явно (issue #401): **два канала**. Один
+источник значения — `signal_types.MaxAudioChannels`; от него зависят арена
+графа (`graph_compiler`), кольцо компенсации задержки (`compiled_pipeline`),
+мастер-выход SDK (`pipeline_builder`) и офлайн-рендер (`offline_render`).
+
+`NodeDesc.maxChannels` — это обещание самой ноды, а не разрешение рантайма.
+Нода, заявившая больше двух каналов, отвергается до компиляции:
+`validateChannelModel` в `nodes/sdk/pipeline_builder` возвращает false, а
+`graph check` печатает вердикт `unsupportedChannels`. Так API больше не
+обещает N каналов, пока runtime молча делает два.
+
+Многоканальность (surround/Ambisonics) — отдельная линия #200; до неё честнее
+отказать, чем потерять каналы. Тест: `tests/unit/test_graph_check.nim`
+(встроенные ноды укладываются в модель, широкая нода отвергается).
 
 ## Xrun'ы
 

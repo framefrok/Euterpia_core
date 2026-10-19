@@ -38,6 +38,8 @@ import test_saturate
 import test_compressor
 import test_delay
 import test_graph_compiler
+import test_pipeline_ownership
+import test_runtime_session
 import test_pdc
 import test_scheduler_stop
 import test_scheduler_pool

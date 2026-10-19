@@ -50,7 +50,7 @@ Input → Command → Core → State update → Render
 | `runtime` | состояние исполнения, документ не тронут | процедура движка (`audio_engine.post*`) | нет — состояние не документ |
 | `io` | файлы проекта и экспорта | нет | нет |
 | `view` | ничего: показывает (§21) | нет | нет |
-| `session` | настройки и диагностику окружения | нет | нет |
+| `session` | runtime-сессия, настройки и диагностика окружения | нет | нет |
 | `window` | само окно: палитра, раскладка, attach | нет, и быть не может | нет |
 
 Практическое следствие первой строки: «нажал Play» **не делает проект
@@ -117,6 +117,7 @@ Input → Command → Core → State update → Render
 | `view.project` | проект: метаданные и треки | `view` | — | `project` | целиком |
 | `session.settings` | настройки окружения | `session` | — | `config` | целиком |
 | `session.diagnostics` | диагностика окружения | `session` | — | `doctor` | целиком |
+| `session.runtime` | headless runtime-сессия | `session` | — | `session` | целиком |
 | `edit.undo` | отменить последнюю правку | `edit` | — | `undo` | целиком |
 | `edit.redo` | повторить отменённую правку | `edit` | — | `redo` | целиком |
 | `view.history` | история правок | `view` | — | `history` | целиком |
