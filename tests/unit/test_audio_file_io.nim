@@ -218,16 +218,19 @@ suite "audio_file_io: оборванная запись (#76)":
       enc.close()
       removeFile(path)
 
-    # Заголовок: RIFF-размер — смещение 4, размер data-чанка — смещение 40.
+    # Заголовок: RIFF-размер на смещении 4, `data` ищется по маркеру —
+    # перед ним лежит зарезервированный JUNK под будущий ds64 (RF64).
     let raw = readFile(path)
     check raw.len > 44
     check raw[0 .. 3] == "RIFF"
-    check raw[36 .. 39] == "data"
+    let dataPos = raw.find("data")
+    check dataPos > 0
+    check raw[dataPos .. dataPos + 3] == "data"
 
     var riffSize: uint32
     var dataSize: uint32
     copyMem(addr riffSize, unsafeAddr raw[4], 4)
-    copyMem(addr dataSize, unsafeAddr raw[40], 4)
+    copyMem(addr dataSize, unsafeAddr raw[dataPos + 4], 4)
     # Плейсхолдеры нулевые: до close() настоящих размеров в файле нет.
     # Раньше здесь стояло 0xFFFFFFFF, и файл «claim’ил» ~4 ГБ.
     check riffSize == 0'u32
@@ -250,7 +253,9 @@ suite "audio_file_io: оборванная запись (#76)":
     var riffSize: uint32
     var dataSize: uint32
     copyMem(addr riffSize, unsafeAddr raw[4], 4)
-    copyMem(addr dataSize, unsafeAddr raw[40], 4)
+    let dataPos = raw.find("data")
+    check dataPos > 0
+    copyMem(addr dataSize, unsafeAddr raw[dataPos + 4], 4)
     check riffSize == uint32(raw.len - 8)
     check dataSize == 128'u32 * 2'u32      # 16 бит × 128 кадров
 
@@ -454,4 +459,87 @@ suite "audio_file_io: streamFileToBuffer на границе кольца (#357)
     for i in 0 ..< frames:
       maxErr = max(maxErr, abs(got[i] - src[i]))
     check maxErr < 1e-6f            # порядок и значения не перепутаны
+
+
+# =============================================================================
+# RF64 (аудит, P0): чтение файла > 4 ГБ и зарезервированный ds64
+# =============================================================================
+
+suite "audio_file_io: RF64":
+  proc writeTinyRf64(path: string) =
+    ## Минимальный RF64: ds64 с настоящими размерами, data с 0xFFFFFFFF.
+    ## Писатель переходит в RF64 только на реальном переполнении RIFF
+    ## (4 ГиБ в тесте не записать), поэтому читатель проверяется на
+    ## синтетическом файле, собранном строго по спецификации.
+    const frames = 4
+    const dataBytes = frames * 2
+    var b = newString(80 + dataBytes)
+    proc putU16(off: int; v: uint16) =
+      b[off] = char(v and 0xff)
+      b[off + 1] = char((v shr 8) and 0xff)
+    proc putU32(off: int; v: uint32) =
+      b[off] = char(v and 0xff)
+      b[off + 1] = char((v shr 8) and 0xff)
+      b[off + 2] = char((v shr 16) and 0xff)
+      b[off + 3] = char((v shr 24) and 0xff)
+    proc putU64(off: int; v: uint64) =
+      for i in 0 ..< 8:
+        b[off + i] = char((v shr (i * 8)) and 0xFF)
+    b[0 .. 3] = "RF64"
+    putU32(4, 0xFFFFFFFF'u32)
+    b[8 .. 11] = "WAVE"
+    b[12 .. 15] = "ds64"
+    putU32(16, 28'u32)
+    putU64(20, uint64(80 + dataBytes - 8))   # RIFF size
+    putU64(28, uint64(dataBytes))            # data size
+    putU64(36, uint64(frames))               # sample count
+    putU32(44, 0'u32)                        # table length
+    b[48 .. 51] = "fmt "
+    putU32(52, 16'u32)
+    putU16(56, 1'u16)                        # PCM
+    putU16(58, 1'u16)                        # mono
+    putU32(60, 48000'u32)
+    putU32(64, 96000'u32)
+    putU16(68, 2'u16)
+    putU16(70, 16'u16)
+    b[72 .. 75] = "data"
+    putU32(76, 0xFFFFFFFF'u32)
+    putU16(80, 0'u16)
+    putU16(82, 16384'u16)                    # +0.5
+    putU16(84, 0'u16)
+    putU16(86, 0'u16)
+    writeFile(path, b)
+
+  test "ds64 задаёт настоящий размер data, а не 0xFFFFFFFF":
+    let path = getTempDir() / "euterpia_afio_rf64.wav"
+    writeTinyRf64(path)
+    defer: removeFile(path)
+
+    let (samples, got) = loadAudioFile(path)
+    check got.format == afWav
+    check got.numFrames == 4
+    check got.channels == 1
+    check got.sampleRate == 48000
+    check samples.len == 4
+    check samples[0] == 0.0f
+    check abs(samples[1] - 0.5f) < 1e-6f
+    check samples[2] == 0.0f
+    check samples[3] == 0.0f
+
+  test "обычный файл остаётся RIFF, JUNK не мешает читателю":
+    let path = getTempDir() / "euterpia_afio_junk.wav"
+    writeWav(path, info(16, 1, false), sineSeq(64, 1, 440.0f))
+    defer: removeFile(path)
+
+    let raw = readFile(path)
+    check raw[0 .. 3] == "RIFF"
+    check raw.find("JUNK") > 0
+    # Размер RIFF в шапке — реальный, а не плейсхолдер.
+    var riffSize: uint32
+    copyMem(addr riffSize, unsafeAddr raw[4], 4)
+    check int64(riffSize) == int64(raw.len) - 8
+
+    let (samples, got) = loadAudioFile(path)
+    check got.numFrames == 64
+    check samples.len == 64
 

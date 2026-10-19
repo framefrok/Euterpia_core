@@ -254,6 +254,7 @@ proc renderToWav*(path: string; owned: sink OwnedPipeline;
         sampleRate: opts.sampleRate,
         channels: int16(channels),
         bitsPerSample: int16(opts.bitsPerSample),
+        numFrames: opts.totalFrames,
         isFloat: false
       )
     )

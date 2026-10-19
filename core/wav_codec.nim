@@ -29,6 +29,9 @@ type
     dataOffset: int64
     bytesWritten: int64
     isRf64: bool
+    ds64Offset: int64
+      ## Позиция зарезервированного чанка `JUNK` сразу после `WAVE`.
+      ## При переполнении RIFF он переписывается в `ds64` (см. `close`).
     ditherState: uint32
 
 proc readFmtChunk(stream: FileStream, info: var AudioFileInfo, chunkSize: uint32): bool =
@@ -99,7 +102,11 @@ proc openWavReader*(path: string): WavReader =
       dataSize64 = cast[int64](result.stream.readUint64())
       discard result.stream.readUint64()
       let tableLength = result.stream.readUint32()
-      result.stream.setPosition(startPos + 24 + int64(tableLength))
+      # Полезная нагрузка ds64: 24 байта обязательных полей + 4 байта
+      # tableLength + по 12 байт на запись таблицы. Раньше здесь стояло
+      # `+24`, и позиция «доезжала» до конца чанка только благодаря
+      # общему skip ниже; при непустой таблице он считался неверно.
+      result.stream.setPosition(startPos + 28 + int64(tableLength) * 12)
       
     elif chunkId == "fmt ":
       if not readFmtChunk(result.stream, result.info, chunkSize):
@@ -257,30 +264,34 @@ proc openWavWriter*(path: string, info: AudioFileInfo): WavWriter =
   
   result.info = info
   result.info.format = afWav
+  # `numFrames` у писателя — СЧЁТЧИК записанного, а не заявленный размер:
+  # `writeFrames` инкрементирует его, а `close` пишет точное значение в ds64.
+  # Вызывающий может передать ожидаемую длину как подсказку — она не
+  # превратится в двойной учёт кадров.
+  result.info.numFrames = 0
   result.bytesWritten = 0
   result.ditherState = 0x9E3779B9'u32
-  
-  let expectedSize = int64(info.numFrames) * int64(info.channels) * int64(info.bitsPerSample div 8)
-  result.isRf64 = (expectedSize > MAX_RIFF_SIZE)
-  
-  if result.isRf64:
-    result.stream.write("RF64")
-    # В RF64 0xFFFFFFFF — часть спецификации: реальные размеры лежат в ds64.
-    result.stream.write(0xFFFFFFFF'u32)
-    result.stream.write("WAVE")
-    result.stream.write("ds64")
-    result.stream.write(uint32(28))
-    result.stream.write(0'u64)
-    result.stream.write(0'u64)
-    result.stream.write(0'u64)
-    result.stream.write(uint32(0))
-  else:
-    result.stream.write("RIFF")
-    # 0, а не 0xFFFFFFFF: настоящий размер пишется в close(). Если процесс
-    # упадёт между open и close, на диске останется файл, который читается
-    # как ПУСТОЙ, а не как «4 ГБ данных» (issue #76).
-    result.stream.write(0'u32)
-    result.stream.write("WAVE")
+
+  # Заголовок всегда RIFF + зарезервированный `JUNK` на месте будущего
+  # `ds64` (28 байт полезной нагрузки). Это даёт две вещи:
+  #   * файл < 4 ГБ остаётся обычным RIFF — `JUNK` читатели пропускают;
+  #   * при переполнении RIFF `close` переписывает `JUNK` в `ds64` и меняет
+  #     маркер на `RF64` — без сдвига данных и без второго прохода.
+  #
+  # Раньше RF64 выбирался на открытии по `info.numFrames`, но ни
+  # `offline_render`, ни `audio_recorder` это поле не передавали: длинный
+  # файл оставался RIFF, а размеры в `close` обрезались до `uint32`.
+  result.stream.write("RIFF")
+  # 0, а не 0xFFFFFFFF: настоящий размер пишется в close(). Если процесс
+  # упадёт между open и close, на диске останется файл, который читается
+  # как ПУСТОЙ, а не как «4 ГБ данных» (issue #76).
+  result.stream.write(0'u32)
+  result.stream.write("WAVE")
+  result.ds64Offset = result.stream.getPosition()
+  result.stream.write("JUNK")
+  result.stream.write(uint32(28))
+  for i in 0 ..< 28:
+    result.stream.write(0'u8)
   
   result.stream.write("fmt ")
   result.stream.write(uint32(16))
@@ -302,11 +313,9 @@ proc openWavWriter*(path: string, info: AudioFileInfo): WavWriter =
   discard writeInfoChunk(result.stream, info.metadata)
   
   result.stream.write("data")
-  if result.isRf64:
-    result.stream.write(0xFFFFFFFF'u32)
-  else:
-    # Плейсхолдер 0 до close(): оборванный файл читается как пустой (#76).
-    result.stream.write(0'u32)
+  # Плейсхолдер 0 до close(): оборванный файл читается как пустой (#76).
+  # Для RF64 `close` заменит его на 0xFFFFFFFF по спецификации.
+  result.stream.write(0'u32)
   
   result.dataOffset = result.stream.getPosition()
 
@@ -395,21 +404,31 @@ proc close*(writer: var WavWriter) =
   if writer.stream == nil:
     return
   
-  if writer.isRf64:
-    let totalSize = writer.dataOffset + writer.bytesWritten - 8
-    writer.stream.setPosition(20)
-    writer.stream.write(uint64(totalSize))
-    writer.stream.setPosition(28)
-    writer.stream.write(uint64(writer.bytesWritten))
-    writer.stream.setPosition(36)
+  let dataSize = writer.bytesWritten
+  let riffSize = writer.dataOffset + dataSize - 8
+
+  if riffSize > MAX_RIFF_SIZE:
+    # Переполнение RIFF: зарезервированный `JUNK` превращается в `ds64`,
+    # а маркер — в `RF64`. Данные не двигаются, второй проход не нужен.
+    writer.isRf64 = true
+    writer.stream.setPosition(0)
+    writer.stream.write("RF64")
+    writer.stream.write(0xFFFFFFFF'u32)
+    writer.stream.setPosition(writer.ds64Offset)
+    writer.stream.write("ds64")
+    writer.stream.write(uint32(28))
+    writer.stream.write(uint64(riffSize))
+    writer.stream.write(uint64(dataSize))
     writer.stream.write(uint64(writer.info.numFrames))
+    writer.stream.write(uint32(0))
+    # По спецификации RF64 размеры в RIFF/data — 0xFFFFFFFF.
+    writer.stream.setPosition(writer.dataOffset - 4)
+    writer.stream.write(0xFFFFFFFF'u32)
   else:
     writer.stream.setPosition(4)
-    let fileSize = uint32(writer.dataOffset + writer.bytesWritten - 8)
-    writer.stream.write(fileSize)
+    writer.stream.write(uint32(riffSize))
     writer.stream.setPosition(writer.dataOffset - 4)
-    let dataSize = uint32(writer.bytesWritten)
-    writer.stream.write(dataSize)
+    writer.stream.write(uint32(dataSize))
   
   writer.stream.close()
   writer.stream = nil
