@@ -2945,6 +2945,135 @@ suite "CLI: master — сдача материала (#209)":
     check r.code == 1
     check parseJson(r.output)["error"]["message"].getStr.contains("nope")
 
+  test "--format flac: lossless-сдача и поля манифеста (#411)":
+    let dir = getTempDir() / "euterpia_cli_master_flac"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    let outPath = dir / "master.flac"
+    let r = runCli(["master", tone, "--format", "flac", "--out", outPath,
+                    "--target", "-20", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["format"].getStr == "flac"
+    check node["codec"].getStr == "flac"
+    check node["lossless"].getBool
+    check node["role"].getStr == "master"
+    check node["bitrate"].getInt == 0
+    check fileExists(outPath)
+
+    # Файл читается ядром, длительность совпадает с WAV-путём.
+    let (flacSamples, flacInfo) = readAllAudioFile(outPath)
+    let (wavSamples, wavInfo) = readAllAudioFile(tone)
+    check flacInfo.numFrames == wavInfo.numFrames
+    check flacSamples.len == wavSamples.len
+
+    # Манифест отличает lossless-сдачу от превью.
+    let manifest = parseJson(readFile(node["manifest"].getStr))
+    check manifest["master"]["lossless"].getBool
+    check manifest["master"]["role"].getStr == "master"
+
+  test "--out с чужим расширением отвергается":
+    let r = runCli(["master", tone, "--format", "flac",
+                    "--out", getTempDir() / "x.wav", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("расширение")
+
+  test "превью без кодировщика — код 2, а не битый файл (#411)":
+    let dir = getTempDir() / "euterpia_cli_master_nopreview"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    # PATH без ffmpeg/lame/oggenc: ядро не должно делать вид, что умеет MP3.
+    let r = runCli(["master", tone, "--format", "mp3",
+                    "--out", dir / "preview.mp3", "--json"],
+                   @[("PATH", dir)])
+    check r.code == 2
+    check not fileExists(dir / "preview.mp3")
+
+
+# =============================================================================
+# Плагины: validate (#260) и scan/info на mock-библиотеке (#95)
+# =============================================================================
+
+suite "CLI: plugin — валидатор и осмотр плагинов (#260, #95)":
+  let tone = "tests/fixtures/tone.wav"
+
+  test "plugin validate без валидатора — код 2 и подсказка":
+    let r = runCli(["plugin", "validate", tone,
+                    "--validator", "/nonexistent/clap-validator", "--json"])
+    check r.code == 2
+    let node = parseJson(r.output)
+    check node["error"]["message"].getStr.contains("валидатор")
+
+  test "plugin validate разбирает фиксированный вывод (--json)":
+    let dir = getTempDir() / "euterpia_cli_validator"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    let script = dir / "fake-validator.sh"
+    writeFile(script, "#!/bin/sh\n" &
+      "echo '[PASS] plugin-load: ok'\n" &
+      "echo '[FAIL] state-save: missing state extension'\n" &
+      "exit 1\n")
+    setFilePermissions(script, {fpUserRead, fpUserWrite, fpUserExec})
+
+    let r = runCli(["plugin", "validate", tone, "--validator", script,
+                    "--json"])
+    check r.code == 1
+    let node = parseJson(r.output)
+    check node["validator"]["exitCode"].getInt == 1
+    check not node["passed"].getBool
+    check node["failed"].getInt == 1
+    var statuses: seq[string] = @[]
+    for item in node["checks"]:
+      statuses.add item["status"].getStr
+    check "pass" in statuses
+    check "fail" in statuses
+
+  test "plugin scan/info/params/save на mock-плагине (если собран)":
+    let mock = "build/libmockclap.so"
+    if not fileExists(mock):
+      skip()
+    else:
+      let scan = runCli(["plugin", "scan", mock, "--json"])
+      check scan.code == 0
+      let scanNode = parseJson(scan.output)
+      check scanNode["plugins"].len >= 1
+      check scanNode["plugins"][0]["id"].getStr.len > 0
+
+      let info = runCli(["plugin", "info", mock, "--index", "0", "--json"])
+      check info.code == 0
+      check parseJson(info.output)["plugin"]["id"].getStr.len > 0
+
+      let dir = getTempDir() / "euterpia_cli_plugin_proj"
+      if dirExists(dir):
+        removeDir(dir)
+      createDir(dir)
+      defer: removeDir(dir)
+      check runCliIn(dir, ["init", "p.eproj"]).code == 0
+      check runCliIn(dir, ["node", "add", "plugin:com.euterpia.mock.gain",
+                           "--path", absolutePath(mock),
+                           "--name", "p", "--file", "p.eproj"]).code == 0
+      check runCliIn(dir, ["node", "add", "osc", "--name", "o",
+                           "--file", "p.eproj"]).code == 0
+      check runCliIn(dir, ["connect", "2:out", "1:in",
+                           "--file", "p.eproj"]).code == 0
+
+      let save = runCliIn(dir, ["plugin", "save", "p.eproj", "1", "--json"])
+      check save.code == 0
+      let saveNode = parseJson(save.output)
+      check saveNode["state"]["bytes"].getInt > 0
+      check saveNode["state"]["sha1"].getStr.len == 40
+
+      let params = runCliIn(dir, ["plugin", "params", "p.eproj", "1",
+                                  "--json"])
+      check params.code == 0
+      check parseJson(params.output)["params"].len >= 1
+
 # =============================================================================
 # MIDI-порты и монитор (#93)
 # =============================================================================

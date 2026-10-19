@@ -6,6 +6,7 @@
 import std/[os, strutils]
 import codec_api
 import wav_codec
+import flac_codec
 import audio_buffer
 import codecs/decoders
 import codecs/aiff
@@ -40,8 +41,11 @@ type
       aiffPath*: string
       aiffInfo*: AudioFileInfo
       aiffSamples*: seq[float32]
-    of afFlac, afMp3, afOgg:
-      discard  # ядро эти форматы только читает (энкодеров нет)
+    of afFlac:
+      flacWriter*: FlacWriter
+        ## FLAC-энкодер (issue #411): VERBATIM-кадры, lossless.
+    of afMp3, afOgg:
+      discard  # lossy-превью делает CLI через внешний кодировщик
 
 proc codecKindOf(format: AudioFileFormat): CodecKind =
   case format
@@ -142,10 +146,16 @@ proc openEncoder*(path: string, info: AudioFileInfo): AudioEncoder =
     result.aiffPath = path
     result.aiffInfo = info
     result.aiffSamples = @[]
-  of ".flac", ".mp3", ".ogg", ".oga":
-    # Энкодеров этих форматов в ядре нет — честный отказ, а не тихо битый файл.
+  of ".flac":
+    # Lossless-энкодер встроен (#411): без внешних библиотек.
+    result = AudioEncoder(format: afFlac)
+    result.flacWriter = openFlacWriter(path, info)
+  of ".mp3", ".ogg", ".oga":
+    # Lossy-превью — задача CLI (внешний кодировщик), а не ядра: обещать
+    # «энкодер есть», не имея его, нельзя.
     raise newException(IOError,
-      "кодирование " & ext & " не поддерживается (только чтение)")
+      "кодирование " & ext & " делает CLI через внешний кодировщик: " &
+      "используйте `euterpia master --format " & ext[1 .. ^1] & "`")
   else:
     raise newException(IOError, "Unsupported format: " & ext)
 
@@ -161,7 +171,9 @@ proc writeFrames*(encoder: var AudioEncoder, buffer: ptr UncheckedArray[float32]
     let total = int(frames) * int(encoder.aiffInfo.channels)
     for i in 0 ..< total:
       encoder.aiffSamples.add buffer[i]
-  of afFlac, afMp3, afOgg:
+  of afFlac:
+    writeFrames(encoder.flacWriter, buffer, frames)
+  of afMp3, afOgg:
     discard
 
 proc close*(encoder: var AudioEncoder) =
@@ -174,7 +186,9 @@ proc close*(encoder: var AudioEncoder) =
                      int(encoder.aiffInfo.bitsPerSample), encoder.aiffSamples):
       raise newException(IOError, "не удалось записать AIFF: " & encoder.aiffPath)
     encoder.aiffSamples.setLen(0)
-  of afFlac, afMp3, afOgg:
+  of afFlac:
+    close(encoder.flacWriter)
+  of afMp3, afOgg:
     discard
 
 proc streamFileToBuffer*(path: string, rtBuffer: var StreamingAudioBuffer) {.thread.} =
