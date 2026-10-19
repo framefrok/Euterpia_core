@@ -161,15 +161,15 @@ proc destroyScene*(s: var Scene) =
   disposeScene(s)
   s.ok = false
 
-proc detachPipeline*(s: var Scene): ptr CompiledPipeline =
+proc detachPipeline*(s: var Scene): OwnedPipeline =
   ## Отдаёт пайплайн вызывающему и снимает владение со сцены: после этого
   ## `destroyScene` его не тронет.
   ##
-  ## Нужно там, где пайплайн передаётся тому, кто освободит его сам:
-  ## `renderToWav` отдаёт граф аудиодвижку (`postGraphUpdate`), а движок
-  ## освобождает его вместе с собой. Без явного «забывания» указателя сцена
-  ## освободила бы тот же пайплайн второй раз — двойное освобождение.
-  result = s.pipeline
+  ## Issue #402: возвращается владеющая ручка, а не сырой указатель.
+  ## `renderToWav`/`postGraphUpdate` принимают ровно `OwnedPipeline` (sink),
+  ## поэтому повторно освободить пайплайн после передачи нельзя — у сцены и
+  ## у вызывающего больше нет владения, и double-free из истории невозможен.
+  result = ownPipeline(s.pipeline)
   s.pipeline = nil
 
 # ==============================================================================

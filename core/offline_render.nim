@@ -177,24 +177,20 @@ proc automationValueAt*(lane: OfflineAutomationLane; tick: float64): float32 =
 
 {.pop.}
 
-proc renderToWav*(path: string; p: ptr CompiledPipeline;
+proc renderToWav*(path: string; owned: sink OwnedPipeline;
                   opts: OfflineRenderOptions): OfflineRenderReport =
   ## Считает пайплайн офлайн и пишет WAV.
   ##
-  ## ВЛАДЕНИЕ — важное: пайплайн ПЕРЕХОДИТ этой функции. Движок забирает
-  ## его себе (`postGraphUpdate`) и освобождает вместе с движком
-  ## (`destroyAudioEngine`); если передать граф не удалось, освобождаем сами.
-  ##
-  ## Раньше здесь было написано «пайплайн остаётся собственностью
-  ## вызывающего» — и это было неправдой: движок освобождал его, а сцена
-  ## потом освобождала повторно (двойное освобождение; ловится только
-  ## ASan/ASan+useMalloc, а в обычной сборке портит кучу и падает через
-  ## несколько аллокаций). Поэтому вызывающий обязан «забыть» указатель:
-  ## `scene.pipeline = nil` (или `detachPipeline(scene)`) до вызова.
+  ## ВЛАДЕНИЕ (issue #402): параметр — `sink OwnedPipeline`. Пайплайн
+  ## ПЕРЕХОДИТ функции: движок забирает его себе (`postGraphUpdate`) и
+  ## освобождает вместе с движком. Если рендер отклонил пайплайн до передачи,
+  ## его освободит деструктор `OwnedPipeline`; при отказе движка —
+  ## `postGraphUpdate` освобождает его сам. Двойного освобождения быть не
+  ## может: у вызывающего после вызова владения нет.
   result.ok = false
   result.path = path
 
-  if p.isNil:
+  if owned.isEmpty:
     result.error = "пайплайн не собран"
     return
   if opts.sampleRate <= 0:
@@ -210,13 +206,6 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
     result.error = "глубина — 16 или 24 бита, получено: " & $opts.bitsPerSample
     return
 
-  # Пайплайн теперь наш: движок освободит его сам. Если до передачи графа
-  # что-то не сложилось — освобождаем здесь, чтобы память не текла.
-  var handedOver = false
-  defer:
-    if not handedOver:
-      destroyPipeline(p)
-
   let tempo = if opts.tempo > 1.0: opts.tempo else: 120.0
   let samplesPerTick =
     float64(opts.sampleRate) * 60.0 / (tempo * float64(PpqTicksPerQuarter))
@@ -228,17 +217,18 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
   defer:
     destroyAudioEngine(engine)
 
-  if not engine.postGraphUpdate(p):
+  # Владение переходит движку. При отказе `postGraphUpdate` освобождает
+  # пайплайн сам, поэтому здесь не остаётся ветки с ручным `destroyPipeline`.
+  if not engine.postGraphUpdate(move(owned)):
     result.error = "движок не принял граф"
     return
-  handedOver = true
   discard engine.postSetTempo(tempo)
   discard engine.postPlay()
   # Граф, темп и play активируются ДО первого блока: параметры automation
   # в цикле ниже идут через applyParamNow напрямую в пайплайн (#395).
   flushQueuedCommands(engine)
 
-  let channels = 2
+  let channels = signal_types.MaxAudioChannels
   let blockFrames = int64(opts.blockSize)
 
   # Чанк кратен блоку: иначе `renderOffline` тратил бы на «хвост» целый

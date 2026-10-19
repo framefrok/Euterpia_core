@@ -53,6 +53,8 @@ type
     gvDuplicateConnection ## одна и та же связь задана дважды
     gvNegativePortIdx    ## отрицательный индекс порта
     gvMasterInvalid      ## мастер-нода не может быть мастером
+    gvUnsupportedChannels ## нода обещает больше каналов, чем умеет Core (#401)
+    gvInvalidSubgraphPort ## связь через границу субграфа не разрешилась (#403)
 
   GraphVerdict* = object
     kind*: GraphVerdictKind
@@ -83,6 +85,8 @@ proc verdictName*(k: GraphVerdictKind): string =
   of gvDuplicateConnection: "duplicateConnection"
   of gvNegativePortIdx: "negativePortIdx"
   of gvMasterInvalid: "masterInvalid"
+  of gvUnsupportedChannels: "unsupportedChannels"
+  of gvInvalidSubgraphPort: "invalidSubgraphPort"
 
 proc describe*(v: GraphVerdict): string =
   ## Человекочитаемое объяснение вердикта: причина и что она означает.
@@ -121,6 +125,12 @@ proc describe*(v: GraphVerdict): string =
   of gvMasterInvalid:
     "мастер-нода " & $v.nodeId & " не может быть мастером: нет аудиовыхода " &
     "или есть исходящие связи"
+  of gvUnsupportedChannels:
+    "нода " & v.nodeType & " заявляет больше каналов, чем поддерживает " &
+    "стерео-модель Core (" & $signal_types.MaxAudioChannels & ")"
+  of gvInvalidSubgraphPort:
+    "связь через границу субграфа не разрешилась: проверьте subgraphInputs/" &
+    "subgraphOutputs и локальные id"
 
 proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
                   conns: seq[GraphConnSpec];
@@ -160,6 +170,11 @@ proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
     let entry = reg.findNodeType(spec.nodeType)
     if entry.isNil:
       return GraphVerdict(kind: gvUnknownType, nodeType: spec.nodeType)
+    if entry.desc != nil and
+       entry.desc.maxChannels > signal_types.MaxAudioChannels:
+      # issue #401: стерео — это контракт рантайма, а не пожелание ноды.
+      # Отказ виден здесь, до компиляции и до рендера.
+      return GraphVerdict(kind: gvUnsupportedChannels, nodeType: spec.nodeType)
 
     var node: EditorNode
     if not reg.instantiateNode(spec.nodeType, spec.id, node, sampleRate):
@@ -212,6 +227,8 @@ proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
       GraphVerdict(kind: gvNegativePortIdx, nodeId: e.nodeId, portIdx: e.portIdx)
     of cekMasterInvalid:
       GraphVerdict(kind: gvMasterInvalid, nodeId: e.nodeId, portIdx: -1)
+    of cekInvalidSubgraphPort:
+      GraphVerdict(kind: gvInvalidSubgraphPort, nodeId: e.nodeId, portIdx: -1)
 
   verdictFor(cr.error)
 

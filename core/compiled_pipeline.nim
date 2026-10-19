@@ -15,10 +15,11 @@ proc nextPipelineVersion*(): uint64 {.inline.} =
 const
   ## Каналов обслуживает кольцо компенсации задержки (PDC).
   ##
-  ## Проект — стерео: `MaxInputChannels = 2` в audio_engine и
-  ## `maxChannels: 2` в дескрипторах нод. Кольцо обязано покрывать все
-  ## каналы, иначе каналы перемешиваются (issue #72).
-  DelayCompensationRingChannels* = 2
+  ## Проект — стерео (issue #401): `MaxAudioChannels = 2` в signal_types,
+  ## `MaxInputChannels` в audio_engine и `maxChannels <= 2` в дескрипторах
+  ## нод. Кольцо обязано покрывать все каналы, иначе каналы перемешиваются
+  ## (issue #72). Значение не дублируется: один источник — signal_types.
+  DelayCompensationRingChannels* = signal_types.MaxAudioChannels
 
 type
   PipelineRenderProc* = proc(
@@ -141,3 +142,88 @@ proc destroyPipeline*(p: ptr CompiledPipeline) {.raises: [].} =
   p.graphVersion = 0'u64
 
   deallocShared(p)
+
+# ==============================================================================
+# Ownership (issue #402)
+# ==============================================================================
+#
+# Раньше владение пайплайном передавалось «по соглашению», сырым
+# `ptr CompiledPipeline`. История double-free в `core/offline_render.nim`
+# показывает цену такого контракта: движок освобождал пайплайн, а сцена
+# освобождала его повторно, и падала не она, а следующая крупная аллокация.
+#
+# Теперь владение выражено ТИПОМ:
+#
+#   * `OwnedPipeline` — единственный владелец указателя. Копировать его
+#     нельзя (`=copy`/`=dup` — ошибки компиляции), поэтому один и тот же
+#     пайплайн не может оказаться в двух владельцах;
+#   * передача владения — `sink`-параметр (`postGraphUpdate`, `renderToWav`).
+#     После передачи ручка пуста, и повторная передача отвергается API, а не
+#     превращается в use-after-free;
+#   * `BorrowedPipeline` — невладеющий вид для чтения метаданных. Он не
+#     освобождает память и не продлевает жизнь объекта.
+#
+# `releasePipeline` — явный detach для тех мест, где ядру нужен сырой
+# указатель (RT-утилизация). Он назван так, чтобы его было видно в ревью:
+# каждая такая точка — осознанная передача владения, а не обычное чтение.
+
+type
+  OwnedPipeline* = object
+    ## Единственный владелец `CompiledPipeline`. Move-only.
+    raw: ptr CompiledPipeline
+
+  BorrowedPipeline* = object
+    ## Невладеющий вид на пайплайн. Живёт не дольше владельца.
+    raw: ptr CompiledPipeline
+
+proc `=destroy`(o: OwnedPipeline) =
+  if o.raw != nil:
+    destroyPipeline(o.raw)
+
+proc `=copy`(dst: var OwnedPipeline; src: OwnedPipeline)
+    {.error: "OwnedPipeline нельзя копировать: владение передаётся через move/sink".}
+
+proc `=dup`(src: OwnedPipeline): OwnedPipeline
+    {.error: "OwnedPipeline нельзя дублировать: владение передаётся через move/sink".}
+
+proc ownPipeline*(p: ptr CompiledPipeline): OwnedPipeline {.inline.} =
+  ## Принять сырой указатель во владение. Вызывающий обязан «забыть»
+  ## исходный указатель (например, `CompileResult.pipeline = nil`), иначе
+  ## владельцев станет два. Для `CompileResult` есть `takePipeline`.
+  OwnedPipeline(raw: p)
+
+proc newOwnedPipeline*(): OwnedPipeline {.inline.} =
+  ## Новый пустой пайплайн под владением. `isEmpty` — если память не
+  ## выделилась.
+  ownPipeline(newCompiledPipeline())
+
+proc releasePipeline*(o: var OwnedPipeline): ptr CompiledPipeline {.inline.} =
+  ## Явный detach: вернуть сырой указатель и снять владение.
+  ##
+  ## Нужен только там, где API ядра исторически принимает `ptr` (например,
+  ## очередь утилизации RT). Каждый вызов — точка передачи владения.
+  result = o.raw
+  o.raw = nil
+
+proc destroyOwned*(o: var OwnedPipeline) {.inline.} =
+  ## Освободить пайплайн раньше конца области видимости.
+  if o.raw != nil:
+    destroyPipeline(o.raw)
+    o.raw = nil
+
+proc isEmpty*(o: OwnedPipeline): bool {.inline.} =
+  ## true — владения нет (пайплайн не создан или уже передан).
+  o.raw == nil
+
+proc borrow*(o: OwnedPipeline): BorrowedPipeline {.inline.} =
+  ## Невладеющий вид. Не освобождает и не продлевает жизнь.
+  BorrowedPipeline(raw: o.raw)
+
+proc isNil*(b: BorrowedPipeline): bool {.inline.} =
+  b.raw == nil
+
+proc graphVersion*(b: BorrowedPipeline): uint64 {.inline.} =
+  if b.raw == nil: 0'u64 else: b.raw.graphVersion
+
+proc stepCount*(b: BorrowedPipeline): int32 {.inline.} =
+  if b.raw == nil: 0'i32 else: b.raw.stepCount

@@ -5,7 +5,8 @@
 # Формат буферов в EUTERPIA (задаётся компилятором графа, см.
 # graph_compiler.compileGraph и CompiledPipeline.audioArena):
 #
-#   ВНУТРИ графа  — planar stereo: channels = 2, stride = arenaFrames.
+#   ВНУТРИ графа  — planar stereo: channels = signal_types.MaxAudioChannels,
+#                   stride = arenaFrames (issue #401: ширина одна на ядро).
 #                   Каналы лежат подряд, поэтому на канал можно
 #                   передать непрерывный указатель в C-ядро.
 #

@@ -71,6 +71,22 @@ type
     created*: string
     modified*: string
 
+  SubgraphPortFormat* = object
+    ## Портообразующая связь субграфа (issue #403).
+    ##
+    ## Субграф — это КОНТЕЙНЕР, а не DSP-нода: у него нет processProc, а его
+    ## внешние порты должны быть отображены на порты внутренних нод. Без
+    ## такой модели flattening не мог связать внешнюю связь с внутренней.
+    ##
+    ## `localNodeId` — id ноды ВНУТРИ этого субграфа (локальное пространство),
+    ## `localPortIdx` — порт этой ноды того же вида `sigType`, что и внешний
+    ## порт. Индекс в `subgraphInputs`/`subgraphOutputs` — это номер внешнего
+    ## порта субграфа.
+    name*: string
+    localNodeId*: int
+    localPortIdx*: int
+    sigType*: int             # Ordinal of SignalType
+
   NodeFormat* = object
     id*: int
     nodeType*: string         # ID для NodeFactory (например, "fx.gain")
@@ -87,6 +103,10 @@ type
     parameters*: Table[string, float32] # Состояние для восстановления nodeData
     subgraphNodes*: seq[NodeFormat]
     subgraphConnections*: seq[ConnectionFormat]
+    subgraphInputs*: seq[SubgraphPortFormat]
+      ## Внешний вход k -> внутренняя нода/порт. Только для `isSubgraph`.
+    subgraphOutputs*: seq[SubgraphPortFormat]
+      ## Внутренняя нода/порт -> внешний выход k. Только для `isSubgraph`.
 
   ConnectionFormat* = object
     srcNodeId*: int
@@ -256,6 +276,22 @@ proc toJson*(p: ProjectFormat): JsonNode =
         "sigType": sc.sigType
       })
     result["subgraphConnections"] = subConns
+
+    var subIns = newJArray()
+    for port in n.subgraphInputs:
+      subIns.add(%*{
+        "name": port.name, "localNodeId": port.localNodeId,
+        "localPortIdx": port.localPortIdx, "sigType": port.sigType
+      })
+    result["subgraphInputs"] = subIns
+
+    var subOuts = newJArray()
+    for port in n.subgraphOutputs:
+      subOuts.add(%*{
+        "name": port.name, "localNodeId": port.localNodeId,
+        "localPortIdx": port.localPortIdx, "sigType": port.sigType
+      })
+    result["subgraphOutputs"] = subOuts
 
   for node in p.graph.nodes:
     nodesJson.add(nodeToJson(node))
@@ -437,6 +473,28 @@ proc parseNode(n: JsonNode, err: var string): NodeFormat =
         srcNodeId: safeInt(sc, "srcNodeId"), srcPortIdx: safeInt(sc, "srcPortIdx"),
         dstNodeId: safeInt(sc, "dstNodeId"), dstPortIdx: safeInt(sc, "dstPortIdx"),
         sigType: safeInt(sc, "sigType")
+      ))
+
+  let subInsNode = n{"subgraphInputs"}
+  if subInsNode != nil and subInsNode.kind == JArray:
+    for port in subInsNode:
+      if not isJObject(port): continue
+      result.subgraphInputs.add(SubgraphPortFormat(
+        name: safeStr(port, "name"),
+        localNodeId: safeInt(port, "localNodeId"),
+        localPortIdx: safeInt(port, "localPortIdx"),
+        sigType: safeInt(port, "sigType")
+      ))
+
+  let subOutsNode = n{"subgraphOutputs"}
+  if subOutsNode != nil and subOutsNode.kind == JArray:
+    for port in subOutsNode:
+      if not isJObject(port): continue
+      result.subgraphOutputs.add(SubgraphPortFormat(
+        name: safeStr(port, "name"),
+        localNodeId: safeInt(port, "localNodeId"),
+        localPortIdx: safeInt(port, "localPortIdx"),
+        sigType: safeInt(port, "sigType")
       ))
 
 # ============================================================================

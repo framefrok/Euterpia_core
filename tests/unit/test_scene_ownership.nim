@@ -17,6 +17,7 @@ import std/[os, tables, unittest]
 import signal_types
 import project
 import transport
+import compiled_pipeline
 import sdk/node_registry
 import builtin/builtin_registry
 import builtin/scene_loader
@@ -69,14 +70,16 @@ suite "сцена: владение пайплайном":
     check scene.ok
     defer: destroyScene(scene)
 
-    let pipeline = detachPipeline(scene)
-    check pipeline != nil
+    var pipeline = detachPipeline(scene)
+    check not pipeline.isEmpty
     check scene.pipeline == nil      # владение снято
 
     var opts = defaultRenderOptions(int32(Sr), 512, 0.4)
     opts.tempo = 200.0
-    let rep = renderToWav(getTempDir() / "eut_scene_ownership.wav", pipeline, opts)
+    let rep = renderToWav(getTempDir() / "eut_scene_ownership.wav",
+                          move(pipeline), opts)
     check rep.ok
+    check pipeline.isEmpty           # владение ушло рендеру (#402)
 
     # Здесь и ловится регрессия: при двойном освобождении пайплайна куча уже
     # испорчена, и первая крупная аллокация падает.
