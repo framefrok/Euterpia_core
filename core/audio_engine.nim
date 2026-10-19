@@ -189,6 +189,12 @@ proc isPipelineRuntimeReady(p: ptr CompiledPipeline): bool {.inline, rt.} =
   ##    к выходу драйвера (bindMasterProc != nil).
   if p == nil:
     return true
+  # Пустой пайплайн (0 шагов, без обработчиков) — законный результат
+  # компиляции ПУСТОГО графа: рендер даёт тишину, а не падение. Отличать его
+  # от «битого» нужно по отсутствию шагов: шаг без точки входа — уже ошибка.
+  if p.renderProc == nil and p.bindMasterProc == nil and
+     p.stepCount == 0 and p.steps.isNil:
+    return true
   result = (p.renderProc != nil) or (p.bindMasterProc != nil and (p.stepCount == 0 or p.steps != nil))
 
 
