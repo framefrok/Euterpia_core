@@ -19,7 +19,10 @@
 # Коды возврата (#88): 0 — успех, 1 — использование, 2 — среда (сокет,
 # права, нет процесса), 3 — внутренняя.
 
-import std/[json, monotimes, os, posix, strutils]
+import std/[json, monotimes, os, strutils]
+
+when defined(posix):
+  import std/posix
 
 import context
 import cli_spec
@@ -28,6 +31,8 @@ import control_bridge
 import control/query
 import session_ipc
 import runtime_session
+import project
+import autosave
 
 const
   SessionSubcommands* = @["start", "stop", "status"]
@@ -49,6 +54,8 @@ const
           default = "512"),
       opt("--timeout", "сколько ждать запуска демона", value = "мс",
           default = "3000"),
+      opt("--autosave", "автосохранение проекта раз в N секунд (0 — выключено)",
+          value = "секунды", default = "0"),
     ],
     example: "euterpia session start demo.eproj",
     fields: @[
@@ -60,6 +67,7 @@ const
       field("blockSize", "размер блока"),
       field("state", "состояние транспорта: `stopped`|`playing`|`paused`|`recording`"),
       field("stale", "файл состояния есть, но процесс не отвечает"),
+      field("autosaveMs", "период автосохранения демона (0 — выключено)"),
     ],
     notes: @[
       "сессия живёт между вызовами CLI: `transport play` в одном запуске виден `transport state` в другом (#407)",
@@ -79,6 +87,7 @@ type
     sampleRateExplicit: bool
     blockSize: int32
     timeoutMs: int
+    autosaveMs: int64
 
 proc monoMs(): int64 {.inline.} =
   ## Монотонные миллисекунды: по ним считается время сессии, поэтому
@@ -89,6 +98,7 @@ proc scanArgs(args: seq[string]): SessionScan =
   result.sampleRate = DefaultSampleRate
   result.blockSize = 512
   result.timeoutMs = 3000
+  result.autosaveMs = 0
 
   var positionals: seq[string] = @[]
   var i = 0
@@ -132,6 +142,20 @@ proc scanArgs(args: seq[string]): SessionScan =
         return SessionScan(ok: false,
           rep: usageError("--block-size: ожидается целое, получено «" &
                           args[i] & "»"))
+    of "--autosave":
+      inc i
+      if i >= args.len:
+        return SessionScan(ok: false,
+          rep: usageError("--autosave: нужно значение в секундах"))
+      try:
+        let seconds = parseInt(args[i])
+        if seconds < 0 or seconds > 86_400:
+          return SessionScan(ok: false,
+            rep: usageError("--autosave: допустимо 0…86400 секунд"))
+        result.autosaveMs = int64(seconds) * 1000
+      except ValueError:
+        return SessionScan(ok: false,
+          rep: usageError("--autosave: ожидается целое число секунд"))
     of "--timeout":
       inc i
       if i >= args.len:
@@ -226,61 +250,90 @@ proc resolveProjectParams(path: string; scan: SessionScan;
 
 var gSessionStop {.volatile.}: bool
 
-proc handleSessionSignal(sig: cint) {.noconv.} =
-  ## Async-signal-safe: только запись флага, без аллокаций и логов.
-  gSessionStop = true
+when defined(posix):
+  proc handleSessionSignal(sig: cint) {.noconv.} =
+    ## Async-signal-safe: только запись флага, без аллокаций и логов.
+    gSessionStop = true
 
-proc daemonMain(paths: SessionPaths; projectPath: string;
-                sampleRate: float32; blockSize: int32;
-                tempo: float64; meterNum, meterDen: int32): int =
-  ## Цикл демона: тик транспорта + обработка одного запроса за итерацию.
-  ##
-  ## `accept` с таймаутом (20 мс), а не блокирующий: иначе позиция «играет»
-  ## стояла бы до прихода клиента.
-  var session = initRuntimeSession(sampleRate, blockSize, tempo,
-                                  meterNum, meterDen)
-  if not session.isActive:
-    return 2
-  defer: session.closeRuntimeSession()
+  proc daemonMain(paths: SessionPaths; projectPath: string;
+                  sampleRate: float32; blockSize: int32;
+                  tempo: float64; meterNum, meterDen: int32;
+                  autosaveMs: int64): int =
+    ## Цикл демона: тик транспорта + обработка одного запроса за итерацию.
+    ##
+    ## `accept` с таймаутом (20 мс), а не блокирующий: иначе позиция «играет»
+    ## стояла бы до прихода клиента.
+    var session = initRuntimeSession(sampleRate, blockSize, tempo,
+                                    meterNum, meterDen)
+    if not session.isActive:
+      return 2
+    defer: session.closeRuntimeSession()
 
-  let (listenFd, listenError) = listenUnix(paths.socketPath)
-  if listenFd == SocketHandle(-1):
-    return 2
-  defer:
-    discard close(listenFd)
-    removeSessionInfo(paths)
+    # --- автосохранение (issue #110) -----------------------------------------
+    # Демон — единственный долгоживущий процесс CLI, поэтому автосохранение
+    # имеет смысл именно здесь. Каждый тик перечитываем проект: правки идут
+    # другими вызовами CLI (`project set`, `param set`), и снимок должен
+    # содержать ИХ, а не состояние на старте. Маркер пишется сразу; штатный
+    # `session stop` его снимает, SIGKILL — оставляет для `project recover`.
+    var auto: AutoSave
+    var autoVersion = 0'u64
+    var nextAuto = 0'i64
+    if autosaveMs > 0 and projectPath.len > 0 and fileExists(projectPath):
+      var policy = defaultAutosavePolicy()
+      policy.intervalMs = autosaveMs
+      policy.minChanges = 1
+      auto = initAutoSave(projectPath, policy)
+      nextAuto = monoMs() + autosaveMs
+    defer:
+      if auto.isActive:
+        auto.closeAutoSave(graceful = true)
 
-  saveSessionInfo(paths, int(getpid()), sampleRate, blockSize)
-  session.startTimeMs(monoMs())
+    let (listenFd, listenError) = listenUnix(paths.socketPath)
+    if listenFd == SocketHandle(-1):
+      return 2
+    defer:
+      discard close(listenFd)
+      removeSessionInfo(paths)
 
-  gSessionStop = false
-  discard signal(SIGTERM, handleSessionSignal)
-  discard signal(SIGINT, handleSessionSignal)
+    saveSessionInfo(paths, int(getpid()), sampleRate, blockSize)
+    session.startTimeMs(monoMs())
 
-  var running = true
-  while running and not gSessionStop:
-    session.tickRuntimeSession(monoMs())
+    gSessionStop = false
+    discard signal(SIGTERM, handleSessionSignal)
+    discard signal(SIGINT, handleSessionSignal)
 
-    let client = acceptClient(listenFd, 20)
-    if client == SocketHandle(-1):
-      continue
-    defer: discard close(client)
+    var running = true
+    while running and not gSessionStop:
+      session.tickRuntimeSession(monoMs())
 
-    let (request, reqError) = readRequest(client, 1000)
-    if reqError.len > 0:
-      discard writeResponse(client, %*{"ok": false,
-        "error": reqError})
-      continue
+      if auto.isActive and monoMs() >= nextAuto:
+        let loaded = loadProject(projectPath)
+        if loaded.success:
+          inc autoVersion
+          discard auto.submitSnapshot(autoVersion, $loaded.value.toJson,
+                                      monoMs())
+        nextAuto = monoMs() + autosaveMs
 
-    var stopRequested = false
-    var response = session.applyRuntimeCommand(request, stopRequested)
-    if response.kind == JObject:
-      response["pid"] = %int(getpid())
-    discard writeResponse(client, response)
-    if stopRequested:
-      running = false
+      let client = acceptClient(listenFd, 20)
+      if client == SocketHandle(-1):
+        continue
+      defer: discard close(client)
 
-  0
+      let (request, reqError) = readRequest(client, 1000)
+      if reqError.len > 0:
+        discard writeResponse(client, %*{"ok": false,
+          "error": reqError})
+        continue
+
+      var stopRequested = false
+      var response = session.applyRuntimeCommand(request, stopRequested)
+      if response.kind == JObject:
+        response["pid"] = %int(getpid())
+      discard writeResponse(client, response)
+      if stopRequested:
+        running = false
+
+    0
 
 
 # =============================================================================
@@ -354,7 +407,7 @@ proc runSessionStart(ctx: var Ctx; sc: SessionScan): Report =
       for fd in 3 .. 255:
         discard close(cint(fd))
       let code = daemonMain(paths, path, sampleRate, sc.blockSize,
-                            tempo, meterNum, meterDen)
+                            tempo, meterNum, meterDen, sc.autosaveMs)
       quit(code)
 
     # --- родитель: ждём, пока демон начнёт отвечать --------------------

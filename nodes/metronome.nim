@@ -7,7 +7,6 @@ import std/math
 # Если настроен nim.cfg (см. ниже), можно оставить просто имена модулей.
 import ../core/signal_types
 import ../core/node_interface
-import ../core/transport
 
 {.push raises: [].}
 
@@ -298,11 +297,6 @@ proc pushTrigger(
 # AudioBuffer output helpers
 # ==============================================================================
 
-proc frameStride(buf: PAudioBuffer): int32 {.inline.} =
-  if buf.stride > 0: buf.stride
-  elif buf.channels > 0: buf.channels
-  else: 1
-
 
 proc writeFrame(buf: PAudioBuffer; frame: int32; sample: float32) {.inline.} =
   if buf == nil or buf.data == nil:
@@ -312,16 +306,19 @@ proc writeFrame(buf: PAudioBuffer; frame: int32; sample: float32) {.inline.} =
     return
 
   let ch = if buf.channels > 0: buf.channels else: 1
-  let stride = frameStride(buf)
 
-  let base =
-    if stride >= ch:
-      int(frame) * int(stride)
-    else:
-      int(frame) * int(ch)
-
-  for c in 0 ..< ch:
-    buf.data[base + int(c)] = sample
+  # Раскладка буфера — часть контракта (#392): planar и interleaved имеют
+  # РАЗНЫЕ индексы. Раньше здесь всегда писался interleaved, и нода,
+  # подключённая к planar-выходу движка, писала за границу канала (SIGSEGV
+  # на первом же клике).
+  if buf.layout == alPlanar:
+    let stride = if buf.stride > 0: buf.stride else: buf.frames
+    for c in 0 ..< ch:
+      buf.data[int(c) * int(stride) + int(frame)] = sample
+  else:
+    let base = int(frame) * int(ch)
+    for c in 0 ..< ch:
+      buf.data[base + int(c)] = sample
 
 
 proc clearBuffer(buf: PAudioBuffer; frames: int32) =
@@ -525,5 +522,147 @@ proc renderMetronomeBlock*(
   buf.stride = 2
 
   processMetronome(metro, addr ctx, addr buf, nil)
+
+# ==============================================================================
+# Нода `euterpia.metronome` (issue #112)
+# ==============================================================================
+#
+# Метроном был реализован, но не зарегистрирован: ни проект, ни CLI не могли
+# его включить. Нода — источник: входа нет, выход стерео, параметры
+# `enabled`/`sound`/`accent`/`normal` пишутся в состояние на control-path.
+#
+# Сетка берётся из ТРАНСПОРТА блока (`ctx.transport`), а не из собственного
+# счётчика: смена темпа/размера на лету не даёт дрейфа и двойных кликов.
+
+import sdk/node_api
+
+const
+  MetronomeParamEnabled* = 0'u32
+  MetronomeParamSound* = 1'u32
+  MetronomeParamAccent* = 2'u32
+  MetronomeParamNormal* = 3'u32
+
+var
+  metroDesc: NodeDesc
+  metroFactory: NodeFactory
+  metroReady = false
+
+proc initMetronomeDesc() =
+  metroDesc = NodeDesc(
+    id: fixedId("euterpia.metronome"),
+    name: fixedName("Metronome"),
+    category: fixedName("generator"),
+    audioInCount: 0, audioOutCount: 1,
+    ctrlInCount: 0, ctrlOutCount: 0,
+    eventInCount: 0, eventOutCount: 0,
+    latencyFrames: 0, maxChannels: 2,
+    paramCount: 4
+  )
+  metroDesc.params[0] = NodeParamDesc(
+    id: MetronomeParamEnabled, name: fixedParamName("enabled"),
+    minValue: 0.0f, maxValue: 1.0f, defaultValue: 0.0f, step: 1.0f,
+    flags: uint32(npfAutomatable) or uint32(npfInteger))
+  metroDesc.params[1] = NodeParamDesc(
+    id: MetronomeParamSound, name: fixedParamName("sound"),
+    minValue: 0.0f, maxValue: 3.0f, defaultValue: 0.0f, step: 1.0f,
+    flags: uint32(npfChoice) or uint32(npfInteger))
+  metroDesc.params[2] = NodeParamDesc(
+    id: MetronomeParamAccent, name: fixedParamName("accent"),
+    minValue: 0.0f, maxValue: 2.0f, defaultValue: 0.8f, step: 0.01f,
+    flags: uint32(npfAutomatable))
+  metroDesc.params[3] = NodeParamDesc(
+    id: MetronomeParamNormal, name: fixedParamName("normal"),
+    minValue: 0.0f, maxValue: 2.0f, defaultValue: 0.5f, step: 0.01f,
+    flags: uint32(npfAutomatable))
+
+proc createMetronomeState(desc: ptr NodeDesc; userData: pointer): pointer
+    {.cdecl, raises: [], gcsafe.} =
+  discard userData
+  if desc.isNil:
+    return nil
+  if not metroReady:
+    initMetronomeDesc()
+    metroReady = true
+  result = allocShared0(sizeof(MetronomeState))
+  if result.isNil:
+    return nil
+  let st = cast[ptr MetronomeState](result)
+  st[] = initMetronome(48000.0f)
+
+proc destroyMetronomeState(state: pointer) {.cdecl, raises: [], gcsafe.} =
+  if state.isNil:
+    return
+  deallocShared(state)
+
+proc resetMetronomeState(state: pointer) {.cdecl, raises: [], gcsafe.} =
+  if state.isNil:
+    return
+  let st = cast[ptr MetronomeState](state)
+  silenceVoices(st[])
+
+proc prepareMetronomeState(state: pointer; sampleRate: float32)
+    {.cdecl, raises: [], gcsafe.} =
+  if state.isNil:
+    return
+  prepare(cast[ptr MetronomeState](state)[], sampleRate)
+
+proc setMetronomeParam(state: pointer; paramId: uint32; value: float32;
+                       normalized: bool) {.cdecl, raises: [], gcsafe.} =
+  if state.isNil:
+    return
+  let st = cast[ptr MetronomeState](state)
+  let raw =
+    if normalized: metroDesc.paramFromNormalized(paramId, value)
+    else: value
+  case paramId
+  of MetronomeParamEnabled:
+    st.enabled = raw >= 0.5f
+  of MetronomeParamSound:
+    let idx = int(clamp(raw, 0.0f, 3.0f))
+    st.soundType = cast[MetronomeSound](idx)
+  of MetronomeParamAccent:
+    st.accentLevel = clamp(raw, 0.0f, 2.0f)
+  of MetronomeParamNormal:
+    st.normalLevel = clamp(raw, 0.0f, 2.0f)
+  else:
+    discard
+
+proc getMetronomeParam(state: pointer; paramId: uint32;
+                       outValue: ptr float32): bool
+    {.cdecl, raises: [], gcsafe.} =
+  if state.isNil or outValue.isNil:
+    return false
+  let st = cast[ptr MetronomeState](state)
+  case paramId
+  of MetronomeParamEnabled: outValue[] = (if st.enabled: 1.0f else: 0.0f)
+  of MetronomeParamSound: outValue[] = float32(ord(st.soundType))
+  of MetronomeParamAccent: outValue[] = st.accentLevel
+  of MetronomeParamNormal: outValue[] = st.normalLevel
+  else: return false
+  true
+
+proc getMetronomeDesc*(): ptr NodeDesc =
+  if not metroReady:
+    initMetronomeDesc()
+    metroReady = true
+  addr metroDesc
+
+proc getMetronomeFactory*(): ptr NodeFactory =
+  if not metroReady:
+    initMetronomeDesc()
+    metroReady = true
+  if metroFactory.create.isNil:
+    metroFactory = NodeFactory(
+      create: createMetronomeState,
+      destroy: destroyMetronomeState,
+      process: processMetronomeNode,
+      setParam: setMetronomeParam,
+      getParam: getMetronomeParam,
+      reset: resetMetronomeState,
+      prepare: prepareMetronomeState
+    )
+  addr metroFactory
+
+
 
 {.pop.}

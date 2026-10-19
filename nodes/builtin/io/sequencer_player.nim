@@ -35,6 +35,7 @@ import std/math
 import
   signal_types,
   node_interface,
+  aligned_mem,
   sequencer,
   ../../sdk/node_api
 
@@ -119,7 +120,10 @@ proc createSequencerState(desc: ptr NodeDesc; userData: pointer): pointer
     initSequencerDesc()
     seqReady = true
 
-  result = allocShared0(sizeof(SequencerPlayerState))
+  # Состояние содержит `EventQueue` с `align: 64`; `allocShared0` даёт только
+  # 16 байт, и UBSan ловит member access по misaligned-адресу.
+  result = alignedSharedAlloc0(sizeof(SequencerPlayerState),
+                               alignof(SequencerPlayerState))
   if result.isNil:
     return nil
   let st = cast[ptr SequencerPlayerState](result)
@@ -130,7 +134,7 @@ proc destroySequencerState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   ## владеет только собственной структурой состояния.
   if state.isNil:
     return
-  deallocShared(state)
+  alignedSharedDealloc(state)
 
 proc resetSequencerState(state: pointer) {.cdecl, raises: [], gcsafe.} =
   ## Паника: снять накопленные dropped-счётчики. Сами события — данные

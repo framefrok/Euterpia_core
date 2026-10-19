@@ -28,6 +28,7 @@ import cmd_render
 import cmd_master
 import cmd_analyze
 import cmd_midi
+import cmd_automation
 import cmd_transport
 import cmd_session
 import cmd_live
@@ -281,6 +282,9 @@ proc setupRegistry*() =
     CommandDef(spec: SessionSpec, run: runSession),
     CommandDef(spec: DeviceSpec, run: runDevice),
     CommandDef(spec: PlaySpec, run: runPlay),
+    CommandDef(spec: RecordSpec, run: runRecordCmd),
+    CommandDef(spec: MetronomeSpec, run: runMetronomeCmd),
+    CommandDef(spec: AutomationSpec, run: runAutomation),
     CommandDef(spec: NodeSpec, run: runNode),
     CommandDef(spec: ConnectSpec, run: runConnectCommand),
     CommandDef(spec: DisconnectSpec, run: runDisconnectCommand),

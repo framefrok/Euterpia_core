@@ -188,3 +188,51 @@ suite "waveform_cache: асинхронная генерация":
     cache.destroy()
     removeDir(dir)
 
+
+# =============================================================================
+# Ошибки генерации (аудит, P2)
+# =============================================================================
+
+suite "waveform_cache: ошибки (аудит P2)":
+  test "битый файл -> wsFailed, а не wsReady с пустыми точками":
+    let dir = freshDir("failed")
+    let path = dir / "bad.wav"
+    writeFile(path, "this is definitely not a RIFF file")
+    defer: removeDir(dir)
+
+    let cache = initWaveformCache(dir, 4)
+    let entry = cache.getWaveform(path, 64)
+    check entry != nil
+
+    let deadline = epochTime() + 3.0
+    while epochTime() < deadline and not cache.waveformFailed(entry):
+      sleep(1)
+
+    check cache.waveformFailed(entry)
+    check not cache.waveformReady(entry)
+    var data: WaveformData
+    check not cache.waveformSnapshot(entry, data)
+    check data.numPoints == 0
+    cache.destroy()
+
+  test "numPoints <= 0 не делит на ноль, а даёт минимальный запрос":
+    let dir = freshDir("zero_points")
+    let path = dir / "a.wav"
+    writeWav(path, 64, 1, false, proc(i: int): float32 = 0.5f)
+    defer: removeDir(dir)
+
+    let cache = initWaveformCache(dir, 4)
+    let entry = cache.getWaveform(path, 0)
+    check entry != nil
+    check entry.numPoints == 1
+
+    let deadline = epochTime() + 3.0
+    while epochTime() < deadline and not cache.waveformReady(entry):
+      sleep(1)
+    check cache.waveformReady(entry)
+    check not cache.waveformFailed(entry)
+    var data: WaveformData
+    check cache.waveformSnapshot(entry, data)
+    check data.numPoints == 1
+    cache.destroy()
+

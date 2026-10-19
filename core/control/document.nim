@@ -206,6 +206,25 @@ proc applyCreateNode(doc: var Document; cmd: ControlCommand): ErrorFrame =
   for p in spec.params:
     node.parameters[p.name] = p.defaultValue
 
+  # Восстановление значений при откате удаления (аудит, P1). Применяются
+  # только параметры, которые описатель ещё знает: если тип изменился, старое
+  # имя восстановить некуда, но откат из-за этого падать не должен.
+  if cmd.parameters.len > 0:
+    for name, value in cmd.parameters:
+      var idx = -1
+      for i, p in spec.params:
+        if p.name == name:
+          idx = i
+          break
+      if idx < 0 or value != value:     # неизвестный параметр или NaN
+        continue
+      var v = value
+      if v < spec.params[idx].minValue:
+        v = spec.params[idx].minValue
+      elif v > spec.params[idx].maxValue:
+        v = spec.params[idx].maxValue
+      node.parameters[name] = v
+
   # Всё проверено — только теперь меняем документ.
   doc.proj.graph.nodes.add node
   doc.stampModified()
@@ -635,6 +654,11 @@ proc snapshotNode*(doc: Document; nodeId: int32):
   var conns: seq[ControlCommand] = @[]
   for conn in doc.proj.graph.connections:
     if conn.srcNodeId == nodeId or conn.dstNodeId == nodeId:
+      # Битая связь (sigType вне перечисления) не станет командой: иначе
+      # `ControlPortKind(conn.sigType)` бросил бы RangeDefect. Такие связи
+      # всё равно отвергает `graph check`, а откат удаления не должен падать.
+      if conn.sigType < 0 or conn.sigType > ord(cpkEvent):
+        continue
       conns.add connect(
         port(int32(conn.srcNodeId), ControlPortKind(conn.sigType),
              int32(conn.srcPortIdx)),
@@ -648,12 +672,40 @@ proc restoreSnapshot*(snap: NodeSnapshot): seq[ControlCommand] =
   ## что было привязано. Порядок важен: сначала нода, потом связи (иначе
   ## откат упрётся в «нет такой ноды»).
   result = @[
-    createNode(snap.node.nodeType, snap.node.name, int32(snap.node.id))
+    # Параметры передаются вместе с нодой: `createNode` сам заполнил бы их
+    # дефолтами описателя и молча потерял правки пользователя (аудит, P1).
+    createNode(snap.node.nodeType, snap.node.name, int32(snap.node.id),
+               snap.node.parameters)
   ]
   for conn in snap.conns:
     result.add conn
   if snap.lanes.len > 0 or snap.states.len > 0:
     result.add restoreNodeState(int32(snap.node.id), snap.lanes, snap.states)
+
+proc disconnectUndo(doc: Document; cmd: ControlCommand): seq[ControlCommand] =
+  ## Обратные команды для `ccDisconnect` — ТОЛЬКО реально снимаемые связи.
+  ##
+  ## Снимок всей ноды здесь неверен по двум причинам:
+  ##   * `restoreSnapshot` начинается с `createNode`, а нода ещё существует —
+  ##     откат падал на `ecAlreadyExists`;
+  ##   * в снимок попадали и оставшиеся связи: их повторный `connect` даёт
+  ##     `ecDuplicateConnection`, и транзакция отката отвергается целиком.
+  ## Поэтому набор восстановления считается тем же предикатом, что и в
+  ## `applyDisconnect`, но ДО правки.
+  for conn in doc.proj.graph.connections:
+    if conn.sigType < 0 or conn.sigType > ord(cpkEvent):
+      continue
+    let samePair = conn.srcNodeId == cmd.src.nodeId and
+                   conn.dstNodeId == cmd.dst.nodeId
+    let sameKind = conn.sigType == ord(cmd.src.kind)
+    if samePair and (not cmd.portSpecified or
+                     (sameKind and conn.srcPortIdx == cmd.src.index and
+                      conn.dstPortIdx == cmd.dst.index)):
+      result.add connect(
+        port(int32(conn.srcNodeId), ControlPortKind(conn.sigType),
+             int32(conn.srcPortIdx)),
+        port(int32(conn.dstNodeId), ControlPortKind(conn.sigType),
+             int32(conn.dstPortIdx)))
 
 proc applyCommandRecording*(doc: var Document; cmd: ControlCommand):
     tuple[frame: ErrorFrame, inverse: seq[ControlCommand]] =
@@ -680,11 +732,12 @@ proc applyCommandRecording*(doc: var Document; cmd: ControlCommand):
       return (frame, @[])
     (frame, @[disconnect(cmd.src, cmd.dst)])
   of ccDisconnect:
-    let snap = doc.snapshotNode(cmd.src.nodeId)
+    # Набор восстановления — ровно снимаемые связи, вычисленный ДО правки.
+    let undo = doc.disconnectUndo(cmd)
     let frame = doc.applyCommand(cmd)
     if not frame.isOk():
       return (frame, @[])
-    (frame, snap.snapshot.restoreSnapshot())
+    (frame, undo)
   of ccSetParameter:
     # Прежнее значение параметра — единственное, что нужно для отката.
     let index = doc.nodeIndexOf(cmd.nodeId)
@@ -696,7 +749,11 @@ proc applyCommandRecording*(doc: var Document; cmd: ControlCommand):
        spec.params.len > 0:
       let paramIdx = spec.paramIndexOf(cmd.paramName, cmd.paramIndex)
       if paramIdx >= 0:
-        let old = doc.proj.graph.nodes[index].parameters[spec.params[paramIdx].name]
+        # `getOrDefault`, а не `[]`: у ноды из старого проекта ключа может не
+        # быть, и `KeyError` ронял control-path вместо `ErrorFrame` (аудит, P1).
+        let specParam = spec.params[paramIdx]
+        let old = doc.proj.graph.nodes[index].parameters.getOrDefault(
+          specParam.name, specParam.defaultValue)
         let frame = doc.applyCommand(cmd)
         if not frame.isOk():
           return (frame, @[])

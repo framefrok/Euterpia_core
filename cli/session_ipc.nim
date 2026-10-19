@@ -17,7 +17,12 @@
 # жива ли сессия, — `ping` по сокету, а не файл: процесс мог умереть, файл
 # остался.
 
-import std/[json, os, posix, strutils]
+import std/[json, os, strutils]
+
+when defined(posix):
+  import std/posix
+else:
+  type SocketHandle* = distinct int
 
 import runtime_session
 
@@ -74,126 +79,159 @@ proc sessionPaths*(projectPath: string): SessionPaths =
     result.statePath = base / ".euterpia.session.json"
   # Путь сокета ограничен `sun_path` (108 байт). Длинный путь проекта в
   # `/tmp` не поместится, поэтому адрес — хэш, а не сам путь.
-  let uid = int(getuid())
-  result.socketPath = "/tmp/euterpia-session-" & $uid & "-" &
-                      toHex(fnv1a(base), 8).toLowerAscii & ".sock"
+  when defined(posix):
+    let uid = int(getuid())
+    result.socketPath = "/tmp/euterpia-session-" & $uid & "-" &
+                        toHex(fnv1a(base), 8).toLowerAscii & ".sock"
+  else:
+    result.socketPath = getTempDir() / ("euterpia-session-" &
+                        toHex(fnv1a(base), 8).toLowerAscii & ".sock")
 
-proc sockAddr(path: string; sa: var Sockaddr_un): bool =
-  if path.len == 0 or path.len >= Sockaddr_un_path_length:
-    return false
-  sa = Sockaddr_un()
-  sa.sun_family = TSa_Family(AF_UNIX)
-  for i in 0 ..< path.len:
-    sa.sun_path[i] = path[i]
-  sa.sun_path[path.len] = '\0'
-  true
-
-proc connectUnix(path: string): tuple[fd: SocketHandle; error: string] =
-  var sa: Sockaddr_un
-  if not sockAddr(path, sa):
-    return (SocketHandle(-1), "слишком длинный путь сокета сессии")
-  let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-  if fd == SocketHandle(-1):
-    return (SocketHandle(-1), "не удалось создать сокет")
-  if connect(fd, cast[ptr SockAddr](addr sa), SockLen(sizeof(sa))) != 0:
-    discard close(fd)
-    return (SocketHandle(-1), "сессия не запущена")
-  (fd, "")
-
-proc sendAll(fd: SocketHandle; data: string): bool =
-  var sent = 0
-  while sent < data.len:
-    let n = send(fd, unsafeAddr data[sent], data.len - sent, 0)
-    if n <= 0:
+when defined(posix):
+  proc sockAddr(path: string; sa: var Sockaddr_un): bool =
+    if path.len == 0 or path.len >= Sockaddr_un_path_length:
       return false
-    sent += n
-  true
+    sa = Sockaddr_un()
+    sa.sun_family = TSa_Family(AF_UNIX)
+    for i in 0 ..< path.len:
+      sa.sun_path[i] = path[i]
+    sa.sun_path[path.len] = '\0'
+    true
 
-proc waitReadable(fd: SocketHandle; timeoutMs: int): bool =
-  var pfd = TPollfd(fd: cint(fd), events: POLLIN, revents: 0)
-  let r = poll(addr pfd, 1, timeoutMs.cint)
-  r > 0 and (pfd.revents and POLLIN) != 0
+  proc connectUnix(path: string): tuple[fd: SocketHandle; error: string] =
+    var sa: Sockaddr_un
+    if not sockAddr(path, sa):
+      return (SocketHandle(-1), "слишком длинный путь сокета сессии")
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    if fd == SocketHandle(-1):
+      return (SocketHandle(-1), "не удалось создать сокет")
+    if connect(fd, cast[ptr SockAddr](addr sa), SockLen(sizeof(sa))) != 0:
+      discard close(fd)
+      return (SocketHandle(-1), "сессия не запущена")
+    (fd, "")
 
-proc recvLine(fd: SocketHandle; timeoutMs: int): tuple[line: string; error: string] =
-  var buffer: array[4096, char]
-  var acc = ""
-  while acc.len < MaxRpcBytes:
-    if not waitReadable(fd, timeoutMs):
-      return ("", "сессия не ответила за " & $timeoutMs & " мс")
-    let n = recv(fd, addr buffer[0], buffer.len, 0)
-    if n <= 0:
-      break
-    for i in 0 ..< n:
-      if buffer[i] == '\n':
-        return (acc, "")
-      acc.add buffer[i]
-  if acc.len == 0:
-    return ("", "пустой ответ сессии")
-  (acc, "")
+  proc sendAll(fd: SocketHandle; data: string): bool =
+    var sent = 0
+    while sent < data.len:
+      let n = send(fd, unsafeAddr data[sent], data.len - sent, 0)
+      if n <= 0:
+        return false
+      sent += n
+    true
 
-proc rpcCall*(socketPath: string; request: JsonNode;
-              timeoutMs: int = DefaultRpcTimeoutMs): RpcResult =
-  ## Один запрос/ответ к демону сессии.
-  let (fd, connError) = connectUnix(socketPath)
-  if fd == SocketHandle(-1):
-    return RpcResult(ok: false, error: connError)
-  defer: discard close(fd)
+  proc waitReadable(fd: SocketHandle; timeoutMs: int): bool =
+    var pfd = TPollfd(fd: cint(fd), events: POLLIN, revents: 0)
+    let r = poll(addr pfd, 1, timeoutMs.cint)
+    r > 0 and (pfd.revents and POLLIN) != 0
 
-  if not sendAll(fd, $request & "\n"):
-    return RpcResult(ok: false, error: "не удалось отправить запрос сессии")
+  proc recvLine(fd: SocketHandle; timeoutMs: int): tuple[line: string; error: string] =
+    var buffer: array[4096, char]
+    var acc = ""
+    while acc.len < MaxRpcBytes:
+      if not waitReadable(fd, timeoutMs):
+        return ("", "сессия не ответила за " & $timeoutMs & " мс")
+      let n = recv(fd, addr buffer[0], buffer.len, 0)
+      if n <= 0:
+        break
+      for i in 0 ..< n:
+        if buffer[i] == '\n':
+          return (acc, "")
+        acc.add buffer[i]
+    if acc.len == 0:
+      return ("", "пустой ответ сессии")
+    (acc, "")
 
-  let (line, recvError) = recvLine(fd, timeoutMs)
-  if recvError.len > 0:
-    return RpcResult(ok: false, error: recvError)
+  proc rpcCall*(socketPath: string; request: JsonNode;
+                timeoutMs: int = DefaultRpcTimeoutMs): RpcResult =
+    ## Один запрос/ответ к демону сессии.
+    let (fd, connError) = connectUnix(socketPath)
+    if fd == SocketHandle(-1):
+      return RpcResult(ok: false, error: connError)
+    defer: discard close(fd)
 
-  try:
-    result.response = parseJson(line)
-  except CatchableError:
-    return RpcResult(ok: false, error: "ответ сессии — не JSON")
-  result.ok = result.response{"ok"}.getBool(false)
-  if not result.ok:
-    result.error = result.response{"error"}.getStr("сессия отклонила команду")
+    if not sendAll(fd, $request & "\n"):
+      return RpcResult(ok: false, error: "не удалось отправить запрос сессии")
 
-proc listenUnix*(path: string): tuple[fd: SocketHandle; error: string] =
-  ## Создать слушающий сокет демона. Старый файл удаляется: после падения
-  ## процесса он остаётся и без unlink `bind` вернул бы EADDRINUSE.
-  discard unlink(path.cstring)
-  var sa: Sockaddr_un
-  if not sockAddr(path, sa):
-    return (SocketHandle(-1), "слишком длинный путь сокета сессии")
-  let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-  if fd == SocketHandle(-1):
-    return (SocketHandle(-1), "не удалось создать сокет")
-  if bindSocket(fd, cast[ptr SockAddr](addr sa), SockLen(sizeof(sa))) != 0:
-    discard close(fd)
-    return (SocketHandle(-1), "не удалось занять сокет сессии: " & path)
-  discard chmod(path.cstring, Mode(0o600))
-  if listen(fd, 8) != 0:
-    discard close(fd)
-    return (SocketHandle(-1), "не удалось слушать сокет сессии")
-  (fd, "")
+    let (line, recvError) = recvLine(fd, timeoutMs)
+    if recvError.len > 0:
+      return RpcResult(ok: false, error: recvError)
 
-proc acceptClient*(listenFd: SocketHandle; timeoutMs: int): SocketHandle =
-  ## Принять соединение или вернуть -1 по таймауту. Таймаут нужен, чтобы
-  ## демон успевал продвигать транспорт (`tickRuntimeSession`).
-  var pfd = TPollfd(fd: cint(listenFd), events: POLLIN, revents: 0)
-  let r = poll(addr pfd, 1, timeoutMs.cint)
-  if r <= 0 or (pfd.revents and POLLIN) == 0:
-    return SocketHandle(-1)
-  accept(listenFd, nil, nil)
+    try:
+      result.response = parseJson(line)
+    except CatchableError:
+      return RpcResult(ok: false, error: "ответ сессии — не JSON")
+    result.ok = result.response{"ok"}.getBool(false)
+    if not result.ok:
+      result.error = result.response{"error"}.getStr("сессия отклонила команду")
 
-proc readRequest*(fd: SocketHandle; timeoutMs: int): tuple[request: JsonNode;
-                                                            error: string] =
-  let (line, err) = recvLine(fd, timeoutMs)
-  if err.len > 0:
-    return (nil, err)
-  try:
-    result.request = parseJson(line)
-  except CatchableError:
-    return (nil, "запрос — не JSON")
+  proc listenUnix*(path: string): tuple[fd: SocketHandle; error: string] =
+    ## Создать слушающий сокет демона. Старый файл удаляется: после падения
+    ## процесса он остаётся и без unlink `bind` вернул бы EADDRINUSE.
+    discard unlink(path.cstring)
+    var sa: Sockaddr_un
+    if not sockAddr(path, sa):
+      return (SocketHandle(-1), "слишком длинный путь сокета сессии")
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    if fd == SocketHandle(-1):
+      return (SocketHandle(-1), "не удалось создать сокет")
+    if bindSocket(fd, cast[ptr SockAddr](addr sa), SockLen(sizeof(sa))) != 0:
+      discard close(fd)
+      return (SocketHandle(-1), "не удалось занять сокет сессии: " & path)
+    discard chmod(path.cstring, Mode(0o600))
+    if listen(fd, 8) != 0:
+      discard close(fd)
+      return (SocketHandle(-1), "не удалось слушать сокет сессии")
+    (fd, "")
 
-proc writeResponse*(fd: SocketHandle; response: JsonNode): bool =
-  sendAll(fd, $response & "\n")
+  proc acceptClient*(listenFd: SocketHandle; timeoutMs: int): SocketHandle =
+    ## Принять соединение или вернуть -1 по таймауту. Таймаут нужен, чтобы
+    ## демон успевал продвигать транспорт (`tickRuntimeSession`).
+    var pfd = TPollfd(fd: cint(listenFd), events: POLLIN, revents: 0)
+    let r = poll(addr pfd, 1, timeoutMs.cint)
+    if r <= 0 or (pfd.revents and POLLIN) == 0:
+      return SocketHandle(-1)
+    accept(listenFd, nil, nil)
+
+  proc readRequest*(fd: SocketHandle; timeoutMs: int): tuple[request: JsonNode;
+                                                              error: string] =
+    let (line, err) = recvLine(fd, timeoutMs)
+    if err.len > 0:
+      return (nil, err)
+    try:
+      result.request = parseJson(line)
+    except CatchableError:
+      return (nil, "запрос — не JSON")
+
+  proc writeResponse*(fd: SocketHandle; response: JsonNode): bool =
+    sendAll(fd, $response & "\n")
+
+else:
+  proc rpcCall*(socketPath: string; request: JsonNode;
+                timeoutMs: int = DefaultRpcTimeoutMs): RpcResult =
+    ## Windows: runtime-сессия требует Unix-domain socket (#407).
+    discard socketPath
+    discard request
+    discard timeoutMs
+    RpcResult(ok: false, error: "runtime-сессия поддерживается только на POSIX")
+
+  proc listenUnix*(path: string): tuple[fd: SocketHandle; error: string] =
+    (SocketHandle(-1), "runtime-сессия поддерживается только на POSIX")
+
+  proc acceptClient*(listenFd: SocketHandle; timeoutMs: int): SocketHandle =
+    discard listenFd
+    discard timeoutMs
+    SocketHandle(-1)
+
+  proc readRequest*(fd: SocketHandle; timeoutMs: int): tuple[request: JsonNode;
+                                                              error: string] =
+    discard fd
+    discard timeoutMs
+    (nil, "runtime-сессия поддерживается только на POSIX")
+
+  proc writeResponse*(fd: SocketHandle; response: JsonNode): bool =
+    discard fd
+    discard response
+    false
 
 # =============================================================================
 # Файл состояния: адрес сокета и параметры сессии
@@ -240,7 +278,11 @@ proc removeSessionInfo*(paths: SessionPaths) =
       removeFile(paths.statePath)
   except CatchableError:
     discard
-  discard unlink(paths.socketPath.cstring)
+  when defined(posix):
+    discard unlink(paths.socketPath.cstring)
+  else:
+    if fileExists(paths.socketPath):
+      removeFile(paths.socketPath)
 
 proc loadSessionInfo*(projectPath: string;
                       timeoutMs: int = 300): SessionInfo =

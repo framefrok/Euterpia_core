@@ -23,7 +23,7 @@
 # Строки здесь допустимы: это control-path, а не audio-путь. В audio-кольцо
 # эти команды не кладутся никогда.
 
-import std/[json]
+import std/[json, algorithm, tables]
 
 import project
 
@@ -116,6 +116,12 @@ type
         ## Пустое имя — имя типа (как в `node add osc`).
       newNodeId*: int32
         ## Желаемый id новой ноды; 0 — назначает документ сам (максимум + 1).
+      parameters*: Table[string, float32]
+        ## Значения параметров, которые нужно восстановить вместе с нодой.
+        ##
+        ## Пустая таблица — обычное создание: значения берутся из описателя.
+        ## Непустая — ОТКАТ удаления: без неё undo возвращал ноду с
+        ## дефолтами и молча терял правки пользователя (аудит, P1).
     of ccConnect, ccDisconnect:
       src*: PortSelector
       dst*: PortSelector
@@ -220,11 +226,15 @@ proc newCommand*(kind: ControlCommandKind; id: uint32 = 0'u32): ControlCommand =
   result = ControlCommand(id: id, apiVersion: ControlApiVersion, kind: kind)
 
 proc createNode*(nodeType: string; name: string = "";
-                 newNodeId: int32 = 0; id: uint32 = 0'u32): ControlCommand =
+                 newNodeId: int32 = 0;
+                 parameters: Table[string, float32] =
+                   default(Table[string, float32]);
+                 id: uint32 = 0'u32): ControlCommand =
   result = newCommand(ccCreateNode, id)
   result.nodeType = nodeType
   result.name = name
   result.newNodeId = newNodeId
+  result.parameters = parameters
 
 proc deleteNode*(nodeId: int32; id: uint32 = 0'u32): ControlCommand =
   result = newCommand(ccDeleteNode, id)
@@ -436,6 +446,15 @@ proc toJson*(cmd: ControlCommand): JsonNode =
     result["nodeType"] = %cmd.nodeType
     if cmd.name.len > 0: result["name"] = %cmd.name
     if cmd.newNodeId != 0: result["newNodeId"] = %cmd.newNodeId
+    if cmd.parameters.len > 0:
+      # Канонический порядок ключей: история и скрипты не должны зависеть от
+      # порядка вставки в Table (как в project.toJson, #390).
+      var params = newJObject()
+      var keys: seq[string] = @[]
+      for k in cmd.parameters.keys: keys.add k
+      keys.sort()
+      for k in keys: params[k] = %cmd.parameters.getOrDefault(k)
+      result["parameters"] = params
   of ccDeleteNode:
     result["nodeId"] = %cmd.nodeId
   of ccConnect, ccDisconnect:
@@ -545,9 +564,15 @@ proc fromJson*(node: JsonNode; cmd: var ControlCommand): bool =
 
   case kind
   of ccCreateNode:
+    var params = default(Table[string, float32])
+    if node.hasKey("parameters") and node["parameters"].kind == JObject:
+      for k, v in node["parameters"]:
+        if v.kind == JFloat: params[k] = float32(v.fnum)
+        elif v.kind == JInt: params[k] = float32(v.num)
     cmd = createNode(field(node, "nodeType", newJString("")).getStr,
                      field(node, "name", newJString("")).getStr,
-                     int32(field(node, "newNodeId", newJInt(0)).getInt), id)
+                     int32(field(node, "newNodeId", newJInt(0)).getInt),
+                     params, id)
   of ccDeleteNode:
     cmd = deleteNode(int32(node["nodeId"].getInt), id)
   of ccSetParameter:

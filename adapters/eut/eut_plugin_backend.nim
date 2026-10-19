@@ -61,6 +61,43 @@ proc statusToPlugin(status: uint32): PluginProcessStatus {.inline.} =
   else:
     ppsContinue
 
+proc bindEutAudioBuffer*(buf: PAudioBuffer;
+                         channelPtrs: var array[MaxAudioChannels, ptr cfloat];
+                         outBuf: var EutAudioBuffer; portIdx: int) =
+  ## Описание одного аудиопорта для EUT-плагина.
+  ##
+  ## Core — стерео (issue #401), а EUT ABI принимает `float**` и
+  ## `channelCount` (adapters/eut/eut_plugin.nim). Раньше адаптер заполнял
+  ## только `[0]` и жёстко ставил `channelCount: 1`: нативный `.eut` плагин
+  ## получал левый канал, а правый оставался с мусором прошлого блока
+  ## (аудит, P3).
+  ##
+  ## Раскладка читается из `buf.layout` (issue #392), эвристика
+  ## `stride >= frames` — только фолбэк для `alAuto`. Смещение канала:
+  ## planar — `ch * stride`, interleaved — `ch`.
+  var chCount = 0'u32
+  if not buf.isNil and not buf.data.isNil and buf.channels > 0:
+    let n = min(int(buf.channels), MaxAudioChannels)
+    let frames = int(buf.frames)
+    var stride = int(buf.stride)
+    if stride <= 0:
+      stride = if frames > 0: frames else: n
+    let planar =
+      case buf.layout
+      of alPlanar: true
+      of alInterleaved: false
+      of alAuto: stride >= max(frames, 1)
+    for ch in 0 ..< n:
+      let offset = if planar: ch * stride else: ch
+      channelPtrs[ch] = cast[ptr cfloat](addr buf.data[offset])
+    chCount = uint32(n)
+
+  outBuf = EutAudioBuffer(
+    structSize: csize_t(sizeof(EutAudioBuffer)),
+    portIndex: uint32(portIdx),
+    channelCount: chCount,
+    data: cast[ptr UncheckedArray[ptr cfloat]](addr channelPtrs[0]))
+
 proc flagsToPlugin(flags: uint32): set[PluginParamFlag] {.inline.} =
   if (flags and EUT_PARAM_F_AUTOMATABLE) != 0'u32: result.incl ppfAutomatable
   if (flags and EUT_PARAM_F_MODULATABLE) != 0'u32: result.incl ppfModulatable
@@ -285,8 +322,8 @@ proc eutProcess(
 
   var audioIns: array[MaxAudioPorts, EutAudioBuffer]
   var audioOuts: array[MaxAudioPorts, EutAudioBuffer]
-  var inChans: array[MaxAudioPorts, array[2, ptr cfloat]]
-  var outChans: array[MaxAudioPorts, array[2, ptr cfloat]]
+  var inChans: array[MaxAudioPorts, array[MaxAudioChannels, ptr cfloat]]
+  var outChans: array[MaxAudioPorts, array[MaxAudioChannels, ptr cfloat]]
   var inCount = 0
   var outCount = 0
 
@@ -294,21 +331,9 @@ proc eutProcess(
     inCount = min(int(audio.inputCount), MaxAudioPorts)
     outCount = min(int(audio.outputCount), MaxAudioPorts)
     for i in 0 ..< inCount:
-      let b = audio.inputs[i]
-      if not b.isNil and not b.data.isNil:
-        inChans[i][0] = cast[ptr cfloat](b.data)
-      audioIns[i] = EutAudioBuffer(
-        structSize: csize_t(sizeof(EutAudioBuffer)),
-        portIndex: uint32(i), channelCount: 1,
-        data: cast[ptr UncheckedArray[ptr cfloat]](addr inChans[i][0]))
+      bindEutAudioBuffer(audio.inputs[i], inChans[i], audioIns[i], i)
     for i in 0 ..< outCount:
-      let b = audio.outputs[i]
-      if not b.isNil and not b.data.isNil:
-        outChans[i][0] = cast[ptr cfloat](b.data)
-      audioOuts[i] = EutAudioBuffer(
-        structSize: csize_t(sizeof(EutAudioBuffer)),
-        portIndex: uint32(i), channelCount: 1,
-        data: cast[ptr UncheckedArray[ptr cfloat]](addr outChans[i][0]))
+      bindEutAudioBuffer(audio.outputs[i], outChans[i], audioOuts[i], i)
 
   var inBuf: array[MaxBlockEvents, EutEvent]
   var outBuf: array[MaxBlockEvents, EutEvent]

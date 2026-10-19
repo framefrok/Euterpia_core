@@ -21,6 +21,7 @@ import euterpia_version
 # мимо CLI и сравнивает результат (критерий #139 — один путь исполнения).
 import project
 import handles
+import audio_file_io
 import control/error_frame
 import control/commands
 import control/document
@@ -735,13 +736,15 @@ suite "CLI: проект — init/show/set/validate (#89)":
 
     check nonEmptyLines(runCli(["__complete", "--", "proj"]).output) ==
           @["project"]
-    check nonEmptyLines(runCli(["__complete", "--", "project", ""]).output) ==
-          @["show", "set", "validate"]
+    let projectCandidates =
+      nonEmptyLines(runCli(["__complete", "--", "project", ""]).output)
+    for sub in ["show", "set", "validate", "recover"]:
+      check sub in projectCandidates
     check "--tempo" in nonEmptyLines(runCli(["__complete", "--", "init", "--tem"]).output)
 
     let human = runCli(["help", "project"])
     check human.code == 0
-    check "show | set | validate" in human.output
+    check "show | set | validate | recover" in human.output
     check "project set" in human.output
 
     let machine = parseJson(runCli(["help", "project", "--json"]).output)
@@ -750,7 +753,7 @@ suite "CLI: проект — init/show/set/validate (#89)":
     var subs: seq[string] = @[]
     for sub in machine["subcommands"]:
       subs.add sub.getStr
-    check subs == @["show", "set", "validate"]
+    check subs == @["show", "set", "validate", "recover"]
 
 # =============================================================================
 # #258: настройки окружения
@@ -2185,7 +2188,12 @@ suite "CLI: спецификация команд — один источник 
       let r = runCliIn(specDir, @["--json"] & args)
       # Код НЕ проверяем: отказ (например, `analyze` несуществующего файла)
       # тоже часть контракта — у отказа свои поля (`error`, `errorCode`).
-      let node = parseJson(r.output)
+      # Последняя строка — конверт: у `midi monitor` перед ним идёт NDJSON
+      # событий, и проверять надо именно итог.
+      let lines = nonEmptyLines(r.output)
+      if lines.len == 0:
+        return @[]
+      let node = parseJson(lines[^1])
       for key in node.keys:
         result.add key
 
@@ -2197,9 +2205,14 @@ suite "CLI: спецификация команд — один источник 
     # Ноты звучат только через нотную ноду: партитура без `euterpia.notes` в
     # графе — честный отказ рендера, а не тишина.
     check runCliIn(specDir, ["node", "add", "notes", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["node", "add", "metronome", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["node", "add", "mix", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["connect", "2:out", "5:in", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["connect", "4:out", "5:in", "spec.eproj"]).code == 0
     check runCliIn(specDir, ["connect", "3:event:0", "1:event:0",
                              "spec.eproj"]).code == 0
     writeFile(specDir / "spec.notes", "c4/4 d e f\n")
+    writeFile(specDir / "spec.batch", "spec.eproj b1.wav --seconds 1\n")
     check runCliIn(specDir, ["notation", "import", "spec.notes", "--file",
                              "spec.eproj"]).code == 0
     let rendered = runCliIn(specDir, ["render", "spec.eproj", "spec.wav",
@@ -2210,20 +2223,34 @@ suite "CLI: спецификация команд — один источник 
       ("init", @[@["init", "fresh.eproj", "--force"]]),
       ("project", @[@["project", "show", "spec.eproj"],
                     @["project", "set", "spec.eproj", "tempo", "100"],
-                    @["project", "validate", "spec.eproj"]]),
-      ("midi", @[@["midi", "spec.eproj", "--out", "spec.mid"]]),
+                    @["project", "validate", "spec.eproj"],
+                    @["project", "recover", "spec.eproj", "--list"]]),
+      ("midi", @[@["midi", "spec.eproj", "--out", "spec.mid"],
+                 @["midi", "import", "spec.eproj", "spec.mid", "--dry-run"],
+                 @["midi", "list"],
+                 @["midi", "monitor", "--seconds", "0.05"]]),
+      ("metronome", @[@["metronome", "spec.eproj", "on"]]),
+      ("automation", @[@["automation", "add", "spec.eproj", "--node", "2",
+                          "--param", "gain", "--tick", "0", "--value", "-6"],
+                        @["automation", "list", "spec.eproj"],
+                        @["automation", "rm", "spec.eproj", "--node", "2",
+                          "--param", "gain", "--tick", "0"],
+                        @["automation", "clear", "spec.eproj"]]),
       ("node", @[@["node", "list", "spec.eproj"], @["node", "types"],
                  @["node", "show", "1", "spec.eproj"],
                  @["node", "add", "gain", "spec.eproj"],
                  @["node", "rm", "4", "spec.eproj"]]),
-      ("connect", @[@["connect", "2:out", "2:in", "spec.eproj"]]),
+      ("connect", @[@["connect", "2:out", "2:in", "spec.eproj"],
+                    @["connect", "6:out", "5:in", "spec.eproj"]]),
       ("disconnect", @[@["disconnect", "2", "2", "spec.eproj"]]),
       ("param", @[@["param", "list", "1", "spec.eproj"],
                   @["param", "get", "1", "freq", "spec.eproj"],
                   @["param", "set", "1", "freq", "330", "spec.eproj"]]),
       ("graph", @[@["graph", "check", "spec.eproj"]]),
       ("render", @[@["render", "spec.eproj", "spec2.wav", "--seconds", "1"],
-                   @["render", "spec.eproj", "--seconds", "1", "--dry-run"]]),
+                   @["render", "spec.eproj", "--seconds", "1", "--dry-run"],
+                   @["render", "spec.eproj", "--stems", "stems", "--seconds", "1"],
+                   @["render", "--batch", "spec.batch", "--out", "bout"]]),
       ("notation", @[@["notation", "check", "spec.notes"],
                      @["notation", "import", "spec.notes", "--file",
                        "spec.eproj", "--name", "Second"]]),
@@ -2887,8 +2914,11 @@ suite "CLI: master — сдача материала (#209)":
     check raw.find("IART") >= 0
     check raw.find("Test Song") >= 0
     check raw.find("Unit") >= 0
-    # 24 бита в fmt-чанке (смещение 34, little-endian).
-    check int(uint8(raw[34])) == 24
+    # 24 бита в fmt-чанке. Смещение ищется по маркеру, а не жёстко:
+    # перед `fmt ` писатель резервирует `JUNK` под будущий `ds64` (RF64).
+    let fmtPos = raw.find("fmt ")
+    check fmtPos >= 0
+    check int(uint8(raw[fmtPos + 8 + 14])) == 24
 
   test "проект рендерится в 32-бит и мастерится одной командой":
     let dir = getTempDir() / "euterpia_cli_master_proj"
@@ -2914,3 +2944,519 @@ suite "CLI: master — сдача материала (#209)":
     let r = runCli(["master", tone, "--meta", "nope=1", "--json"])
     check r.code == 1
     check parseJson(r.output)["error"]["message"].getStr.contains("nope")
+
+# =============================================================================
+# MIDI-порты и монитор (#93)
+# =============================================================================
+#
+# Тест чёрный и намеренно не требует MIDI-железа: главное утверждение —
+# команда не падает и говорит правду, даже когда librtmidi нет. На машине с
+# портами проверяется форма, а не их количество.
+
+suite "CLI: MIDI — порты и монитор (#93)":
+  test "midi list: код 0 и массив портов независимо от наличия librtmidi":
+    let r = runCli(["midi", "list", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["ok"].getBool
+    check node["backend"].getStr == "rtmidi"
+    check node["inputs"].kind == JArray
+    check node["outputs"].kind == JArray
+    # Нет адаптера — причина названа данными, а не спрятана.
+    if not fileExists("/usr/lib/librtmidi.so") and
+       not fileExists("/usr/lib/librtmidi.so.6"):
+      check node["initError"].getStr.len > 0
+
+  test "midi list: человекочитаемый вывод не путает «нет портов» с ошибкой":
+    let r = runCli(["midi", "list"])
+    check r.code == 0
+    check r.errput.len == 0
+    check r.output.len > 0
+
+  test "midi monitor --seconds: завершается сам, NDJSON парсится построчно":
+    let r = runCli(["midi", "monitor", "--seconds", "0.05", "--json"])
+    check r.code == 0
+    let lines = nonEmptyLines(r.output)
+
+
+    check lines.len >= 1
+    # Каждая строка — самостоятельный JSON, последняя — конверт команды.
+    for line in lines:
+      discard parseJson(line)
+    let last = parseJson(lines[^1])
+    check last["schema"].getInt == 1
+    check last["command"].getStr == "midi"
+    check last.hasKey("events")
+
+  test "midi monitor: неверный канал — код 1 и подсказка":
+    let r = runCli(["midi", "monitor", "--channel", "17", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("1…16")
+
+  test "midi monitor: неизвестный ключ — код 1":
+    let r = runCli(["midi", "monitor", "--nope", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("--nope")
+
+
+# =============================================================================
+# Запись входа (#94)
+# =============================================================================
+
+suite "CLI: record — запись входа (#94)":
+  let dir = getTempDir() / "euterpia_cli_record"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  test "record: пишет WAV или честно отказывает кодом 2 без устройства":
+    let outPath = dir / "take.wav"
+    let r = runCli(["record", outPath, "--seconds", "0.05", "--json"])
+    # Машина с устройством запишет файл; машина без входа — код 2 и
+    # сообщение. Паника/код 3 запрещены в обоих случаях.
+    check r.code in [0, 2]
+    let node = parseJson(r.output)
+    if r.code == 0:
+      check node["ok"].getBool
+      check node["frames"].getInt > 0
+      check node["channels"].getInt == 1
+      check fileExists(outPath)
+      # Заголовок WAV читается тем же анализатором, что и любой файл.
+      # Тишина — валидный дефект для `analyze` (код 1), но файл обязан
+      # разбираться: метрики и кадры на месте.
+      let analysed = runCli(["analyze", outPath, "--json"])
+      check analysed.code in [0, 1]
+      check parseJson(analysed.output)["metrics"]["frames"].getInt > 0
+    else:
+      check node["error"]["kind"].getStr == "env"
+      check not fileExists(outPath)
+
+  test "record: моно/стерео — единственные допустимые ширины":
+    let bad = runCli(["record", dir / "bad.wav", "--channels", "3", "--json"])
+    check bad.code == 1
+    check parseJson(bad.output)["error"]["message"].getStr.contains("1..2")
+
+  test "record: сжатый выход отвергается до открытия устройства":
+    let r = runCli(["record", dir / "take.mp3", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("WAV")
+
+  test "record: путь обязателен и не угадывается":
+    let r = runCli(["record", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("файл записи")
+
+  test "record: неверный --input-device — ошибка использования":
+    let r = runCli(["record", dir / "take.wav", "--input-device", "x",
+                    "--json"])
+    check r.code == 1
+
+# =============================================================================
+# Стемы и батч (#108)
+# =============================================================================
+
+suite "CLI: render — стемы и батч (#108)":
+  let dir = getTempDir() / "euterpia_cli_stems"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  # Фикстура: два инструмента, две нотные ноды, микшер и две дорожки.
+  # Собирается CLI-командами, поэтому тест не зависит от compositions/.
+  check runCliIn(dir, ["init", "p.eproj"]).code == 0
+  for node in ["piano", "notes", "piano", "notes", "mix"]:
+    check runCliIn(dir, ["node", "add", node, "p.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "2:event:0", "1:event:0", "p.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "4:event:0", "3:event:0", "p.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "1:out", "5:in", "p.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "3:out", "5:in", "p.eproj"]).code == 0
+  writeFile(dir / "a.notes", "c4/4 d e f\n")
+  writeFile(dir / "b.notes", "g3/2 a b\n")
+  check runCliIn(dir, ["notation", "import", "a.notes", "--file", "p.eproj",
+                       "--name", "A"]).code == 0
+  check runCliIn(dir, ["notation", "import", "b.notes", "--file", "p.eproj",
+                       "--name", "B", "--track", "1"]).code == 0
+
+  test "стемы: по файлу на дорожку, сумма совпадает с мастером":
+    let r = runCliIn(dir, ["render", "p.eproj", "master.wav", "--seconds",
+                           "0.2", "--json"])
+    check r.code == 0
+    let masterPath = dir / "master.wav"
+    check fileExists(masterPath)
+
+    let s = runCliIn(dir, ["render", "p.eproj", "--stems", "stems", "--seconds",
+                           "0.2", "--json"])
+    check s.code == 0
+    let node = parseJson(s.output)
+    check node["ok"].getBool
+    check node["stems"].len == 2
+    check node["stemsFailed"].getInt == 0
+    for item in node["stems"]:
+      check fileExists(dir / item["file"].getStr)
+
+    # Критерий #108: линейная сумма стемов = мастер (1 LSb 16-бита).
+    let master = readAllAudioFile(masterPath)
+    var sum = newSeq[float32](master.samples.len)
+    for item in node["stems"]:
+      let stem = readAllAudioFile(dir / item["file"].getStr)
+      check stem.samples.len == master.samples.len
+      for i in 0 ..< min(sum.len, stem.samples.len):
+        sum[i] += stem.samples[i]
+    var maxDiff = 0.0'f32
+    for i in 0 ..< master.samples.len:
+      let d = abs(master.samples[i] - sum[i])
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 1.0'f32 / 32768.0'f32
+
+  test "стемы: --name-template и отсутствие затирания имён":
+    let r = runCliIn(dir, ["render", "p.eproj", "--stems", "tpl",
+                           "--name-template", "same.wav", "--seconds", "0.1",
+                           "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["stems"].len == 2
+    check node["stems"][0]["file"].getStr != node["stems"][1]["file"].getStr
+    check node["stems"][0]["file"].getStr.endsWith(".wav")
+
+  test "--stems и --solo-track несовместимы":
+    let r = runCliIn(dir, ["render", "p.eproj", "--stems", "x",
+                           "--solo-track", "1", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("solo-track")
+
+  test "батч: строки рендерятся в --out, отчёт по каждому":
+    writeFile(dir / "batch.txt",
+              "# два варианта одного проекта\n" &
+              "p.eproj one.wav --seconds 0.1\n" &
+              "p.eproj two.wav --seconds 0.1\n")
+    let r = runCliIn(dir, ["render", "--batch", "batch.txt", "--out", "batch",
+                           "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["ok"].getBool
+    check node["batchTotal"].getInt == 2
+    check node["batchFailed"].getInt == 0
+    check fileExists(dir / "batch" / "one.wav")
+    check fileExists(dir / "batch" / "two.wav")
+
+  test "батч: ошибка одной строки даёт ненулевой код и общий отчёт":
+    writeFile(dir / "bad.txt", "p.eproj ok.wav --seconds 0.1\nнет-такого.eproj\n")
+    let r = runCliIn(dir, ["render", "--batch", "bad.txt", "--out", "badout",
+                           "--json"])
+    check r.code in [1, 2]
+    let node = parseJson(r.output)
+    check not node["ok"].getBool
+    check node["batchFailed"].getInt == 1
+    check node["batch"].len == 2
+    check fileExists(dir / "badout" / "ok.wav")
+
+
+
+# =============================================================================
+# Импорт SMF (#111)
+# =============================================================================
+
+suite "CLI: MIDI import — SMF в клипы проекта (#111)":
+  let dir = getTempDir() / "euterpia_cli_midi_import"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  # Источник: проект с двумя дорожками и нотами. Г экспорт → импорт.
+  check runCliIn(dir, ["init", "src.eproj"]).code == 0
+  writeFile(dir / "a.notes", "c4/4 d e f\n")
+  writeFile(dir / "b.notes", "g3/2 a b\n")
+  check runCliIn(dir, ["notation", "import", "a.notes", "--file", "src.eproj",
+                       "--name", "A"]).code == 0
+  check runCliIn(dir, ["notation", "import", "b.notes", "--file", "src.eproj",
+                       "--name", "B", "--track", "1"]).code == 0
+  check runCliIn(dir, ["midi", "src.eproj", "--out", "src.mid"]).code == 0
+  check runCliIn(dir, ["init", "dst.eproj"]).code == 0
+
+  test "импорт создаёт дорожки и клипы; round-trip сохраняет ноты":
+    let r = runCliIn(dir, ["midi", "import", "dst.eproj", "src.mid", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["importedTracks"].getInt == 2
+    check node["importedNotes"].getInt == 7
+    check node["ppq"]["source"].getInt == 960
+    check node["ignoredEvents"].getInt == 0
+
+    # Обратный экспорт: число нот совпадает — структура не потерялась.
+    let back = runCliIn(dir, ["midi", "dst.eproj", "--out", "dst.mid", "--json"])
+    check back.code == 0
+    check parseJson(back.output)["notes"].getInt == 7
+
+  test "импорт — одна транзакция истории: undo возвращает пустой проект":
+    # dst.eproj уже содержит импорт из предыдущего теста.
+    let r = runCliIn(dir, ["undo", "dst.eproj", "--json"])
+    check r.code == 0
+    check parseJson(r.output)["description"].getStr.contains("midi import")
+    let shown = runCliIn(dir, ["project", "show", "dst.eproj", "--json"])
+    check shown.code == 0
+    check parseJson(shown.output)["sequencer"]["tracks"].len == 0
+
+  test "--track при нескольких дорожках SMF — явный отказ":
+    check runCliIn(dir, ["init", "one.eproj"]).code == 0
+    let r = runCliIn(dir, ["midi", "import", "one.eproj", "src.mid",
+                           "--track", "0", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["hint"].getStr.contains("--map")
+
+  test "--map кладёт две SMF-дорожки в одну дорожку двумя клипами":
+    check runCliIn(dir, ["init", "mapped.eproj"]).code == 0
+    let r = runCliIn(dir, ["midi", "import", "mapped.eproj", "src.mid",
+                           "--map", "1:0", "--map", "2:0", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["importedTracks"].getInt == 2
+    check node["map"][0]["projectTrack"].getInt == 0
+    check node["map"][1]["projectTrack"].getInt == 0
+    check node["map"][0]["clip"].getInt == 0
+    check node["map"][1]["clip"].getInt == 1
+
+  test "битый SMF не меняет проект":
+    writeFile(dir / "bad.mid", "not a midi file")
+    check runCliIn(dir, ["init", "keep.eproj"]).code == 0
+    let before = readFile(dir / "keep.eproj")
+    let r = runCliIn(dir, ["midi", "import", "keep.eproj", "bad.mid", "--json"])
+    check r.code == 1
+    check readFile(dir / "keep.eproj") == before
+
+# =============================================================================
+# Метроном (#112)
+# =============================================================================
+
+suite "CLI: metronome — клик по транспорту (#112)":
+  let dir = getTempDir() / "euterpia_cli_metronome"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  check runCliIn(dir, ["init", "m.eproj"]).code == 0
+  check runCliIn(dir, ["node", "add", "metronome", "m.eproj"]).code == 0
+
+  test "metronome on включает ноду и пишет параметры в проект":
+    let r = runCliIn(dir, ["metronome", "m.eproj", "on", "--sound",
+                           "woodblock", "--level", "0.7", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["enabled"].getBool
+    check node["sound"].getStr == "woodblock"
+    check abs(node["accent"].getFloat - 0.7) < 0.01
+    check node["applied"].getBool
+
+    # Параметры действительно в файле: читаем через Query API команды.
+    let shown = runCliIn(dir, ["param", "get", "1", "enabled", "m.eproj",
+                               "--json"])
+    check shown.code == 0
+    check parseJson(shown.output)["param"]["value"].getFloat == 1.0
+
+  test "неизвестный звук — код 1 со списком":
+    let r = runCliIn(dir, ["metronome", "m.eproj", "on", "--sound", "gong",
+                           "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["hint"].getStr.contains("click")
+
+  test "без ноды метронома — код 1 и подсказка node add":
+    check runCliIn(dir, ["init", "empty.eproj"]).code == 0
+    let r = runCliIn(dir, ["metronome", "empty.eproj", "on", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["hint"].getStr.contains("node add")
+
+  test "правка метронома отменяется одной записью истории":
+    let r = runCliIn(dir, ["undo", "m.eproj", "--json"])
+    check r.code == 0
+    check parseJson(r.output)["description"].getStr.contains("metronome")
+
+  test "record --count-in требует проект: кликать нечем":
+    let r = runCli(["record", dir / "take.wav", "--count-in", "1", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["hint"].getStr.contains("metronome")
+
+  test "record --count-in без ноды метронома — код 1":
+    let r = runCli(["record", dir / "take.wav", "--project",
+                    dir / "empty.eproj", "--count-in", "1", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("метроном")
+
+
+# =============================================================================
+# Автоматизация (#114)
+# =============================================================================
+
+suite "CLI: automation — линии параметров (#114)":
+  let dir = getTempDir() / "euterpia_cli_automation"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  check runCliIn(dir, ["init", "a.eproj"]).code == 0
+  check runCliIn(dir, ["node", "add", "osc", "a.eproj"]).code == 0
+  check runCliIn(dir, ["node", "add", "gain", "a.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "1:out", "2:in", "a.eproj"]).code == 0
+  check runCliIn(dir, ["param", "set", "2", "gain", "-20", "a.eproj"]).code == 0
+
+  test "add/list/rm/clear: точки сортируются, повтор заменяет":
+    let add = runCliIn(dir, ["automation", "add", "a.eproj", "--node", "2",
+                             "--param", "gain", "--tick", "960",
+                             "--value", "0", "--curve", "smooth", "--json"])
+    check add.code == 0
+    let n = parseJson(add.output)
+    check n["points"].getInt == 1
+    check n["param"].getStr == "gain"
+    check n["curve"].getStr == "smooth"
+
+    # Точка на том же тике заменяется, а не дублируется.
+    check runCliIn(dir, ["automation", "add", "a.eproj", "--node", "2",
+                         "--param", "gain", "--tick", "960",
+                         "--value", "-3"]).code == 0
+    let list = runCliIn(dir, ["automation", "list", "a.eproj", "--json"])
+    check list.code == 0
+    let lanes = parseJson(list.output)["lanes"]
+    check lanes.len == 1
+    check lanes[0]["count"].getInt == 1
+    check lanes[0]["points"][0]["value"].getFloat == -3.0
+
+    # Вторая точка и проверка порядка.
+    check runCliIn(dir, ["automation", "add", "a.eproj", "--node", "2",
+                         "--param", "gain", "--tick", "0",
+                         "--value", "-40"]).code == 0
+    let ordered = parseJson(runCliIn(dir, ["automation", "list", "a.eproj",
+                                           "--json"]).output)
+    check ordered["lanes"][0]["points"][0]["tick"].getInt == 0
+    check ordered["lanes"][0]["points"][1]["tick"].getInt == 960
+
+    let rm = runCliIn(dir, ["automation", "rm", "a.eproj", "--node", "2",
+                            "--param", "gain", "--tick", "960", "--json"])
+    check rm.code == 0
+    check rm.output.len > 0
+    let cleared = runCliIn(dir, ["automation", "clear", "a.eproj", "--json"])
+    check cleared.code == 0
+    check parseJson(cleared.output)["lanes"].getInt == 0
+
+  test "рендер применяет линию: RMS растёт вслед за gain":
+    check runCliIn(dir, ["render", "a.eproj", "plain.wav", "--seconds",
+                         "0.5", "--json"]).code == 0
+    check runCliIn(dir, ["automation", "add", "a.eproj", "--node", "2",
+                         "--param", "gain", "--tick", "0",
+                         "--value", "0", "--json"]).code == 0
+    let r = runCliIn(dir, ["render", "a.eproj", "auto.wav", "--seconds",
+                           "0.5", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["automationLanes"].getInt == 1
+    let plain = readAllAudioFile(dir / "plain.wav")
+    let auto = readAllAudioFile(dir / "auto.wav")
+    var plainRms = 0.0'f64
+    var autoRms = 0.0'f64
+    for s in plain.samples: plainRms += float64(s) * float64(s)
+    for s in auto.samples: autoRms += float64(s) * float64(s)
+    check autoRms > plainRms * 1.5
+
+  test "ошибки: нет ноды, нет параметра, неизвестная кривая":
+    let noNode = runCliIn(dir, ["automation", "add", "a.eproj", "--node",
+                                "99", "--param", "gain", "--tick", "0",
+                                "--value", "1", "--json"])
+    check noNode.code == 1
+    let noParam = runCliIn(dir, ["automation", "add", "a.eproj", "--node",
+                                 "2", "--param", "nope", "--tick", "0",
+                                 "--value", "1", "--json"])
+    check noParam.code == 1
+    let badCurve = runCliIn(dir, ["automation", "add", "a.eproj", "--node",
+                                  "2", "--param", "gain", "--tick", "0",
+                                  "--value", "1", "--curve", "bounce", "--json"])
+    check badCurve.code == 1
+
+  test "--dry-run не пишет проект":
+    let before = readFile(dir / "a.eproj")
+    let r = runCliIn(dir, ["automation", "clear", "a.eproj", "--dry-run",
+                           "--json"])
+    check r.code == 0
+    check readFile(dir / "a.eproj") == before
+
+
+# =============================================================================
+# Автосохранение и восстановление (#110)
+# =============================================================================
+
+suite "CLI: project recover и автосохранение (#110)":
+  let dir = getTempDir() / "euterpia_cli_recover"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  test "recover восстанавливает снимок, делает .bak и снимает маркер":
+    check runCliIn(dir, ["init", "p.eproj", "--name", "Original"]).code == 0
+    check runCliIn(dir, ["project", "set", "p.eproj", "name", "Broken"]).code == 0
+    # Снимок «аварии» и маркер: ровно то, что оставляет writer.
+    check runCliIn(dir, ["init", "p.autosave-5.eproj", "--force",
+                         "--name", "Recovered"]).code == 0
+    writeFile(dir / "p.eproj.autosave.lock",
+              """{"version":5,"snapshot":"p.autosave-5.eproj"}""")
+
+    let listed = runCliIn(dir, ["project", "recover", "p.eproj", "--list",
+                                "--json"])
+    check listed.code == 0
+    check parseJson(listed.output)["snapshots"].len == 1
+    check parseJson(listed.output)["snapshots"][0]["version"].getInt == 5
+
+    let r = runCliIn(dir, ["project", "recover", "p.eproj", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["recovered"].getBool
+    check node["version"].getInt == 5
+    check node["written"].getBool
+    check fileExists(dir / "p.eproj.bak")
+    check not fileExists(dir / "p.eproj.autosave.lock")
+    let shown = runCliIn(dir, ["project", "show", "p.eproj", "--json"])
+    check parseJson(shown.output)["metadata"]["name"].getStr == "Recovered"
+
+  test "без маркера восстанавливать нечего — код 0 и причина":
+    check runCliIn(dir, ["init", "clean.eproj"]).code == 0
+    let r = runCliIn(dir, ["project", "recover", "clean.eproj", "--json"])
+    check r.code == 0
+    check not parseJson(r.output)["recovered"].getBool
+    check parseJson(r.output)["reason"].getStr.len > 0
+
+  test "--from восстанавливает указанный снимок даже без маркера":
+    check runCliIn(dir, ["init", "pick.eproj", "--name", "Before"]).code == 0
+    check runCliIn(dir, ["init", "pick.autosave-9.eproj", "--force",
+                         "--name", "Chosen"]).code == 0
+    let r = runCliIn(dir, ["project", "recover", "pick.eproj", "--from",
+                           "pick.autosave-9.eproj", "--json"])
+    check r.code == 0
+    check parseJson(r.output)["version"].getInt == 9
+    let shown = runCliIn(dir, ["project", "show", "pick.eproj", "--json"])
+    check parseJson(shown.output)["metadata"]["name"].getStr == "Chosen"
+
+  when defined(posix):
+    test "SIGKILL сессии: recover возвращает правку не старше интервала":
+      let d = dir / "crash"
+      createDir(d)
+      check runCliIn(d, ["init", "a.eproj", "--tempo", "90"]).code == 0
+      let started = runCliIn(d, ["session", "start", "a.eproj",
+                                 "--autosave", "1", "--json"])
+      check started.code == 0
+      let pid = parseJson(started.output)["pid"].getInt
+
+      # Правка ДРУГИМ процессом: снимок обязан увидеть её, а не старт.
+      check runCliIn(d, ["project", "set", "a.eproj", "tempo", "111"]).code == 0
+      sleep(2200)
+      discard execShellCmd("kill -9 " & $pid)
+      sleep(300)
+
+      let r = runCliIn(d, ["project", "recover", "a.eproj", "--json"])
+      check r.code == 0
+      check parseJson(r.output)["recovered"].getBool
+      let shown = runCliIn(d, ["project", "show", "a.eproj", "--json"])
+      check parseJson(shown.output)["metadata"]["tempo"].getFloat == 111.0
+      check fileExists(d / "a.eproj.bak")
+

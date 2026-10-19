@@ -205,7 +205,14 @@ proc processDelayComp*(ctx: ptr NodeProcessContext,
   if frames <= 0: return
   let channels = inBuf.channels
   let stride = if inBuf.stride > 0: inBuf.stride else: inBuf.frames
-  let planar = stride >= inBuf.frames
+  # Раскладка — из поля буфера (issue #392); эвристика остаётся только для
+  # `alAuto`. На неполном блоке planar-буфер имеет `frames < stride`, поэтому
+  # `stride >= frames` без проверки layout — лотерея (аудит, P3).
+  let planar =
+    case inBuf.layout
+    of alPlanar: true
+    of alInterleaved: false
+    of alAuto: stride >= inBuf.frames
 
   let state = cast[ptr DelayCompensationData](userData)
   if state == nil or state.buffer == nil or state.bufferSize <= 0 or
@@ -571,6 +578,11 @@ proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int],
     compiler.delayStates = cast[ptr UncheckedArray[DelayCompensationData]](
       allocShared0(sizeof(DelayCompensationData) * delayStateCount)
     )
+    # Аллокация проверяется ДО первой записи по индексу: иначе отказ памяти
+    # превращался бы в NilAccessDefect внутри компилятора, а вызывающий не
+    # получал бы `cekAllocationFailed` (issue: аудит P0).
+    if compiler.delayStates == nil:
+      return cekAllocationFailed
   
   var currentDelayIdx = 0
   for c in g.connections:
@@ -584,7 +596,12 @@ proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int],
         let ringFrames = max(diff + 256, 1024)
         let bufferSize = ringFrames * DelayCompensationRingChannels
         let buf = cast[ptr UncheckedArray[float32]](allocShared0(sizeof(float32) * bufferSize))
-        
+        # Отказ памяти на кольце — ошибка компиляции, а не «нода без задержки»:
+        # частично собранный массив состояний освободит вызывающий по
+        # `cekAllocationFailed` (см. `compileGraph`).
+        if buf == nil:
+          return cekAllocationFailed
+
         compiler.delayStates[currentDelayIdx] = DelayCompensationData(
           delayFrames: diff,
           writePos: 0,
@@ -793,6 +810,27 @@ proc validateGraph*(srcGraph: NodeGraph): CompileError =
           portIdx: c.dstPortIdx, connection: i)
     writers[key] = i
 
+proc allocationFailed(p: ptr CompiledPipeline;
+                      compiler: var GraphCompiler): CompileResult =
+  ## Единый откат компиляции при нехватке памяти (issue: аудит P0).
+  ##
+  ## Освобождает всё, что уже выделено, и возвращает `cekAllocationFailed`.
+  ## Без этого отказ аллокатора превращался в запись по nil-указателю, а
+  ## частично занятые пулы оставались в shared-памяти навсегда.
+  ##
+  ## Вызывается ТОЛЬКО до передачи `compiler.delayStates` в пайплайн: на этом
+  ## шаге владельцем массива состояний всё ещё является компилятор.
+  if compiler.delayStates != nil:
+    for i in 0 ..< compiler.delayStateCount:
+      if compiler.delayStates[i].buffer != nil:
+        deallocShared(compiler.delayStates[i].buffer)
+    deallocShared(compiler.delayStates)
+    compiler.delayStates = nil
+  if p != nil:
+    destroyPipeline(p)
+  CompileResult(success: false,
+    error: CompileError(kind: cekAllocationFailed, portIdx: -1, connection: -1))
+
 proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   var compiler = initGraphCompiler()
 
@@ -853,13 +891,7 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   # ставится только в newCompiledPipeline, чтобы её нельзя было забыть.
   let p = newCompiledPipeline()
   if p == nil:
-    if compiler.delayStates != nil:
-      for i in 0 ..< compiler.delayStateCount:
-        if compiler.delayStates[i].buffer != nil:
-          deallocShared(compiler.delayStates[i].buffer)
-      deallocShared(compiler.delayStates)
-    return CompileResult(success: false,
-      error: CompileError(kind: cekAllocationFailed, portIdx: -1, connection: -1))
+    return allocationFailed(nil, compiler)
 
   # Каждый скомпилированный граф обязан иметь непустую монотонную версию:
   # audio thread публикует её в метриках и по ней же отбрасывает устаревшие
@@ -867,10 +899,17 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   doAssert(p.graphVersion != 0'u64, "пайплайн без версии графа")
 
   p.stepCount = order.len.int32
-  p.steps = cast[ptr UncheckedArray[PipelineStep]](allocShared0(sizeof(PipelineStep) * order.len))
+  if order.len > 0:
+    p.steps = cast[ptr UncheckedArray[PipelineStep]](
+      allocShared0(sizeof(PipelineStep) * order.len))
+    if p.steps == nil:
+      return allocationFailed(p, compiler)
   
   p.audioBufferPoolCount = maxAudioBuffers
-  p.audioBufferPool = cast[ptr UncheckedArray[AudioBuffer]](allocShared0(sizeof(AudioBuffer) * maxAudioBuffers))
+  p.audioBufferPool = cast[ptr UncheckedArray[AudioBuffer]](
+    allocShared0(sizeof(AudioBuffer) * maxAudioBuffers))
+  if p.audioBufferPool == nil:
+    return allocationFailed(p, compiler)
 
   # Арена сэмплов под аудиобуферы.
   #
@@ -893,18 +932,25 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   p.audioArena = cast[ptr UncheckedArray[float32]](
     allocShared0(sizeof(float32) * maxAudioBuffers * samplesPerBuffer)
   )
+  # Арена обязательна: без неё пул формально существует, но у всех буферов
+  # `data == nil`, и граф молча выдаёт тишину. Раньше проверка была только
+  # вокруг заполнения, поэтому отказ памяти «проходил» как успешная сборка.
+  if p.audioArena == nil:
+    return allocationFailed(p, compiler)
 
-  if p.audioArena != nil:
-    for i in 0 ..< maxAudioBuffers:
-      p.audioBufferPool[i].data =
-        cast[ptr UncheckedArray[float32]](addr p.audioArena[i * samplesPerBuffer])
-      p.audioBufferPool[i].frames = arenaFrames
-      p.audioBufferPool[i].channels = int32(arenaChannels)
-      p.audioBufferPool[i].stride = arenaFrames
-      p.audioBufferPool[i].layout = alPlanar
+  for i in 0 ..< maxAudioBuffers:
+    p.audioBufferPool[i].data =
+      cast[ptr UncheckedArray[float32]](addr p.audioArena[i * samplesPerBuffer])
+    p.audioBufferPool[i].frames = arenaFrames
+    p.audioBufferPool[i].channels = int32(arenaChannels)
+    p.audioBufferPool[i].stride = arenaFrames
+    p.audioBufferPool[i].layout = alPlanar
   
   p.ctrlPoolCount = maxCtrl
-  p.ctrlPool = cast[ptr UncheckedArray[float32]](allocShared0(sizeof(float32) * maxCtrl))
+  p.ctrlPool = cast[ptr UncheckedArray[float32]](
+    allocShared0(sizeof(float32) * maxCtrl))
+  if p.ctrlPool == nil:
+    return allocationFailed(p, compiler)
   
   p.eventPoolCount = maxEvent
   # У EventQueue поле events помечено {.align: 64.}, а allocShared0 гарантирует
@@ -914,9 +960,15 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   p.eventPool = cast[ptr UncheckedArray[EventQueue]](
     alignedSharedAlloc0(sizeof(EventQueue) * maxEvent, alignof(EventQueue))
   )
+  if p.eventPool == nil:
+    return allocationFailed(p, compiler)
 
   let flagsSize = max(maxAudioBuffers, max(maxCtrl, maxEvent))
-  p.poolFlags = cast[ptr UncheckedArray[set[PoolFlag]]](allocShared0(sizeof(set[PoolFlag]) * flagsSize))
+  p.poolFlags = cast[ptr UncheckedArray[set[PoolFlag]]](
+    allocShared0(sizeof(set[PoolFlag]) * flagsSize))
+  if p.poolFlags == nil:
+    return allocationFailed(p, compiler)
+
   for i in 0 ..< maxCtrl: p.poolFlags[i].incl(pfNeedsZeroing)
   for i in 0 ..< maxEvent: p.poolFlags[i].incl(pfNeedsZeroing)
 

@@ -24,8 +24,10 @@ import test_scene_ownership
 import test_scene_resources
 import test_backend_contract
 import test_backend_registry
+import test_lazy_adapters
 import test_input_path
 import test_plugin_api
+import test_eut_buffer
 import test_clap_host_extensions
 import test_clap_plugin_extensions
 import test_clap_events
@@ -49,6 +51,7 @@ import test_realtime_gcsafe
 import test_recorder
 import test_sequencer
 import test_sequencer_player
+import test_metronome
 import test_project
 import test_autosave
 import test_param_flags

@@ -28,6 +28,7 @@
 # печатается предупреждением: рендер из-за этого не срывается.
 
 import std/[json, math, os, strutils, terminal]
+import std/cmdline
 
 import signal_types
 import offline_render
@@ -36,6 +37,7 @@ import config
 import control/query
 import control_bridge
 import cmd_project
+import project
 import catalog
 import builtin/scene_loader
 import cli_spec
@@ -75,6 +77,12 @@ const
           value = "id ноды"),
       opt("--solo-track", "рендерить только эту дорожку (стем, #209)",
           value = "id дорожки"),
+      opt("--stems", "стемы: по WAV на дорожку в указанный каталог (#108)",
+          value = "каталог"),
+      opt("--name-template", "шаблон имён стемов: {track}, {name}, {index}",
+          value = "шаблон", default = "{track}_{name}.wav"),
+      opt("--batch", "список проектов для последовательного рендера (#108)",
+          value = "файл"),
       opt("--sample-rate", "частота дискретизации; без ключа — из проекта, затем настройки",
           value = "Гц"),
       opt("--block", "размер блока обработки", value = "кадры",
@@ -110,12 +118,21 @@ const
       field("peak", "пиковый уровень записанного WAV"),
       field("rms", "среднеквадратичный уровень"),
       field("silent", "запись тишины — предупреждение, а не ошибка"),
+      field("stems", "стемы: `track`, `name`, `file`, `frames`, `ok` (#108)"),
+      field("stemsFailed", "сколько стемов не отрендерилось"),
+      field("batch", "результаты батча: `project`, `out`, `ok`, `exitCode`"),
+      field("batchFailed", "сколько проектов батча не отрендерилось"),
     ],
     notes: @[
       "пример MANIFEST §19: euterpia render project.eproj",
       "вывод — WAV (PCM 16, 24 или 32 бита, стерео); MP3/OGG требуют кодировщика и в ядре отсутствуют",
       "проект без нотных событий требует --seconds: длину пустой партитуры CLI не выдумывает",
       "частота и блок: argv > метаданные проекта > настройки > умолчание",
+      "--stems <каталог>: по WAV на дорожку; имена из --name-template ({track}, {name}, {index})",
+      "стемы рендерятся тем же путём, что и мастер, с --solo-track; mute/solo дорожек учитываются",
+      "--batch <файл>: строки «проект [выход][ --seconds N]», # — комментарий; --out задаёт каталог",
+      "батч идёт последовательно: сцена и движок освобождаются после каждого проекта",
+      "если хоть один стем/проект упал — ненулевой код, отчёт перечисляет удачные и неудачные",
       "--dry-run печатает план рендера и не пишет файл",
       "индикатор прогресса идёт в stderr: проценты, прошлое, осталось и скорость (×REALTIME)",
       "по умолчанию он включается, только если stderr — терминал: в CI и пайпах вывод остаётся байт-в-байт тем же",
@@ -154,6 +171,12 @@ type
       ## -1 — «определить по графу» (правило живёт в `scene_loader`).
     soloTrack: int32
       ## -1 — полный микс; иначе только эта дорожка (стем, #209).
+    stemsDir: string
+      ## Непусто — рендер стемов по дорожкам (#108).
+    nameTemplate: string
+      ## Шаблон имён стемов: `{track}`, `{name}`, `{index}`.
+    batchPath: string
+      ## Непусто — батч по списку проектов (#108).
     sampleRate: int
     blockSize: int
     bits: int
@@ -211,6 +234,7 @@ proc scanArgs(args: seq[string]): RenderScan =
   result.soloTrack = -1'i32
   result.bits = DefaultBits
   result.blockSize = DefaultBlockSize
+  result.nameTemplate = "{track}_{name}.wav"
 
   var haveFile = false
   var fileFromPositional = false
@@ -280,6 +304,16 @@ proc scanArgs(args: seq[string]): RenderScan =
             "id дорожки, чей стем нужно отрендерить (#209)")
           return
         result.soloTrack = int32(parsed.value)
+      of "--stems":
+        result.stemsDir = value
+      of "--name-template":
+        if value.strip().len == 0:
+          result.rep = usageError("--name-template: пустой шаблон",
+            "например: --name-template \"{track}_{name}.wav\"")
+          return
+        result.nameTemplate = value
+      of "--batch":
+        result.batchPath = value
       of "--sample-rate":
         let parsed = intArg(value, key, 1, MaxSampleRate)
         if not parsed.ok:
@@ -338,6 +372,41 @@ proc scanArgs(args: seq[string]): RenderScan =
           WavSuffix & "); ключи: " & RenderKeys.join(", "))
         return
     inc i
+
+  # Режимы исключают друг друга: «стемы» и «батч» — разные ответы на вопрос
+  # «что рендерить», и выбирать за пользователя между ними нельзя.
+  if result.stemsDir.len > 0 and result.batchPath.len > 0:
+    result.rep = usageError("--stems и --batch несовместимы",
+      "стемы одного проекта и список проектов — разные режимы")
+    return
+  if result.stemsDir.len > 0 and result.soloTrack >= 0:
+    result.rep = usageError("--stems и --solo-track несовместимы",
+      "стемы рендерят ВСЕ дорожки; один стем — это --solo-track")
+    return
+  if result.batchPath.len > 0 and result.stemsDir.len > 0:
+    result.rep = usageError("--batch не поддерживает --stems",
+      "батч рендерит проекты целиком; стемы — отдельный запуск")
+    return
+
+  if result.stemsDir.len > 0:
+    # --stems задаёт каталог сам; --out с другим путём — противоречие.
+    if result.haveOut and result.outPath != result.stemsDir:
+      result.rep = usageError("--stems и --out указывают разные каталоги",
+        "каталог стемов задаётся ключом --stems")
+      return
+    result.outPath = result.stemsDir
+    result.haveOut = true
+    if not result.nameTemplate.toLowerAscii().endsWith(WavSuffix):
+      result.nameTemplate.add(WavSuffix)
+    result.ok = true
+    return
+
+  if result.batchPath.len > 0:
+    # У батча --out — каталог, а не файл: имя каждому проекту даёт список.
+    if not result.haveOut:
+      result.outPath = "."
+    result.ok = true
+    return
 
   # Формат определяется расширением выхода: писать «просто файл» без
   # расширения — значит оставить пользователя в догадках о содержимом.
@@ -406,20 +475,11 @@ proc formatText(sampleRate, bits: int): string =
 # render
 # =============================================================================
 
-proc runRender*(ctx: var Ctx; args: seq[string]): Report =
-  ## `euterpia render <проект.eproj> [выход.wav] [ключи]`.
-  let scan = scanArgs(args)
-  if not scan.ok:
-    return scan.rep
-
-  let loaded = loadAt(scan.path)
-  if not loaded.ok:
-    return loaded.rep
-  let proj = loaded.proj
-  # Метаданные — через Query API (#336): темп и частота берутся из того же
-  # описания, что показывает `project show`, а не обходом формата.
-  let meta = queryMetadata(openDocument(scan.path, proj))
-
+proc renderProject(ctx: var Ctx; scan: RenderScan; proj: ProjectFormat;
+                   meta: MetadataInfo): Report =
+  ## Один проект: сцена → рендер → отчёт. Вызывается и обычным `render`,
+  ## и (`#108`) каждым стемом/строкой батча — чтобы мастер и стемы шли
+  ## ОДНИМ путём, а не двумя похожими.
   # --- частота и блок: argv > проект > настройки > умолчание --------------
   var sampleRate = scan.sampleRate
   if sampleRate <= 0:
@@ -602,4 +662,277 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
       " с): увеличьте --tail или задайте --seconds"
 
   okReport(body = body, lines = lines)
+
+
+# =============================================================================
+# Стемы и батч (#108)
+# =============================================================================
+
+proc sanitizeStemName(text: string): string =
+  ## Имя файла без сюрпризов: буквы/цифры/`-_.` остаются, остальное — `_`.
+  for ch in text:
+    if ch in {'A'..'Z', 'a'..'z', '0'..'9', '-', '_', '.'}:
+      result.add ch
+    else:
+      result.add '_'
+  if result.len == 0:
+    result = "track"
+
+proc stemFileName(pattern: string; track: TrackInfo; index: int): string =
+  result = pattern
+  result = result.replace("{track}", $track.id)
+  result = result.replace("{name}", sanitizeStemName(track.name))
+  result = result.replace("{index}", $index)
+  if result.len == 0:
+    result = $track.id & "_" & sanitizeStemName(track.name) & ".wav"
+
+proc runStems(ctx: var Ctx; scan: RenderScan; proj: ProjectFormat;
+              meta: MetadataInfo): Report =
+  ## Стемы — это те же рендеры, что мастер, но с `--solo-track` на каждую
+  ## дорожку. Отдельный путь не нужен и опасен: сумма стемов сходится с
+  ## мастером именно потому, что обработка одна.
+  let doc = openDocument(scan.path, proj)
+  let tracks = queryTracks(doc)
+  var anySolo = false
+  for track in tracks:
+    if track.solo:
+      anySolo = true
+
+  var targets: seq[TrackInfo] = @[]
+  for track in tracks:
+    if track.clips.len == 0:
+      continue
+    # При solo на любой дорожке остальные в мастер не попадают — стемы
+    # обязаны вести себя так же, иначе их сумма перестанет быть мастером.
+    if anySolo and not track.solo:
+      continue
+    targets.add track
+
+  if targets.len == 0:
+    return usageError("в проекте нет дорожек с клипами: стемы не из чего делать",
+      "добавьте клипы/ноты: euterpia notation import … или project show")
+
+  if not dirExists(scan.stemsDir):
+    try:
+      createDir(scan.stemsDir)
+    except CatchableError:
+      return envError("каталог стемов недоступен: " & scan.stemsDir,
+        "проверьте права и путь", errorKind = "io")
+
+  var stems = newJArray()
+  var lines: seq[string] = @[
+    CliName & " render --stems — по файлу на дорожку",
+    "файл: " & scan.path,
+    "каталог: " & scan.stemsDir,
+    "шаблон: " & scan.nameTemplate,
+  ]
+  var failed = 0
+  var used: seq[string] = @[]
+
+  for index, track in targets:
+    var one = scan
+    one.stemsDir = ""
+    one.soloTrack = track.id
+    var name = stemFileName(scan.nameTemplate, track, index)
+    var candidate = scan.stemsDir / name
+    # Одинаковые имена (шаблон без {track}) не должны затирать друг друга.
+    var bump = 1
+    while candidate in used:
+      let ext = splitFile(name).ext
+      let base = name[0 ..< name.len - ext.len]
+      candidate = scan.stemsDir / (base & "_" & $bump & ext)
+      inc bump
+    name = extractFilename(candidate)
+    used.add candidate
+    one.outPath = candidate
+
+    let rep = renderProject(ctx, one, proj, meta)
+    var item = %*{
+      "track": track.id,
+      "name": track.name,
+      "file": candidate,
+      "ok": rep.ok,
+      "error": rep.error,
+    }
+    if rep.ok and rep.body != nil:
+      item["frames"] = rep.body{"frames"}
+      item["seconds"] = rep.body{"seconds"}
+      item["peak"] = rep.body{"peak"}
+      item["rms"] = rep.body{"rms"}
+    stems.add item
+
+    if rep.ok:
+      lines.add "  дорожка #" & $track.id & " «" & track.name & "» → " & name
+    else:
+      inc failed
+      lines.add "  дорожка #" & $track.id & " «" & track.name & "»: ОШИБКА: " &
+                rep.error
+
+  let body = %*{
+    "path": scan.path,
+    "stemsDir": scan.stemsDir,
+    "nameTemplate": scan.nameTemplate,
+    "stems": stems,
+    "stemsFailed": failed,
+    "dryRun": ctx.dryRun,
+  }
+  if failed > 0:
+    let message = $failed & " из " & $targets.len & " стемов не отрендерились"
+    return errReport(exUsage, "usage", message,
+      hint = "причины — в поле `stems`; мастер-рендер мог упасть по данным проекта",
+      lines = lines, body = body)
+  lines.add "итого: " & $targets.len & " стемов" &
+    (if anySolo: " (режим solo)" else: "")
+  okReport(body = body, lines = lines)
+
+
+proc runBatch(ctx: var Ctx; scan: RenderScan): Report =
+  ## Батч — последовательность независимых рендеров. Проекты не держатся
+  ## одновременно: после каждого `renderProject` сцена и движок освобождены,
+  ## поэтому RSS не растёт линейно с числом строк (#108).
+  if not fileExists(scan.batchPath):
+    return envError("список батча не найден: " & scan.batchPath,
+      "нужен текстовый файл: строка — проект, # — комментарий",
+      errorKind = "io")
+  var outDir = if scan.outPath.len == 0: "." else: scan.outPath
+  if not dirExists(outDir):
+    try:
+      createDir(outDir)
+    except CatchableError:
+      return envError("каталог батча недоступен: " & outDir,
+        "проверьте права и путь", errorKind = "io")
+
+  var content = ""
+  try:
+    content = readFile(scan.batchPath)
+  except CatchableError as e:
+    return envError("не удалось прочитать список батча: " & e.msg,
+      "проверьте файл " & scan.batchPath, errorKind = "io")
+
+  var results = newJArray()
+  var lines: seq[string] = @[
+    CliName & " render --batch — последовательный рендер",
+    "список: " & scan.batchPath,
+    "каталог вывода: " & outDir,
+  ]
+  var total = 0
+  var failed = 0
+  var anyEnv = false
+
+  for raw in content.splitLines():
+    let line = raw.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    let tokens = parseCmdLine(line)
+    if tokens.len == 0:
+      continue
+    inc total
+
+    var item = scanArgs(tokens)
+    if not item.ok:
+      inc failed
+      var rec = %*{"line": total, "project": tokens[0], "ok": false,
+                   "exitCode": int(item.rep.code), "error": item.rep.error}
+      rec["out"] = %""
+      results.add rec
+      lines.add "  #" & $total & ": отказ разбора — " & item.rep.error
+      continue
+
+    if item.stemsDir.len > 0 or item.batchPath.len > 0:
+      inc failed
+      results.add %*{"line": total, "project": item.path, "out": "",
+                     "ok": false, "exitCode": int(exUsage),
+                     "error": "в строке батча нельзя --stems/--batch"}
+      lines.add "  #" & $total & ": вложенный режим --stems/--batch запрещён"
+      continue
+
+    if not item.haveOut:
+      item.outPath = outDir / changeFileExt(extractFilename(item.path),
+                                                   WavSuffix)
+    elif not item.outPath.isAbsolute and parentDir(item.outPath) in ["", "."]:
+      # Имя без каталога в строке батча — относительно --out, иначе
+      # «--out dir» молча игнорировался бы.
+      item.outPath = outDir / item.outPath
+
+    let loaded = loadAt(item.path)
+    if not loaded.ok:
+      inc failed
+      if loaded.rep.code == exEnv:
+        anyEnv = true
+      results.add %*{"line": total, "project": item.path, "out": item.outPath,
+                     "ok": false, "exitCode": int(loaded.rep.code),
+                     "error": loaded.rep.error}
+      lines.add "  #" & $total & " " & item.path & ": " & loaded.rep.error
+      continue
+
+    let meta = queryMetadata(openDocument(item.path, loaded.proj))
+    let rep = renderProject(ctx, item, loaded.proj, meta)
+    if not rep.ok:
+      inc failed
+      if rep.code == exEnv:
+        anyEnv = true
+    results.add %*{"line": total, "project": item.path, "out": item.outPath,
+                   "ok": rep.ok, "exitCode": int(rep.code),
+                   "error": rep.error}
+    if rep.ok:
+      lines.add "  #" & $total & " " & item.path & " → " & item.outPath
+    else:
+      lines.add "  #" & $total & " " & item.path & ": " & rep.error
+    if not ctx.quiet:
+      cliWarn("батч: " & $total & " обработан, ошибок: " & $failed)
+
+  let body = %*{
+    "batchPath": scan.batchPath,
+    "outDir": outDir,
+    "batch": results,
+    "batchTotal": total,
+    "batchFailed": failed,
+    "dryRun": ctx.dryRun,
+  }
+  if total == 0:
+    return usageError("список батча пуст: " & scan.batchPath,
+      "строка — проект; пустые строки и # — комментарии",
+      lines = lines, body = body)
+  if failed > 0:
+    lines.add "итого: " & $(total - failed) & " из " & $total &
+      " проектов отрендерено, ошибок: " & $failed
+    let message = $failed & " из " & $total & " проектов батча не отрендерились"
+    if anyEnv:
+      return errReport(exEnv, "env", message,
+        hint = "причины — в поле `batch`", lines = lines, body = body)
+    return errReport(exUsage, "usage", message,
+      hint = "причины — в поле `batch`", lines = lines, body = body)
+  lines.add "итого: " & $total & " проектов"
+  okReport(body = body, lines = lines)
+
+
+# =============================================================================
+# Точка входа
+# =============================================================================
+
+proc runRender*(ctx: var Ctx; args: seq[string]): Report =
+  ## `euterpia render <проект.eproj> [выход.wav] [ключи]`.
+  ##
+  ## Режимы (#108): обычный рендер, `--stems` (все дорожки одного проекта)
+  ## и `--batch` (список проектов). Загрузка проекта и метаданные — общие,
+  ## чтобы «откуда темп/частота» не разъезжались между режимами.
+  let scan = scanArgs(args)
+  if not scan.ok:
+    return scan.rep
+
+  if scan.batchPath.len > 0:
+    return runBatch(ctx, scan)
+
+  let loaded = loadAt(scan.path)
+  if not loaded.ok:
+    return loaded.rep
+  let proj = loaded.proj
+  # Метаданные — через Query API (#336): темп и частота берутся из того же
+  # описания, что показывает `project show`, а не обходом формата.
+  let meta = queryMetadata(openDocument(scan.path, proj))
+
+  if scan.stemsDir.len > 0:
+    return runStems(ctx, scan, proj, meta)
+
+  renderProject(ctx, scan, proj, meta)
 

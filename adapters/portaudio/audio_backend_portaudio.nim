@@ -14,20 +14,29 @@
 #   не заполняется — это отдельная задача (issue #3);
 # - повторный open без close отклоняется, а не молча перезаписывает поток.
 
-import std/atomics
+import std/[atomics, dynlib]
 import audio_backend_api
 import logger
+import ../lazy_dynlib
 
 when defined(windows):
-  const PortAudioLib = "portaudio_x64.dll"
+  const PortAudioLibDefault = "portaudio_x64.dll"
 elif defined(macosx):
-  const PortAudioLib = "libportaudio.dylib"
+  const PortAudioLibDefault = "libportaudio.dylib"
 else:
-  const PortAudioLib = "libportaudio.so"
+  const PortAudioLibDefault = "libportaudio.so"
+
+const PortAudioLibEnv = "EUTERPIA_PORTAUDIO_LIB"
+  ## Переопределение имени библиотеки для теста «библиотеки нет» (#267).
 
 # ==============================================================================
 # PortAudio C ABI
 # ==============================================================================
+#
+# Символы НЕ привязаны прагмой `dynlib`: прагма грузит библиотеку в
+# инициализации модуля и роняет процесс до main() (#267). Здесь библиотека
+# грузится в paInit() через adapters/lazy_dynlib, а отсутствие даёт
+# abeUnavailable.
 
 type
   PaStream = pointer
@@ -60,16 +69,70 @@ type
     timeInfo: pointer,
     statusFlags: culong,
     userData: pointer
-  ): cint {.cdecl.}
+  ): cint {.cdecl, raises: [], gcsafe.}
 
-{.pragma: pa_import, importc, dynlib: PortAudioLib.}
+  PaInitializeProc = proc(): PaError {.cdecl, raises: [], gcsafe.}
+  PaTerminateProc = proc(): PaError {.cdecl, raises: [], gcsafe.}
+  PaGetDefaultDeviceProc = proc(): cint {.cdecl, raises: [], gcsafe.}
+  PaGetDeviceCountProc = proc(): cint {.cdecl, raises: [], gcsafe.}
+  PaGetDeviceInfoProc = proc(device: cint): ptr PaDeviceInfo {.cdecl, raises: [], gcsafe.}
+  PaOpenStreamProc = proc(
+    stream: ptr PaStream,
+    inputParameters: ptr PaStreamParameters,
+    outputParameters: ptr PaStreamParameters,
+    sampleRate: cdouble,
+    framesPerBuffer: culong,
+    streamFlags: culong,
+    streamCallback: PaStreamCallback,
+    userData: pointer
+  ): PaError {.cdecl, raises: [], gcsafe.}
+  PaStreamOpProc = proc(stream: PaStream): PaError {.cdecl, raises: [], gcsafe.}
+  PaGetErrorTextProc = proc(errorCode: PaError): cstring
+    {.cdecl, raises: [], gcsafe.}
 
-proc Pa_Initialize(): PaError {.pa_import.}
-proc Pa_Terminate(): PaError {.pa_import.}
-proc Pa_GetDefaultOutputDevice(): cint {.pa_import.}
-proc Pa_GetDefaultInputDevice(): cint {.pa_import.}
-proc Pa_GetDeviceCount(): cint {.pa_import.}
-proc Pa_GetDeviceInfo(device: cint): ptr PaDeviceInfo {.pa_import.}
+var
+  paLib: LazyLibrary
+  paInitializeSym: PaInitializeProc
+  paTerminateSym: PaTerminateProc
+  paGetDefaultOutputDeviceSym: PaGetDefaultDeviceProc
+  paGetDefaultInputDeviceSym: PaGetDefaultDeviceProc
+  paGetDeviceCountSym: PaGetDeviceCountProc
+  paGetDeviceInfoSym: PaGetDeviceInfoProc
+  paOpenStreamSym: PaOpenStreamProc
+  paStartStreamSym: PaStreamOpProc
+  paStopStreamSym: PaStreamOpProc
+  paCloseStreamSym: PaStreamOpProc
+  paIsStreamActiveSym: PaStreamOpProc
+  paGetErrorTextSym: PaGetErrorTextProc
+
+proc loadPortAudio(): bool =
+  ## Грузит библиотеку и резолвит все символы. Вызывается на control-path
+  ## из paInit; повторный вызов после успеха — no-op.
+  if not paLib.handle.isNil:
+    return true
+  if not openLibrary(paLib):
+    return false
+  result =
+    symPtr(paLib, "Pa_Initialize", paInitializeSym) and
+    symPtr(paLib, "Pa_Terminate", paTerminateSym) and
+    symPtr(paLib, "Pa_GetDefaultOutputDevice", paGetDefaultOutputDeviceSym) and
+    symPtr(paLib, "Pa_GetDefaultInputDevice", paGetDefaultInputDeviceSym) and
+    symPtr(paLib, "Pa_GetDeviceCount", paGetDeviceCountSym) and
+    symPtr(paLib, "Pa_GetDeviceInfo", paGetDeviceInfoSym) and
+    symPtr(paLib, "Pa_OpenStream", paOpenStreamSym) and
+    symPtr(paLib, "Pa_StartStream", paStartStreamSym) and
+    symPtr(paLib, "Pa_StopStream", paStopStreamSym) and
+    symPtr(paLib, "Pa_CloseStream", paCloseStreamSym) and
+    symPtr(paLib, "Pa_IsStreamActive", paIsStreamActiveSym) and
+    symPtr(paLib, "Pa_GetErrorText", paGetErrorTextSym)
+
+proc Pa_Initialize(): PaError {.inline.} = paInitializeSym()
+proc Pa_Terminate(): PaError {.inline.} = paTerminateSym()
+proc Pa_GetDefaultOutputDevice(): cint {.inline.} = paGetDefaultOutputDeviceSym()
+proc Pa_GetDefaultInputDevice(): cint {.inline.} = paGetDefaultInputDeviceSym()
+proc Pa_GetDeviceCount(): cint {.inline.} = paGetDeviceCountSym()
+proc Pa_GetDeviceInfo(device: cint): ptr PaDeviceInfo {.inline.} =
+  paGetDeviceInfoSym(device)
 proc Pa_OpenStream(
   stream: ptr PaStream,
   inputParameters: ptr PaStreamParameters,
@@ -79,12 +142,17 @@ proc Pa_OpenStream(
   streamFlags: culong,
   streamCallback: PaStreamCallback,
   userData: pointer
-): PaError {.pa_import.}
-proc Pa_StartStream(stream: PaStream): PaError {.pa_import.}
-proc Pa_StopStream(stream: PaStream): PaError {.pa_import.}
-proc Pa_CloseStream(stream: PaStream): PaError {.pa_import.}
-proc Pa_IsStreamActive(stream: PaStream): PaError {.pa_import.}
-proc Pa_GetErrorText(errorCode: PaError): cstring {.pa_import.}
+): PaError {.inline.} =
+  paOpenStreamSym(stream, inputParameters, outputParameters, sampleRate,
+                  framesPerBuffer, streamFlags, streamCallback, userData)
+proc Pa_StartStream(stream: PaStream): PaError {.inline.} = paStartStreamSym(stream)
+proc Pa_StopStream(stream: PaStream): PaError {.inline.} = paStopStreamSym(stream)
+proc Pa_CloseStream(stream: PaStream): PaError {.inline.} = paCloseStreamSym(stream)
+proc Pa_IsStreamActive(stream: PaStream): PaError {.inline.} =
+  paIsStreamActiveSym(stream)
+proc Pa_GetErrorText(errorCode: PaError): cstring {.inline.} =
+  if paGetErrorTextSym.isNil: cstring"portaudio unavailable"
+  else: paGetErrorTextSym(errorCode)
 
 const
   # Явные преобразования, а не суффиксы 'u64/'u32: culong на Windows —
@@ -222,6 +290,12 @@ proc paInit(api: ptr AudioBackendApi; log: ptr Logger): AudioBackendError
 
   if pb.paInitialized:
     return abeOk
+
+  # Ленивая загрузка (#267): отсутствие библиотеки — abeUnavailable, а не
+  # падение процесса в инициализации модуля. Причина уже в paLib.error.
+  if not loadPortAudio():
+    logError(addr pb.log, "portaudio: " & libraryError(paLib))
+    return abeUnavailable
 
   let err = Pa_Initialize()
   if err != 0:
@@ -473,9 +547,9 @@ proc createPortAudioBackend*(log: Logger = silentLogger()): ptr AudioBackendApi 
   ## Собирает адаптер в shared-куче.
   ##
   ## Возвращает nil, если память недоступна. Отсутствие установленной
-  ## libportaudio здесь НЕ ошибка: библиотека грузится через dynlib при
-  ## первом вызове Pa_Initialize, поэтому недоступность проявится как
-  ## abeInitFailed из backendInit.
+  ## libportaudio здесь НЕ ошибка: библиотека грузится лениво в
+  ## `backendInit` (adapters/lazy_dynlib, #267), поэтому недоступность
+  ## проявится как `abeUnavailable`, а не падение до `main()`.
   let api = cast[ptr AudioBackendApi](allocShared0(sizeof(AudioBackendApi)))
   if api.isNil:
     return nil
@@ -486,6 +560,7 @@ proc createPortAudioBackend*(log: Logger = silentLogger()): ptr AudioBackendApi 
     return nil
 
   pb.log = log
+  paLib.setLibraryName(resolveLibraryName(PortAudioLibEnv, PortAudioLibDefault))
 
   api.backendName = cstring"portaudio"
   api.impl = cast[pointer](pb)

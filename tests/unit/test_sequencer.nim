@@ -120,6 +120,38 @@ suite "sequencer: compile":
     check ev[7].tick == 3120 and ev[7].kind == evNoteOff
     check c.maxTick == 3120
 
+  test "loop: число событий клипа ограничено MaxScheduledPerClip":
+    var t = initTransport(48000.0'f32)
+    var s = initSequencer(addr t)
+    discard s.addTrack(ttMidi, "T1")
+    # Клип в 1 тик: до фикса такой loop при горизонте 1e6 добавлял по 2
+    # события на итерацию — seq рос до OOM.
+    discard s.addClip(1, ctMidi, startTick = 0, lengthTicks = 1)
+    s.tracks[0].clips[0].loopEnabled = true
+    s.addNote(1, 1, startTick = 0, duration = 1, pitch = 60, velocity = 100)
+
+    let c = s.compile(maxSongTicks = DefaultMaxSongTicks)
+    let ev = c.tracks[0].clips[0].events
+    check ev.len == MaxScheduledPerClip
+    # Все события внутри горизонта, note-off не уехал за int32.
+    for e in ev:
+      check e.tick >= 0
+      check e.tick < DefaultMaxSongTicks + 2
+
+  test "loop: сложение тиков не переполняет int32":
+    var t = initTransport(48000.0'f32)
+    var s = initSequencer(addr t)
+    discard s.addTrack(ttMidi, "T1")
+    # lengthTicks = high(int32): старый `iter += clip.lengthTicks` в int32
+    # переполнялся (OverflowDefect в debug, заворот в release).
+    discard s.addClip(1, ctMidi, startTick = 999_990, lengthTicks = high(int32))
+    s.tracks[0].clips[0].loopEnabled = true
+    s.addNote(1, 1, startTick = 0, duration = 100, pitch = 60, velocity = 100)
+
+    let c = s.compile(maxSongTicks = 1_000_000)
+    check c.tracks[0].clips[0].events.len == 2
+    check c.tracks[0].clips[0].events[0].tick == 999_990
+
   test "клип с неположительной длиной не даёт событий":
     var t = initTransport(48000.0'f32)
     var s = initSequencer(addr t)

@@ -25,6 +25,8 @@ import builtin/builtin_registry
 import builtin/mixing/gain
 import audio_engine
 import ipc_bus   ## `tsPlaying` — состояние транспорта.
+import offline_render
+import sequencer
 
 const
   EngineSr = 48000.0'f32
@@ -115,3 +117,42 @@ suite "офлайн: lossless automation (#395)":
     flushQueuedCommands(rig.engine)
     check rig.factory.getParam(rig.state, GainParamGain, addr got)
     check got == -9.0'f32   # replayPendingParams довёл значение
+
+# =============================================================================
+# Кривая автоматизации совпадает с воспроизведением (аудит, P2)
+# =============================================================================
+
+suite "офлайн: кривые автоматизации (аудит P2)":
+  test "acSmooth — косинус, как в sequencer, а не Эрмит":
+    let lane = OfflineAutomationLane(
+      nodeId: 1, paramId: 1,
+      points: @[
+        OfflineAutomationPoint(tick: 0, value: 0.0f, curve: acSmooth),
+        OfflineAutomationPoint(tick: 100, value: 1.0f, curve: acSmooth)
+      ])
+    let t = 25.0
+    let expected = interpolateAutomation(0.0f, 1.0f, 0.25f, acSmooth)
+    check abs(automationValueAt(lane, t) - expected) < 1e-6f
+    # Эрмит дал бы 0.15625; косинус — ~0.14645. Разница обязана быть видна.
+    check abs(automationValueAt(lane, t) - 0.15625f) > 1e-3f
+
+  test "acBezier остаётся Эрмитом, acLinear/step не изменились":
+    var lane = OfflineAutomationLane(nodeId: 1, paramId: 1,
+      points: @[
+        OfflineAutomationPoint(tick: 0, value: 0.0f, curve: acBezier),
+        OfflineAutomationPoint(tick: 100, value: 1.0f, curve: acBezier)
+      ])
+    check abs(automationValueAt(lane, 25.0) - 0.15625f) < 1e-6f
+    lane.points[0].curve = acLinear
+    check abs(automationValueAt(lane, 25.0) - 0.25f) < 1e-6f
+    lane.points[0].curve = acStep
+    check automationValueAt(lane, 99.0) == 0.0f
+
+  test "бинарный поиск на длинной дорожке даёт те же значения":
+    var lane = OfflineAutomationLane(nodeId: 1, paramId: 1)
+    for i in 0 ..< 1024:
+      lane.points.add OfflineAutomationPoint(
+        tick: int32(i * 10), value: float32(i), curve: acLinear)
+    check automationValueAt(lane, -1.0) == 0.0f
+    check abs(automationValueAt(lane, 5005.0) - 500.5f) < 1e-3f
+    check automationValueAt(lane, 20000.0) == 1023.0f

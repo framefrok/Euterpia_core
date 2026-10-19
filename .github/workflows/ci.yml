@@ -245,18 +245,17 @@ jobs:
             exit 1
           fi
 
-      - name: CLI не линкует dynlib-адаптеры (#105)
+      - name: Ленивая загрузка dynlib-адаптеров (#267)
         run: |
-          # `{.dynlib.}` резолвит символы внешней библиотеки в инициализации
-          # модуля: импорт такого адаптера роняет процесс ДО main(), поэтому
-          # `doctor` проверяет такие библиотеки пробой dlopen, а не импортом.
-          # Проверено на adapters/rtmidi без librtmidi: вывод
-          # «could not load: librtmidi.so» до первой строки кода.
-          if grep -rnE "import[[:space:]].*(backend_portaudio|backend_rtmidi)" cli/ cli.nim; then
-            echo "::error::CLI импортирует dynlib-адаптер: без библиотеки процесс упадёт до main() (#105)"
+          # `{.dynlib.}` грузил библиотеку в инициализации модуля и ронял
+          # процесс до main(). Адаптеры переведены на lazy_dynlib: импорт
+          # безопасен, отсутствие библиотеки — abeUnavailable/meUnavailable.
+          # Guard теперь проверяет ОБРАТНОЕ: прагма не должна вернуться.
+          if grep -rnE '\{[[:space:]]*\.?dynlib' adapters/portaudio adapters/rtmidi; then
+            echo "::error::dynlib-прагма вернулась: адаптер обязан грузить библиотеку лениво (#267)"
             exit 1
           fi
-          echo "ok: CLI линкует только статически собранные адаптеры"
+          echo "ok: portaudio/rtmidi грузят внешние библиотеки лениво (#267)"
 
       - name: Команды проекта не создают движок и не открывают устройство (#89)
         run: |

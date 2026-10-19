@@ -29,9 +29,14 @@ import context
 import cli_spec
 import config
 import cmd_project
+import project
 import catalog
 import control/query
 import control_bridge
+import control/document
+import control/commands
+import control/history
+import history_file
 
 import audio_backend_api
 import backend_manager
@@ -82,6 +87,89 @@ const
       "на машине без звуковой подсистемы команда успешна: пустой список и причина, а не паника (#92)",
       "CLI собирается с miniaudio статически; portaudio в этой сборке не залинкован",
       "устройства описываются данными адаптера (`backendDeviceInfo`), CLI не угадывает поля",
+    ])
+
+  RecordSpec* = CommandSpec(
+    name: "record",
+    summary: "запись входа в WAV через аудиоустройство (arm/start/stop, метрики)",
+    synopsis: "record <выход.wav> [--seconds N] [--channels 1|2] [--input-channel N]",
+    args: @[
+      arg("выход.wav", "куда писать запись; расширение `.wav` обязательно"),
+    ],
+    options: @[
+      opt("--project", "проект, чей граф держать открытым во время записи",
+          value = "проект.eproj"),
+      opt("--backend", "аудио-бэкенд: miniaudio", value = "имя"),
+      opt("--device", "индекс или имя устройства вывода", value = "N|имя"),
+      opt("--input-device", "индекс устройства ввода", value = "N"),
+      opt("--sample-rate", "частота дискретизации записи", value = "Гц"),
+      opt("--block", "размер блока", value = "кадры", default = $DefaultBlock),
+      opt("--seconds", "писать N секунд; без ключа — до SIGINT", value = "секунды"),
+      opt("--channels", "ширина записи: 1 (моно) или 2 (стерео)", value = "1|2",
+          default = "1"),
+      opt("--input-channel", "первый канал входа (0 — первый доступный)", value = "N",
+          default = "0"),
+      opt("--count-in", "отсчёт N тактов клика до старта записи (нужна нода метронома)",
+          value = "такты"),
+    ],
+    example: "euterpia record take.wav --seconds 30 --channels 2",
+    fields: @[
+      field("path", "записанный WAV"),
+      field("project", "проект, если он был указан"),
+      field("backend", "открытый бэкенд"),
+      field("device", "индекс устройства вывода"),
+      field("inputDevice", "индекс устройства ввода"),
+      field("sampleRate", "частота записи"),
+      field("blockSize", "размер блока"),
+      field("channels", "каналов в файле"),
+      field("seconds", "длительность сеанса"),
+      field("frames", "записано кадров"),
+      field("droppedFrames", "потерянные кадры (переполнение кольца)"),
+      field("inputPeakL", "последний пик входа, левый канал"),
+      field("inputPeakR", "последний пик входа, правый канал"),
+      field("inputXruns", "xrun'ы входного тракта"),
+      field("countIn", "тактов отсчёта до старта записи"),
+      field("exitReason", "`seconds`|`signal`"),
+    ],
+    notes: @[
+      "на машине без входного устройства команда завершается кодом 2, файл не создаётся",
+      "рекордер создаётся ДО открытия потока: открытие файла не даёт xrun на старте",
+      "SIGINT/SIGTERM: запись останавливается, WAV-заголовок закрывается, exit 0",
+      "--channels 1 пишет первый входной канал, --channels 2 — пару каналов",
+      "--count-in N: N тактов клика метронома, запись стартует на сильной доле",
+      "отсчёт требует --project с нодой `euterpia.metronome`; клик идёт через граф",
+      "потери кольца считаются (`droppedFrames`) и печатаются в отчёте, а не теряются молча",
+      "`--json` печатает итоговый конверт один раз (запись — не поток метрик)",
+    ])
+
+  MetronomeSpec* = CommandSpec(
+    name: "metronome",
+    summary: "метроном проекта: включить/выключить, звук и уровень",
+    synopsis: "metronome <проект.eproj> on|off [--level N] [--sound имя]",
+    args: @[
+      arg("проект.eproj", "проект с нодой `euterpia.metronome`"),
+      arg("состояние", "`on` или `off`"),
+    ],
+    options: @[
+      opt("--level", "уровень клика 0…2 (сильная и слабая доли)", value = "N"),
+      opt("--sound", "звук клика: click, beep, woodblock, cowbell", value = "имя"),
+    ],
+    example: "euterpia metronome demo.eproj on --sound woodblock --level 0.7",
+    fields: @[
+      field("project", "проект"),
+      field("nodeId", "нода метронома"),
+      field("enabled", "включён ли метроном"),
+      field("sound", "звук клика"),
+      field("accent", "уровень сильной доли"),
+      field("normal", "уровень слабой доли"),
+      field("applied", "была ли запись (false при отсутствии изменений)"),
+    ],
+    notes: @[
+      "метроном — нода `euterpia.metronome`; добавьте её: euterpia node add metronome",
+      "включённая нода кликает по сетке транспорта: темп и размер берутся из проекта",
+      "сильная доля акцентируется; 4/4, 3/4, 6/8 и 5/4 считаются по numerator/denominator",
+      "выключенный метроном пишет тишину и не триггерит голоса",
+      "правка — транзакция истории: `euterpia undo` вернёт прежние параметры",
     ])
 
   PlaySpec* = CommandSpec(
@@ -475,6 +563,137 @@ proc metricLine(snap: JsonNode): string =
 # play
 # =============================================================================
 
+type
+  RecordScan = object
+    ok: bool
+    rep: Report
+    path: string
+    project: string
+    backend: string
+    device: int
+    deviceName: string
+    haveDevice: bool
+    inputDevice: int
+    sampleRate: int
+    blockSize: int
+    seconds: float64
+    haveSeconds: bool
+    channels: int
+    inputChannel: int
+    countIn: int
+
+proc scanRecordArgs(args: seq[string]): RecordScan =
+  ## Разбор `record`. Выход — позиционный и обязательный: запись без пути
+  ## означала бы «куда-нибудь», а таких решений CLI не принимает.
+  result.device = -1
+  result.inputDevice = -1
+  result.inputChannel = 0
+  result.channels = 1
+  result.blockSize = DefaultBlock
+
+  var haveOut = false
+  var i = 0
+  while i < args.len:
+    let key = args[i]
+    if key in ["--project", "--backend", "--device", "--input-device",
+               "--sample-rate", "--block", "--seconds", "--channels",
+               "--input-channel", "--count-in"]:
+      if i + 1 >= args.len:
+        return RecordScan(ok: false,
+          rep: usageError(key & ": нужно значение",
+            "например: euterpia record take.wav --seconds 10"))
+      let value = args[i + 1]
+      case key
+      of "--project":
+        if not isProjectPath(value):
+          return RecordScan(ok: false,
+            rep: usageError("--project: ожидается проект (*.eproj), получено: " & value,
+              "историческое расширение .eut принимается"))
+        result.project = value
+      of "--backend":
+        result.backend = value
+      of "--device":
+        let parsed = intArg(value, "--device", -1, 1_000_000)
+        if not parsed.ok:
+          result.deviceName = value
+        else:
+          result.device = parsed.value
+          result.haveDevice = true
+      of "--input-device":
+        let parsed = intArg(value, "--input-device", 0, 1_000_000)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "индекс устройства ввода: euterpia device list"))
+        result.inputDevice = parsed.value
+      of "--sample-rate":
+        let parsed = intArg(value, "--sample-rate", 1, 1_000_000)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "частота дискретизации в герцах"))
+        result.sampleRate = parsed.value
+      of "--block":
+        let parsed = intArg(value, "--block", 1, MaxBlockSize)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "размер блока в кадрах: 1 … " & $MaxBlockSize))
+        result.blockSize = parsed.value
+      of "--seconds":
+        let parsed = floatArg(value, "--seconds", MaxPlaySeconds)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "длительность записи в секундах; без ключа — до SIGINT"))
+        result.seconds = parsed.value
+        result.haveSeconds = true
+      of "--channels":
+        let parsed = intArg(value, "--channels", 1, 2)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "ширина записи: 1 (моно) или 2 (стерео)"))
+        result.channels = parsed.value
+      of "--input-channel":
+        let parsed = intArg(value, "--input-channel", 0, 64)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "первый канал входа: 0 — первый доступный"))
+        result.inputChannel = parsed.value
+      else: # --count-in
+        let parsed = intArg(value, "--count-in", 1, 64)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "отсчёт: 1…64 такта"))
+        result.countIn = parsed.value
+      i += 2
+      continue
+    elif key.startsWith("-"):
+      return RecordScan(ok: false,
+        rep: usageError("неизвестный ключ: " & key,
+          "ключи record: --project, --backend, --device, --input-device, " &
+          "--sample-rate, --block, --seconds, --channels, --input-channel, " &
+          "--count-in"))
+    else:
+      if haveOut:
+        return RecordScan(ok: false,
+          rep: usageError("файл записи указан дважды: " & result.path & " и " & key,
+            "выход задаётся одним позиционным аргументом"))
+      result.path = key
+      haveOut = true
+    inc i
+
+  if not haveOut:
+    return RecordScan(ok: false,
+      rep: usageError("record: не указан файл записи",
+        "например: euterpia record take.wav --seconds 10"))
+  if not result.path.toLowerAscii().endsWith(".wav"):
+    return RecordScan(ok: false,
+      rep: usageError("record пишет только WAV: " & result.path,
+        "запись в сжатые форматы — кодировщик сдачи (#411), не recorder"))
+  if result.countIn > 0 and result.project.len == 0:
+    return RecordScan(ok: false,
+      rep: usageError("--count-in требует --project: кликать нечем",
+        "отсчёт идёт по метроному проекта: добавьте ноду metronome и " &
+        "укажите --project"))
+  result.ok = true
+
 proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   var path = scan.path
   if path.len == 0 and fileExists(DefaultProjectFile):
@@ -675,6 +894,425 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   okReport(body = body, lines = lines)
 
 # =============================================================================
+# Метроном (#112)
+# =============================================================================
+
+const
+  MetronomeSoundNames = ["click", "beep", "woodblock", "cowbell"]
+
+type
+  MetroScan = object
+    ok: bool
+    rep: Report
+    project: string
+    enabled: bool
+    level: float32
+    haveLevel: bool
+    sound: int
+    haveSound: bool
+
+proc scanMetronomeArgs(args: seq[string]): MetroScan =
+  result.sound = -1
+  var haveState = false
+  var i = 0
+  while i < args.len:
+    let key = args[i]
+    if key in ["--level", "--sound"]:
+      if i + 1 >= args.len:
+        return MetroScan(ok: false,
+          rep: usageError(key & ": нужно значение",
+            "например: euterpia metronome demo.eproj on --level 0.7"))
+      let value = args[i + 1]
+      if key == "--level":
+        let parsed = floatArg(value, "--level", 2.0)
+        if not parsed.ok:
+          return MetroScan(ok: false, rep: usageError(parsed.message,
+            "уровень клика 0…2"))
+        result.level = float32(parsed.value)
+        result.haveLevel = true
+      else:
+        let name = value.toLowerAscii()
+        var idx = -1
+        for k, candidate in MetronomeSoundNames:
+          if candidate == name:
+            idx = k
+        if idx < 0:
+          return MetroScan(ok: false,
+            rep: usageError("--sound: неизвестный звук «" & value & "»",
+              "допустимо: " & MetronomeSoundNames.join(", ")))
+        result.sound = idx
+        result.haveSound = true
+      i += 2
+      continue
+    if key.startsWith("-"):
+      return MetroScan(ok: false,
+        rep: usageError("неизвестный ключ: " & key,
+          "ключи metronome: --level, --sound"))
+    if result.project.len == 0 and isProjectPath(key):
+      result.project = key
+    elif not haveState and key in ["on", "off"]:
+      result.enabled = key == "on"
+      haveState = true
+    else:
+      return MetroScan(ok: false,
+        rep: usageError("непонятный аргумент: " & key,
+          "форма: euterpia metronome <проект> on|off [--level N] [--sound имя]"))
+    inc i
+  if result.project.len == 0:
+    return MetroScan(ok: false,
+      rep: usageError("metronome: не указан проект",
+        "например: euterpia metronome demo.eproj on"))
+  if not haveState:
+    return MetroScan(ok: false,
+      rep: usageError("metronome: укажите on или off",
+        "состояние — обязательный аргумент, а не догадка"))
+  result.ok = true
+
+proc metroParam(node: NodeInfo; name: string): float32 =
+  for p in node.params:
+    if p.name == name:
+      return p.value
+  0.0f
+
+proc runMetronomeCmd*(ctx: var Ctx; args: seq[string]): Report =
+  let sc = scanMetronomeArgs(args)
+  if not sc.ok:
+    return sc.rep
+
+  let loaded = loadAt(sc.project)
+  if not loaded.ok:
+    return loaded.rep
+  var doc = openDocument(sc.project, loaded.proj)
+
+  var node: NodeInfo
+  var found = false
+  for item in queryNodes(doc).nodes:
+    if item.nodeType == "euterpia.metronome":
+      node = item
+      found = true
+      break
+  if not found:
+    return usageError("в проекте нет ноды метронома: " & sc.project,
+      "добавьте ноду: euterpia node add metronome " & sc.project)
+
+  let beforeEnabled = metroParam(node, "enabled") >= 0.5f
+  let beforeSound = int(metroParam(node, "sound"))
+  let beforeAccent = metroParam(node, "accent")
+  let beforeNormal = metroParam(node, "normal")
+
+  var cmds: seq[ControlCommand] = @[
+    setParameter(int32(node.id), (if sc.enabled: 1.0f else: 0.0f), "enabled")
+  ]
+  if sc.haveLevel:
+    cmds.add setParameter(int32(node.id), sc.level, "accent")
+    cmds.add setParameter(int32(node.id), sc.level, "normal")
+  if sc.haveSound:
+    cmds.add setParameter(int32(node.id), float32(sc.sound), "sound")
+
+  let plan = doc.applyTransaction(cmds, "metronome " &
+    (if sc.enabled: "on" else: "off"))
+  if not plan.frame.isOk():
+    return frameReport(plan.frame)
+
+  var after: NodeInfo
+  for item in queryNodes(doc).nodes:
+    if item.id == node.id:
+      after = item
+  let applied =
+    beforeEnabled != sc.enabled or
+    (sc.haveSound and beforeSound != sc.sound) or
+    (sc.haveLevel and (beforeAccent != sc.level or beforeNormal != sc.level))
+
+  var body = %*{
+    "project": sc.project,
+    "nodeId": node.id,
+    "enabled": metroParam(after, "enabled") >= 0.5f,
+    "sound": MetronomeSoundNames[int(metroParam(after, "sound"))],
+    "accent": metroParam(after, "accent"),
+    "normal": metroParam(after, "normal"),
+    "applied": applied,
+  }
+  var lines = @[
+    "метроном " & (if sc.enabled: "включён" else: "выключен") &
+      " (нода #" & $node.id & ")",
+    "звук: " & body["sound"].getStr &
+      ", сильная: " & formatFloat(float64(body["accent"].getFloat), ffDecimal, 2) &
+      ", слабая: " & formatFloat(float64(body["normal"].getFloat), ffDecimal, 2),
+  ]
+
+  if ctx.dryRun:
+    return okReport(body = body, lines = lines &
+      @["не записан: " & sc.project & " (--dry-run)"])
+  if not applied:
+    return okReport(body = body, lines = lines & @["изменений нет"])
+
+  let saved = writeAtomic(sc.project, doc.proj)
+  if not saved.success:
+    return saveError(saved, sc.project)
+  let entry = HistoryEntry(redo: plan.redo, undo: plan.undo,
+                           description: plan.description)
+  let recorded = recordEntry(sc.project, entry)
+  if not recorded.isOk():
+    return frameReport(recorded)
+  lines.add "записан: " & sc.project
+  okReport(body = body, lines = lines)
+
+
+proc runRecord(ctx: var Ctx; scan: RecordScan): Report =
+  ## Запись входа в WAV. Порядок важен и зафиксирован:
+  ##   1. рекордер и файл трека — ДО открытия потока (иначе первый блок
+  ##      тратится на fopen и даёт xrun);
+  ##   2. движок/сцена → attachRecorder → openBackend;
+  ##   3. stop → закрыть поток → detach → уничтожить движок → уничтожить
+  ##      рекордер. Обратный порядок оставил бы висячий указатель в callback.
+  let outPath = scan.path
+  let outDir = if parentDir(outPath).len > 0: parentDir(outPath) else: "."
+  if not dirExists(outDir):
+    try:
+      createDir(outDir)
+    except CatchableError:
+      return envError("каталог записи недоступен: " & outDir,
+        "проверьте права и путь", errorKind = "io")
+
+  # --- проект и частота -----------------------------------------------------
+  var proj: ProjectFormat
+  var haveProject = false
+  var sr = scan.sampleRate
+  var tempo = 120.0
+  var tsNum = 4'i32
+  var tsDen = 4'i32
+  if scan.project.len > 0:
+    let loaded = loadAt(scan.project)
+    if not loaded.ok:
+      return loaded.rep
+    proj = loaded.proj
+    haveProject = true
+    let meta = queryMetadata(openDocument(scan.project, proj))
+    if meta.tempo > 1.0f:
+      tempo = float64(meta.tempo)
+    if meta.tsNumerator > 0:
+      tsNum = meta.tsNumerator
+    if meta.tsDenominator > 0:
+      tsDen = meta.tsDenominator
+    if sr <= 0:
+      let fromProject = int(round(float64(meta.sampleRate)))
+      if fromProject > 0:
+        sr = fromProject
+    if scan.countIn > 0:
+      var hasMetronome = false
+      for node in queryNodes(openDocument(scan.project, proj)).nodes:
+        if node.nodeType == "euterpia.metronome":
+          hasMetronome = true
+      if not hasMetronome:
+        return usageError("--count-in: в проекте нет ноды метронома",
+          "добавьте ноду: euterpia node add metronome " & scan.project)
+  if sr <= 0:
+    sr = configInt(ctx, "sampleRate", 48000)
+  let bs = if scan.blockSize > 0: scan.blockSize
+           else: configInt(ctx, "blockSize", DefaultBlock)
+
+  # --- рекордер -------------------------------------------------------------
+  var rec: LiveRecorder
+  initLiveRecorder(rec, int32(sr), int32(bs), outDir,
+                   int32(scan.channels))
+  if not addLiveRecorderTrack(rec, int32(scan.inputChannel),
+                              int32(scan.channels), 0):
+    closeLiveRecorder(rec)
+    return envError("не удалось создать трек записи",
+      "проверьте каталог " & outDir & " и ширину --channels")
+  armLiveRecorder(rec)
+
+  # --- сцена/сеанс ----------------------------------------------------------
+  var scene: Scene
+  var session: LiveSession
+  if haveProject:
+    var reg = builtinRegistry()
+    scene = loadScene(reg, proj, -1, int32(sr), parentDir(scan.project))
+    if not scene.ok:
+      closeLiveRecorder(rec)
+      return usageError(scene.error,
+        "проверьте граф: euterpia graph check " & scan.project)
+    session = initLiveSession(float32(sr), int32(bs), detachPipeline(scene))
+  else:
+    session = initEmptyLiveSession(float32(sr), int32(bs))
+
+  if not session.isActive:
+    if haveProject:
+      destroyScene(scene)
+    closeLiveRecorder(rec)
+    return panicError("не удалось создать сеанс записи",
+      "проверьте sampleRate/blockSize: " & $sr & "/" & $bs)
+
+  attachLiveRecorder(session, rec)
+  setLiveInputChannels(session, int32(scan.channels))
+
+  # --- бэкенд и устройство --------------------------------------------------
+  var mgr = initBackendManager()
+  registerCliBackends(mgr)
+  var backend = scan.backend
+  if backend.len == 0:
+    backend = ctx.config.entry("backend").value
+  if backend.len == 0:
+    backend = "miniaudio"
+  if not mgr.hasBackend(backend):
+    detachLiveRecorder(session)
+    session.closeLiveSession()
+    if haveProject: destroyScene(scene)
+    closeLiveRecorder(rec)
+    return usageError("неизвестный аудио-бэкенд: " & backend,
+      "доступны: " & mgr.backendNames().join(", "))
+
+  var device = int(DefaultDeviceIndex)
+  if scan.haveDevice:
+    device = if scan.deviceName.len > 0: resolveDevice(backend, scan.deviceName)
+             else: scan.device
+    if device == -2:
+      detachLiveRecorder(session)
+      session.closeLiveSession()
+      if haveProject: destroyScene(scene)
+      closeLiveRecorder(rec)
+      return envError("устройство вывода не найдено: «" & scan.deviceName & "»",
+        "список устройств: euterpia device list")
+
+  var cfg = AudioStreamConfig(
+    sampleRate: float64(sr),
+    blockSize: int32(bs),
+    inputChannels: int32(scan.channels),
+    outputChannels: MaxAudioChannels,
+    inputDevice: int32(scan.inputDevice),
+    outputDevice: int32(device),
+    reportStatus: liveStatus
+  )
+
+  let explicit = scan.backend.len > 0 or
+                 ctx.config.entry("backend").value.len > 0
+  let openErr =
+    if explicit:
+      mgr.openBackend(backend, cfg, liveRender, cast[pointer](addr session))
+    else:
+      mgr.openPreferred(cfg, liveRender, cast[pointer](addr session),
+                        ["miniaudio"])
+
+  if openErr != bmOk:
+    detachLiveRecorder(session)
+    session.closeLiveSession()
+    if haveProject: destroyScene(scene)
+    closeLiveRecorder(rec)
+    let reason =
+      case openErr
+      of bmUnknownBackend: "бэкенд не зарегистрирован: " & backend
+      of bmUnavailable: "адаптер недоступен"
+      of bmOpenFailed: "не удалось открыть устройство ввода/вывода"
+      of bmAlreadyOpen: "менеджер уже открыт"
+      else: "неизвестная ошибка бэкенда"
+    return envError("запись недоступна: " & reason,
+      "проверьте `euterpia device list --json`; нужен вход с " &
+      $scan.channels & " каналом(ами)")
+
+  # --- сеанс записи ---------------------------------------------------------
+  installStopHandlers()
+  var recordStart = 0'i64
+  if scan.countIn > 0:
+    # Отсчёт: транспорт играет клик N тактов, запись стартует на сильной
+    # доле следующего такта. Рекордер получает целевой сэмпл и сам делает
+    # sample-accurate старт (pre-roll уже в кольце).
+    let barFrames = float64(sr) * 60.0 / tempo *
+                    float64(tsNum) * 4.0 / float64(tsDen)
+    recordStart = int64(round(barFrames * float64(scan.countIn)))
+    discard session.postSetTempo(tempo)
+    discard session.postSetMeter(tsNum, tsDen)
+    discard session.postPlay()
+    session.flushQueuedCommands()
+  startLiveRecording(rec, recordStart)
+  let started = getMonoTime()
+  let limitMs = if scan.haveSeconds: int64(scan.seconds * 1000.0) else: -1'i64
+  var lastMetric: LiveMetrics
+  var haveMetric = false
+  var exitReason = "signal"
+
+  while not liveRequested():
+    let elapsed = (getMonoTime() - started).inMilliseconds
+    if limitMs >= 0 and elapsed >= limitMs:
+      exitReason = "seconds"
+      break
+    session.pollReclamation()
+    var m: LiveMetrics
+    while session.pollMetrics(m):
+      lastMetric = m
+      haveMetric = true
+    sleep(10)
+
+  stopLiveRecording(rec)
+
+  # Worker финализирует файл по rcStop. Ждём регион коротко; ждать вечно
+  # нельзя — «повисший» writer не должен превращать запись в зависание.
+  var regions: seq[LiveRegion] = @[]
+  for _ in 0 ..< 200:
+    for r in liveRecordedRegions(rec):
+      regions.add r
+    if regions.len > 0:
+      break
+    sleep(10)
+
+  let dropped = liveDroppedFrames(rec)
+  mgr.closeBackend()
+  detachLiveRecorder(session)
+  session.closeLiveSession()
+  if haveProject:
+    destroyScene(scene)
+  closeLiveRecorder(rec)
+
+  var finalPath = outPath
+  var frames = 0'i64
+  if regions.len > 0:
+    frames = regions[0].lengthSamples
+    let src = regions[0].filename
+    if src != outPath:
+      try:
+        if fileExists(outPath):
+          removeFile(outPath)
+        moveFile(src, outPath)
+      except CatchableError:
+        finalPath = src
+  else:
+    return envError("запись не создала файл: " & outPath,
+      "устройство не отдало входные кадры; проверьте `--channels`, " &
+      "`--input-device` и `euterpia device list`")
+
+  let elapsedMs = (getMonoTime() - started).inMilliseconds
+  var body = %*{
+    "path": finalPath,
+    "project": scan.project,
+    "backend": backend,
+    "device": device,
+    "inputDevice": scan.inputDevice,
+    "sampleRate": sr,
+    "blockSize": bs,
+    "channels": scan.channels,
+    "seconds": float64(elapsedMs) / 1000.0,
+    "frames": frames,
+    "droppedFrames": dropped,
+    "inputXruns": (if haveMetric: int(lastMetric.inputXruns) else: 0),
+    "countIn": scan.countIn,
+    "exitReason": exitReason,
+  }
+  if haveMetric:
+    body["inputPeakL"] = %lastMetric.inputPeakL
+    body["inputPeakR"] = %lastMetric.inputPeakR
+
+  var lines = @[
+    "запись остановлена (" &
+      (if exitReason == "seconds": "истекло --seconds"
+       else: "сигнал завершения") & ")",
+    "бэкенд: " & backend & ", выход: " & $device &
+      ", вход: " & $scan.inputChannel & ", " & $sr & " Гц / " &
+      $bs & " кадров",
+    "кадров: " & $frames & ", потеряно: " & $dropped &
+      ", файл: " & finalPath,
+  ]
+  okReport(body = body, lines = lines)
+
+# =============================================================================
 # Точки входа команд
 # =============================================================================
 
@@ -693,4 +1331,10 @@ proc runPlay*(ctx: var Ctx; args: seq[string]): Report =
   if not scan.ok:
     return scan.rep
   runPlay(ctx, scan)
+
+proc runRecordCmd*(ctx: var Ctx; args: seq[string]): Report =
+  let scan = scanRecordArgs(args)
+  if not scan.ok:
+    return scan.rep
+  runRecord(ctx, scan)
 

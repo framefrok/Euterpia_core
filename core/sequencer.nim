@@ -9,7 +9,10 @@ const
   MaxClips*             = 256
   MaxAutomationPoints*  = 1024
   DefaultMaxSongTicks*  = 1_000_000'i32   
-  MaxScheduledPerClip*  = MaxNotesPerClip * 2  
+  MaxScheduledPerClip*  = MaxNotesPerClip * 2
+    ## Жёсткий предел событий одного клипа (note-on + note-off). Действует
+    ## при `compile`: loop-клип с крошечной длиной иначе размножал ноты до
+    ## горизонта песни и исчерпывал память (аудит, P0).
   PI_F*                 = 3.14159265358979f
 
 type
@@ -170,50 +173,62 @@ proc addAutomationPoint*(s: var Sequencer, nodeId: int32, paramId: uint32,
 proc expandClipEvents(clip: Clip, trackId: int32,
                       maxSongTicks: int32,
                       outEvents: var seq[ScheduledEvent]) =
+  ## Разворачивает клип в события песни.
+  ##
+  ## Лимиты (аудит, P0):
+  ##   * не больше `MaxScheduledPerClip` событий на клип — иначе loop-клип
+  ##     длиной 1 тик при горизонте 1e6 раздувал seq до OOM;
+  ##   * арифметика тиков идёт в `int64`: `iter + lengthTicks` в `int32`
+  ##     переполнялся на больших значениях из файла проекта;
+  ##   * note-off клампится горизонтом песни, а не уезжает за него.
   if clip.lengthTicks <= 0: return
   if clip.notes.len == 0: return
 
   let velScale = 1.0f / 127.0f
+  let horizon = int64(maxSongTicks)
+  let clipLen = int64(clip.lengthTicks)
+  let clipStart = int64(clip.startTick)
 
-  if not clip.loopEnabled:
-    for n in clip.notes:
-      let a0 = clip.startTick + n.startTick
-      let a1 = a0 + n.duration
-      if a0 >= maxSongTicks: continue
+  template emitNote(n: NoteEvent; a0, offRaw: int64) =
+    ## Пара note-on/note-off, если есть место и note-on внутри горизонта.
+    ##
+    ## Note-off НЕ клампится горизонтом: он ограничен только концом клипа.
+    ## Так `maxTick` честно учитывает хвост последней ноты (поведение
+    ## зафиксировано тестом «loop: клип повторяется до maxSongTicks»).
+    ## Верхняя граница `int32` — защита от OverflowDefect на мусорных
+    ## `startTick/duration` из файла проекта.
+    if a0 < horizon and outEvents.len + 2 <= MaxScheduledPerClip:
+      let offTick = int32(min(max(offRaw, a0), int64(high(int32))))
       outEvents.add ScheduledEvent(
-        tick: a0, kind: evNoteOn,
+        tick: int32(a0), kind: evNoteOn,
         channel: n.channel, note: n.pitch,
         velocity: float32(n.velocity) * velScale,
         trackId: trackId, clipId: clip.id
       )
-      let offTick = min(a1, clip.startTick + clip.lengthTicks)
       outEvents.add ScheduledEvent(
         tick: offTick, kind: evNoteOff,
         channel: n.channel, note: n.pitch,
         velocity: 0.0f,
         trackId: trackId, clipId: clip.id
       )
+
+  if not clip.loopEnabled:
+    for n in clip.notes:
+      let a0 = clipStart + int64(n.startTick)
+      let a1 = min(a0 + int64(n.duration), clipStart + clipLen)
+      emitNote(n, a0, a1)
+      if outEvents.len + 2 > MaxScheduledPerClip:
+        break
   else:
-    var iter = clip.startTick
-    while iter < maxSongTicks:
+    var iter = clipStart
+    while iter < horizon:
       for n in clip.notes:
-        let a0 = iter + n.startTick
-        let a1 = a0 + n.duration
-        if a0 >= maxSongTicks: continue
-        outEvents.add ScheduledEvent(
-          tick: a0, kind: evNoteOn,
-          channel: n.channel, note: n.pitch,
-          velocity: float32(n.velocity) * velScale,
-          trackId: trackId, clipId: clip.id
-        )
-        let offTick = min(a1, iter + clip.lengthTicks)
-        outEvents.add ScheduledEvent(
-          tick: offTick, kind: evNoteOff,
-          channel: n.channel, note: n.pitch,
-          velocity: 0.0f,
-          trackId: trackId, clipId: clip.id
-        )
-      iter += clip.lengthTicks
+        let a0 = iter + int64(n.startTick)
+        let a1 = min(a0 + int64(n.duration), iter + clipLen)
+        emitNote(n, a0, a1)
+      if outEvents.len + 2 > MaxScheduledPerClip:
+        break
+      iter += clipLen
 
 proc compile*(s: Sequencer,
               maxSongTicks: int32 = DefaultMaxSongTicks): CompiledSequencer =
@@ -306,7 +321,13 @@ proc processBlock*(rt: var SequencerRuntime,
 # Automation — RT read
 # =============================================================================
 
-proc interpolate(v1, v2: float32, t: float32, curve: AutomationCurve): float32 {.inline.} =
+proc interpolateAutomation*(v1, v2: float32; t: float32;
+                            curve: AutomationCurve): float32 {.inline.} =
+  ## Значение между двумя точками автоматизации (аудит, P2).
+  ##
+  ## Экспортируется, чтобы офлайн-рендер считал ТУ ЖЕ кривую, что и
+  ## воспроизведение: раньше `offline_render` использовал Эрмита для
+  ## `acSmooth`, и файл расходился со звуком в реальном времени.
   case curve
   of acLinear:
     v1 + (v2 - v1) * t
@@ -352,7 +373,7 @@ proc getAutomationValue*(c: CompiledSequencer,
   let span = float32(p2.tick - p1.tick)
   if span <= 0.0f: return p1.value
   let frac = float32(t - p1.tick) / span
-  interpolate(p1.value, p2.value, frac, p1.curve)
+  interpolateAutomation(p1.value, p2.value, frac, p1.curve)
 
 proc fillAutomationBlock*(c: CompiledSequencer,
                           nodeId: int32, paramId: uint32,
@@ -395,6 +416,6 @@ proc fillAutomationBlock*(c: CompiledSequencer,
       output[s] = p1.value
     else:
       let frac = float32(t - p1.tick) / span
-      output[s] = interpolate(p1.value, p2.value, frac, p1.curve)
+      output[s] = interpolateAutomation(p1.value, p2.value, frac, p1.curve)
 
 {.pop.}

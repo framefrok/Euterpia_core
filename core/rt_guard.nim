@@ -70,12 +70,15 @@ var
   # audio-поток и control-поток видят РАЗНЫЕ значения: пометка в audio-потоке
   # не запрещает malloc на control-path (и наоборот) — ровно то, что нужно.
   tlDepth: int32
-  tlLastSite: int32
 
   # Счётчики нарушений — общие для всех потоков: control-path читает их,
   # чтобы увидеть, что debug-прогон что-то поймал.
   gViolations: Atomic[uint64]
   gLastKind: Atomic[int32]
+  # Номер строки последнего нарушения тоже ОБЩИЙ (аудит, P2): TLS-переменная
+  # писалась в audio-потоке, а `lastViolation` читал её в control-потоке и
+  # всегда получал 0 — диагностика теряла место бага.
+  gLastSite: Atomic[int32]
 
 # ----------------------------------------------------------------------------
 # Состояние
@@ -106,7 +109,7 @@ proc violationCount*(): uint64 {.inline, raises: [].} =
 proc lastViolation*(): tuple[kind: RtViolation, site: int32] =
   ## Последнее пойманное нарушение. Control-path (для отчёта в тесте/логе).
   let raw = gLastKind.load(moRelaxed)
-  result.site = tlLastSite
+  result.site = gLastSite.load(moRelaxed)
   if raw >= 0 and raw <= int32(high(RtViolation)):
     result.kind = RtViolation(raw)
   else:
@@ -116,7 +119,7 @@ proc resetViolations*() {.inline, raises: [].} =
   ## Сбросить счётчики. Control-path: тест вызывает между кейсами.
   gViolations.store(0'u64, moRelaxed)
   gLastKind.store(-1'i32, moRelaxed)
-  tlLastSite = 0
+  gLastSite.store(0'i32, moRelaxed)
 
 
 
@@ -132,7 +135,7 @@ proc noteViolation(kind: RtViolation, site: int32) {.inline, raises: [].} =
   ## «поймали» от «не поймали».
   gLastKind.store(int32(kind), moRelaxed)
   discard gViolations.fetchAdd(1'u64, moRelaxed)
-  tlLastSite = site
+  gLastSite.store(site, moRelaxed)
 
   when defined(rtGuardEnabled):
     case kind

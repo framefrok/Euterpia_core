@@ -15,21 +15,30 @@
 # - библиотека грузится через dynlib при первом вызове: отсутствие
 #   librtmidi — это meUnavailable/meInitFailed, а не крэш на старте.
 
-import std/atomics
+import std/[atomics, dynlib]
 import midi_api
 import ring_buffer
 import logger
+import ../lazy_dynlib
 
 when defined(windows):
-  const RtMidiLib = "rtmidi.dll"
+  const RtMidiLibDefault = "rtmidi.dll"
 elif defined(macosx):
-  const RtMidiLib = "librtmidi.dylib"
+  const RtMidiLibDefault = "librtmidi.dylib"
 else:
-  const RtMidiLib = "librtmidi.so"
+  const RtMidiLibDefault = "librtmidi.so"
+
+const RtMidiLibEnv = "EUTERPIA_RTMIDI_LIB"
+  ## Переопределение имени библиотеки для теста «библиотеки нет» (#267).
 
 # ==============================================================================
 # RtMidi C ABI
 # ==============================================================================
+#
+# Библиотека грузится лениво в rtInit() (#267): импорт адаптера на машине
+# без librtmidi не роняет процесс до main(), а midiInit возвращает
+# meUnavailable. Прагма `dynlib` этого не умеет — она резолвит символы в
+# инициализации модуля.
 
 type
   RtMidiPtr = pointer
@@ -41,41 +50,103 @@ type
     message: ptr UncheckedArray[uint8],
     messageSize: csize_t,
     userData: pointer
-  ) {.cdecl.}
+  ) {.cdecl, raises: [], gcsafe.}
 
-{.pragma: rtmidi_import, importc, dynlib: RtMidiLib.}
+  RtMidiInCreateProc = proc(): RtMidiInPtr {.cdecl, raises: [], gcsafe.}
+  RtMidiOutCreateProc = proc(): RtMidiOutPtr {.cdecl, raises: [], gcsafe.}
+  RtMidiFreeProc = proc(device: pointer) {.cdecl, raises: [], gcsafe.}
+  RtMidiGetPortCountProc = proc(device: RtMidiPtr): cuint {.cdecl, raises: [], gcsafe.}
+  RtMidiGetPortNameProc = proc(
+    device: RtMidiPtr,
+    portNumber: cuint,
+    bufOut: cstring,
+    bufLen: ptr cint
+  ): cint {.cdecl, raises: [], gcsafe.}
+  RtMidiOpenPortProc = proc(device: RtMidiPtr, portNumber: cuint,
+                            portName: cstring) {.cdecl, raises: [], gcsafe.}
+  RtMidiClosePortProc = proc(device: RtMidiPtr) {.cdecl, raises: [], gcsafe.}
+  RtMidiSetCallbackProc = proc(device: RtMidiInPtr,
+                               callback: RtMidiInputCallback,
+                               userData: pointer) {.cdecl, raises: [], gcsafe.}
+  RtMidiCancelCallbackProc = proc(device: RtMidiInPtr) {.cdecl, raises: [], gcsafe.}
+  RtMidiSendMessageProc = proc(device: RtMidiOutPtr,
+                               message: ptr uint8,
+                               length: cint): cint {.cdecl, raises: [], gcsafe.}
+  RtMidiIgnoreTypesProc = proc(device: RtMidiInPtr; midiSysex: bool;
+                               midiTime: bool; midiSense: bool) {.cdecl, raises: [], gcsafe.}
 
-proc rtmidi_in_create_default(): RtMidiInPtr {.rtmidi_import.}
-proc rtmidi_out_create_default(): RtMidiOutPtr {.rtmidi_import.}
-proc rtmidi_in_free(device: RtMidiInPtr) {.rtmidi_import.}
-proc rtmidi_out_free(device: RtMidiOutPtr) {.rtmidi_import.}
-proc rtmidi_get_port_count(device: RtMidiPtr): cuint {.rtmidi_import.}
+var
+  rtLib: LazyLibrary
+  rtInCreateSym: RtMidiInCreateProc
+  rtOutCreateSym: RtMidiOutCreateProc
+  rtInFreeSym: RtMidiFreeProc
+  rtOutFreeSym: RtMidiFreeProc
+  rtGetPortCountSym: RtMidiGetPortCountProc
+  rtGetPortNameSym: RtMidiGetPortNameProc
+  rtOpenPortSym: RtMidiOpenPortProc
+  rtClosePortSym: RtMidiClosePortProc
+  rtSetCallbackSym: RtMidiSetCallbackProc
+  rtCancelCallbackSym: RtMidiCancelCallbackProc
+  rtSendMessageSym: RtMidiSendMessageProc
+  rtIgnoreTypesSym: RtMidiIgnoreTypesProc
+
+proc loadRtMidi(): bool =
+  if not rtLib.handle.isNil:
+    return true
+  if not openLibrary(rtLib):
+    return false
+  result =
+    symPtr(rtLib, "rtmidi_in_create_default", rtInCreateSym) and
+    symPtr(rtLib, "rtmidi_out_create_default", rtOutCreateSym) and
+    symPtr(rtLib, "rtmidi_in_free", rtInFreeSym) and
+    symPtr(rtLib, "rtmidi_out_free", rtOutFreeSym) and
+    symPtr(rtLib, "rtmidi_get_port_count", rtGetPortCountSym) and
+    symPtr(rtLib, "rtmidi_get_port_name", rtGetPortNameSym) and
+    symPtr(rtLib, "rtmidi_open_port", rtOpenPortSym) and
+    symPtr(rtLib, "rtmidi_close_port", rtClosePortSym) and
+    symPtr(rtLib, "rtmidi_in_set_callback", rtSetCallbackSym) and
+    symPtr(rtLib, "rtmidi_in_cancel_callback", rtCancelCallbackSym) and
+    symPtr(rtLib, "rtmidi_out_send_message", rtSendMessageSym) and
+    symPtr(rtLib, "rtmidi_in_ignore_types", rtIgnoreTypesSym)
+
+proc rtmidi_in_create_default(): RtMidiInPtr {.inline.} = rtInCreateSym()
+proc rtmidi_out_create_default(): RtMidiOutPtr {.inline.} = rtOutCreateSym()
+proc rtmidi_in_free(device: RtMidiInPtr) {.inline.} = rtInFreeSym(device)
+proc rtmidi_out_free(device: RtMidiOutPtr) {.inline.} = rtOutFreeSym(device)
+proc rtmidi_get_port_count(device: RtMidiPtr): cuint {.inline.} =
+  rtGetPortCountSym(device)
 proc rtmidi_get_port_name(
   device: RtMidiPtr,
   portNumber: cuint,
   bufOut: cstring,
   bufLen: ptr cint
-): cint {.rtmidi_import.}
+): cint {.inline.} =
+  rtGetPortNameSym(device, portNumber, bufOut, bufLen)
 proc rtmidi_open_port(device: RtMidiPtr, portNumber: cuint, portName: cstring)
-  {.rtmidi_import.}
-proc rtmidi_close_port(device: RtMidiPtr) {.rtmidi_import.}
+  {.inline.} =
+  rtOpenPortSym(device, portNumber, portName)
+proc rtmidi_close_port(device: RtMidiPtr) {.inline.} = rtClosePortSym(device)
 proc rtmidi_in_set_callback(
   device: RtMidiInPtr,
   callback: RtMidiInputCallback,
   userData: pointer
-) {.rtmidi_import.}
-proc rtmidi_in_cancel_callback(device: RtMidiInPtr) {.rtmidi_import.}
+) {.inline.} =
+  rtSetCallbackSym(device, callback, userData)
+proc rtmidi_in_cancel_callback(device: RtMidiInPtr) {.inline.} =
+  rtCancelCallbackSym(device)
 proc rtmidi_out_send_message(
   device: RtMidiOutPtr,
   message: ptr uint8,
   length: cint
-): cint {.rtmidi_import.}
+): cint {.inline.} =
+  rtSendMessageSym(device, message, length)
 proc rtmidi_in_ignore_types(
   device: RtMidiInPtr,
   midiSysex: bool,
   midiTime: bool,
   midiSense: bool
-) {.rtmidi_import.}
+) {.inline.} =
+  rtIgnoreTypesSym(device, midiSysex, midiTime, midiSense)
 
 # ==============================================================================
 # Состояние адаптера
@@ -197,6 +268,10 @@ proc rtInit(api: ptr MidiBackendApi; log: ptr Logger): MidiError
     return meUnavailable
   if not log.isNil:
     pb.log = log[]
+  # Ленивая загрузка (#267): нет библиотеки — meUnavailable, процесс жив.
+  if not loadRtMidi():
+    logError(addr pb.log, "rtmidi: " & libraryError(rtLib))
+    return meUnavailable
   pb.initialized = true
   meOk
 
@@ -401,6 +476,7 @@ proc createRtMidiBackend*(log: Logger = silentLogger()): ptr MidiBackendApi =
   pb.log = log
   pb.initialized = false
   initSlots(pb)
+  rtLib.setLibraryName(resolveLibraryName(RtMidiLibEnv, RtMidiLibDefault))
 
   api.backendName = cstring"rtmidi"
   api.impl = cast[pointer](pb)
