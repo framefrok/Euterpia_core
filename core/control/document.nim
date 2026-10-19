@@ -654,6 +654,11 @@ proc snapshotNode*(doc: Document; nodeId: int32):
   var conns: seq[ControlCommand] = @[]
   for conn in doc.proj.graph.connections:
     if conn.srcNodeId == nodeId or conn.dstNodeId == nodeId:
+      # Битая связь (sigType вне перечисления) не станет командой: иначе
+      # `ControlPortKind(conn.sigType)` бросил бы RangeDefect. Такие связи
+      # всё равно отвергает `graph check`, а откат удаления не должен падать.
+      if conn.sigType < 0 or conn.sigType > ord(cpkEvent):
+        continue
       conns.add connect(
         port(int32(conn.srcNodeId), ControlPortKind(conn.sigType),
              int32(conn.srcPortIdx)),

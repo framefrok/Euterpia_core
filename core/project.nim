@@ -428,19 +428,6 @@ proc safeInt(n: JsonNode, key: string, def: int = 0): int =
   else:
     def
 
-proc safeSigType(n: JsonNode, key: string, err: var string): int =
-  ## Ordinal `SignalType` из файла с проверкой диапазона (аудит, P0).
-  ##
-  ## Раньше `sigType` читался без валидации: значение 99 позже превращалось
-  ## в `ControlPortKind(conn.sigType)` / `SignalType(...)` и давало
-  ## RangeDefect уже в control-слое. Теперь мусор — ошибка формата.
-  result = safeInt(n, key, 0)
-  if result < 0 or result > ord(high(SignalType)):
-    if err.len > 0: err.add("; ")
-    err.add("'" & key & "'=" & $result & " вне диапазона [0.." &
-            $ord(high(SignalType)) & "]")
-    result = 0
-
 proc latencyValue(n: JsonNode; key: string): uint32 =
   ## Latency из файла с насыщением на пределе (issue #405).
   ##
@@ -542,7 +529,7 @@ proc parseNode(n: JsonNode, err: var string; depth = 0): NodeFormat =
       result.subgraphConnections.add(ConnectionFormat(
         srcNodeId: safeInt(sc, "srcNodeId"), srcPortIdx: safeInt(sc, "srcPortIdx"),
         dstNodeId: safeInt(sc, "dstNodeId"), dstPortIdx: safeInt(sc, "dstPortIdx"),
-        sigType: safeSigType(sc, "sigType", err)
+        sigType: safeInt(sc, "sigType")
       ))
 
   let subInsNode = n{"subgraphInputs"}
@@ -553,7 +540,7 @@ proc parseNode(n: JsonNode, err: var string; depth = 0): NodeFormat =
         name: safeStr(port, "name"),
         localNodeId: safeInt(port, "localNodeId"),
         localPortIdx: safeInt(port, "localPortIdx"),
-        sigType: safeSigType(port, "sigType", err)
+        sigType: safeInt(port, "sigType")
       ))
 
   let subOutsNode = n{"subgraphOutputs"}
@@ -564,7 +551,7 @@ proc parseNode(n: JsonNode, err: var string; depth = 0): NodeFormat =
         name: safeStr(port, "name"),
         localNodeId: safeInt(port, "localNodeId"),
         localPortIdx: safeInt(port, "localPortIdx"),
-        sigType: safeSigType(port, "sigType", err)
+        sigType: safeInt(port, "sigType")
       ))
 
 # ============================================================================
@@ -710,7 +697,7 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
         res.graph.connections.add(ConnectionFormat(
           srcNodeId: safeInt(c, "srcNodeId"), srcPortIdx: safeInt(c, "srcPortIdx"),
           dstNodeId: safeInt(c, "dstNodeId"), dstPortIdx: safeInt(c, "dstPortIdx"),
-          sigType: safeSigType(c, "sigType", rangeErr)
+          sigType: safeInt(c, "sigType")
         ))
         
   let seqNode = root{"sequencer"}

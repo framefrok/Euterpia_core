@@ -2887,8 +2887,11 @@ suite "CLI: master — сдача материала (#209)":
     check raw.find("IART") >= 0
     check raw.find("Test Song") >= 0
     check raw.find("Unit") >= 0
-    # 24 бита в fmt-чанке (смещение 34, little-endian).
-    check int(uint8(raw[34])) == 24
+    # 24 бита в fmt-чанке. Смещение ищется по маркеру, а не жёстко:
+    # перед `fmt ` писатель резервирует `JUNK` под будущий `ds64` (RF64).
+    let fmtPos = raw.find("fmt ")
+    check fmtPos >= 0
+    check int(uint8(raw[fmtPos + 8 + 14])) == 24
 
   test "проект рендерится в 32-бит и мастерится одной командой":
     let dir = getTempDir() / "euterpia_cli_master_proj"

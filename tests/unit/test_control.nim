@@ -460,3 +460,19 @@ suite "control: обратимость узлов и связей (аудит P1
     check node.parameters["freq"] == 20000.0f32
     check not node.parameters.hasKey("noSuchParam")
 
+
+  test "snapshotNode пропускает связь с битой sigType, а не падает":
+    var doc = newDoc()
+    discard doc.applyCommand(createNode("test.gain", "", 1))
+    discard doc.applyCommand(createNode("test.gain", "", 2))
+    # Такую связь примет загрузчик (диагностирует graph check), но
+    # ControlPortKind(99) бросил бы RangeDefect при построении undo.
+    doc.proj.graph.connections.add ConnectionFormat(
+      srcNodeId: 1, srcPortIdx: 0, dstNodeId: 2, dstPortIdx: 0, sigType: 99)
+
+    let plan = doc.applyTransaction(@[deleteNode(1)], "delete broken conn")
+    check plan.frame.isOk()
+    check doc.proj.graph.connections.len == 0
+    # Откат существует (нода), битая связь просто не вошла в него.
+    check plan.undo.len >= 1
+

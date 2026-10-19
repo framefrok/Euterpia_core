@@ -584,7 +584,10 @@ suite "project: пределы разбора (P0-аудит)":
     check not saved.success
     check saved.error.kind == pekInvalidFormat
 
-  test "sigType вне диапазона отвергается на загрузке":
+  test "sigType вне диапазона читается, но не роняет control-слой":
+    # `project validate` обязан ДИАГНОСТИРОВАТЬ такую связь (graph check →
+    # badSignal), поэтому загрузчик её не отвергает. RangeDefect предотвращён
+    # в точках конвертации (snapshotNode/disconnectUndo).
     let path = getTempDir() / "euterpia_proj_sigtype.json"
     writeFile(path, """{"format":"euterpia-project","version":2,
       "graph":{"nodes":[{"id":1,"nodeType":"a"},{"id":2,"nodeType":"b"}],
@@ -593,8 +596,8 @@ suite "project: пределы разбора (P0-аудит)":
     defer: removeFile(path)
 
     let loaded = loadProject(path)
-    check not loaded.success
-    check loaded.error.kind == pekInvalidFormat
-    check loaded.error.message.contains("sigType")
+    check loaded.success
+    check loaded.value.graph.connections.len == 1
+    check loaded.value.graph.connections[0].sigType == 99
 
 
