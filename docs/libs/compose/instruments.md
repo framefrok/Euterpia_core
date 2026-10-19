@@ -1,6 +1,6 @@
 # Инструменты и ноды «из коробки»
 
-В реестре ядра **30 типов**: 10 DSP-нод, **17 инструментов**, нотный
+В реестре ядра **31 тип**: 11 DSP-нод (включая метроном), **17 инструментов**, нотный
 секвенсор `notes`, плеер секвенсора проекта `sequencer` и плеер аудиоклипов
 `clip`. Полный список нод с параметрами (имя — диапазон —
 значение по умолчанию). Параметры задаются по имени или по числовому id:
@@ -262,6 +262,19 @@ inst.setParam("level", -6.0f32)   # по имени (стабильно)
 | `color` | 0..2 | 0 (0 white, 1 pink, 2 brown) |
 | `level` | -80..6 | -20 |
 
+### `euterpia.metronome` — метроном (#112)
+| параметр | диапазон | по умолчанию |
+|---|---|---|
+| `enabled` | 0..1 | 0 (включён/выключен) |
+| `sound` | 0..3 | 0 (0 click, 1 beep, 2 woodblock, 3 cowbell) |
+| `accent` | 0..2 | 0.8 (уровень сильной доли) |
+| `normal` | 0..2 | 0.5 (уровень слабой доли) |
+
+Сетка берётся из транспорта блока: темп и размер (`numerator`/`denominator`)
+читаются на каждом блоке, поэтому смена темпа или 4/4 → 6/8 не даёт дрейфа и
+двойных кликов. Нода — источник: аудиовхода нет, клик идёт в выход; выключенная
+нода пишет тишину и не трогает голоса. CLI: `euterpia metronome <проект> on`.
+
 ### `euterpia.biquad` — биквадратный фильтр
 | параметр | диапазон | по умолчанию |
 |---|---|---|
@@ -326,7 +339,7 @@ inst.setParam("level", -6.0f32)   # по имени (стабильно)
 | `euterpia.organ`, `euterpia.piano`, `euterpia.guitar`, `euterpia.drums`, `euterpia.flute`, `euterpia.bagpipe`, `euterpia.strings`, `euterpia.bell`, `euterpia.harp`, `euterpia.harpsichord`, `euterpia.recorder`, `euterpia.brass`, `euterpia.timpani`, `euterpia.choir`, `euterpia.ukulele`, `euterpia.accordion`, `euterpia.harmonica` | инструменты |
 | `euterpia.notes` | секвенсор (ноты дорожки → события) |
 | `euterpia.sequencer` | плеер секвенсора проекта (все дорожки и клипы → события, #87) |
-| `euterpia.osc`, `euterpia.noise` | генераторы |
+| `euterpia.osc`, `euterpia.noise`, `euterpia.metronome` | генераторы |
 | `euterpia.biquad`, `euterpia.svf` | фильтры |
 | `euterpia.gain`, `euterpia.pan`, `euterpia.mix` | микширование |
 | `euterpia.compressor`, `euterpia.delay` | динамика и эффекты |

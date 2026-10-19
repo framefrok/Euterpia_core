@@ -2203,6 +2203,10 @@ suite "CLI: спецификация команд — один источник 
     # Ноты звучат только через нотную ноду: партитура без `euterpia.notes` в
     # графе — честный отказ рендера, а не тишина.
     check runCliIn(specDir, ["node", "add", "notes", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["node", "add", "metronome", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["node", "add", "mix", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["connect", "2:out", "5:in", "spec.eproj"]).code == 0
+    check runCliIn(specDir, ["connect", "4:out", "5:in", "spec.eproj"]).code == 0
     check runCliIn(specDir, ["connect", "3:event:0", "1:event:0",
                              "spec.eproj"]).code == 0
     writeFile(specDir / "spec.notes", "c4/4 d e f\n")
@@ -2222,11 +2226,13 @@ suite "CLI: спецификация команд — один источник 
                  @["midi", "import", "spec.eproj", "spec.mid", "--dry-run"],
                  @["midi", "list"],
                  @["midi", "monitor", "--seconds", "0.05"]]),
+      ("metronome", @[@["metronome", "spec.eproj", "on"]]),
       ("node", @[@["node", "list", "spec.eproj"], @["node", "types"],
                  @["node", "show", "1", "spec.eproj"],
                  @["node", "add", "gain", "spec.eproj"],
                  @["node", "rm", "4", "spec.eproj"]]),
-      ("connect", @[@["connect", "2:out", "2:in", "spec.eproj"]]),
+      ("connect", @[@["connect", "2:out", "2:in", "spec.eproj"],
+                    @["connect", "6:out", "5:in", "spec.eproj"]]),
       ("disconnect", @[@["disconnect", "2", "2", "spec.eproj"]]),
       ("param", @[@["param", "list", "1", "spec.eproj"],
                   @["param", "get", "1", "freq", "spec.eproj"],
@@ -3008,7 +3014,11 @@ suite "CLI: record — запись входа (#94)":
       check node["channels"].getInt == 1
       check fileExists(outPath)
       # Заголовок WAV читается тем же анализатором, что и любой файл.
-      check runCli(["analyze", outPath, "--json"]).code == 0
+      # Тишина — валидный дефект для `analyze` (код 1), но файл обязан
+      # разбираться: метрики и кадры на месте.
+      let analysed = runCli(["analyze", outPath, "--json"])
+      check analysed.code in [0, 1]
+      check parseJson(analysed.output)["metrics"]["frames"].getInt > 0
     else:
       check node["error"]["kind"].getStr == "env"
       check not fileExists(outPath)
@@ -3207,3 +3217,62 @@ suite "CLI: MIDI import — SMF в клипы проекта (#111)":
     let r = runCliIn(dir, ["midi", "import", "keep.eproj", "bad.mid", "--json"])
     check r.code == 1
     check readFile(dir / "keep.eproj") == before
+
+# =============================================================================
+# Метроном (#112)
+# =============================================================================
+
+suite "CLI: metronome — клик по транспорту (#112)":
+  let dir = getTempDir() / "euterpia_cli_metronome"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  check runCliIn(dir, ["init", "m.eproj"]).code == 0
+  check runCliIn(dir, ["node", "add", "metronome", "m.eproj"]).code == 0
+
+  test "metronome on включает ноду и пишет параметры в проект":
+    let r = runCliIn(dir, ["metronome", "m.eproj", "on", "--sound",
+                           "woodblock", "--level", "0.7", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["enabled"].getBool
+    check node["sound"].getStr == "woodblock"
+    check abs(node["accent"].getFloat - 0.7) < 0.01
+    check node["applied"].getBool
+
+    # Параметры действительно в файле: читаем через Query API команды.
+    let shown = runCliIn(dir, ["param", "get", "1", "enabled", "m.eproj",
+                               "--json"])
+    check shown.code == 0
+    check parseJson(shown.output)["param"]["value"].getFloat == 1.0
+
+  test "неизвестный звук — код 1 со списком":
+    let r = runCliIn(dir, ["metronome", "m.eproj", "on", "--sound", "gong",
+                           "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["hint"].getStr.contains("click")
+
+  test "без ноды метронома — код 1 и подсказка node add":
+    check runCliIn(dir, ["init", "empty.eproj"]).code == 0
+    let r = runCliIn(dir, ["metronome", "empty.eproj", "on", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["hint"].getStr.contains("node add")
+
+  test "правка метронома отменяется одной записью истории":
+    let r = runCliIn(dir, ["undo", "m.eproj", "--json"])
+    check r.code == 0
+    check parseJson(r.output)["description"].getStr.contains("metronome")
+
+  test "record --count-in требует проект: кликать нечем":
+    let r = runCli(["record", dir / "take.wav", "--count-in", "1", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["hint"].getStr.contains("metronome")
+
+  test "record --count-in без ноды метронома — код 1":
+    let r = runCli(["record", dir / "take.wav", "--project",
+                    dir / "empty.eproj", "--count-in", "1", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("метроном")
+

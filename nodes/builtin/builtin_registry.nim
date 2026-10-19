@@ -13,6 +13,7 @@
 import
   ../sdk/node_api,
   ../sdk/node_registry,
+  ../metronome,
   io/input,
   io/clip_player,
   io/sequencer_player,
@@ -54,7 +55,8 @@ type
     bnUkulele, bnAccordion, bnHarmonica,
     bnNotes,
     bnClip,
-    bnSequencerPlayer
+    bnSequencerPlayer,
+    bnMetronome
 
   ## Порядок ниже совпадает с порядком нод в реестре и используется
   ## инструментами (CLI/Editor) для выборки по индексу.
@@ -75,7 +77,8 @@ const
     bnUkulele, bnAccordion, bnHarmonica,
     bnNotes,
     bnClip,
-    bnSequencerPlayer
+    bnSequencerPlayer,
+    bnMetronome
   ]
 
 proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
@@ -110,6 +113,7 @@ proc builtinDescriptor*(id: BuiltinNodeId): ptr NodeDesc {.inline.} =
   of bnNotes:       getNotesDesc()
   of bnClip:        getClipDesc()
   of bnSequencerPlayer: getSequencerPlayerDesc()
+  of bnMetronome:   getMetronomeDesc()
 
 proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   case id
@@ -143,6 +147,7 @@ proc builtinFactory*(id: BuiltinNodeId): ptr NodeFactory {.inline.} =
   of bnNotes:       getNotesFactory()
   of bnClip:        getClipFactory()
   of bnSequencerPlayer: getSequencerPlayerFactory()
+  of bnMetronome:   getMetronomeFactory()
 
 proc registerBuiltinNodes*(reg: var NodeRegistry): int =
   ## Регистрирует все builtin-ноды. Возвращает число зарегистрированных:
