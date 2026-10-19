@@ -2185,7 +2185,12 @@ suite "CLI: спецификация команд — один источник 
       let r = runCliIn(specDir, @["--json"] & args)
       # Код НЕ проверяем: отказ (например, `analyze` несуществующего файла)
       # тоже часть контракта — у отказа свои поля (`error`, `errorCode`).
-      let node = parseJson(r.output)
+      # Последняя строка — конверт: у `midi monitor` перед ним идёт NDJSON
+      # событий, и проверять надо именно итог.
+      let lines = nonEmptyLines(r.output)
+      if lines.len == 0:
+        return @[]
+      let node = parseJson(lines[^1])
       for key in node.keys:
         result.add key
 
@@ -2211,7 +2216,9 @@ suite "CLI: спецификация команд — один источник 
       ("project", @[@["project", "show", "spec.eproj"],
                     @["project", "set", "spec.eproj", "tempo", "100"],
                     @["project", "validate", "spec.eproj"]]),
-      ("midi", @[@["midi", "spec.eproj", "--out", "spec.mid"]]),
+      ("midi", @[@["midi", "spec.eproj", "--out", "spec.mid"],
+                 @["midi", "list"],
+                 @["midi", "monitor", "--seconds", "0.05"]]),
       ("node", @[@["node", "list", "spec.eproj"], @["node", "types"],
                  @["node", "show", "1", "spec.eproj"],
                  @["node", "add", "gain", "spec.eproj"],
@@ -2917,3 +2924,55 @@ suite "CLI: master — сдача материала (#209)":
     let r = runCli(["master", tone, "--meta", "nope=1", "--json"])
     check r.code == 1
     check parseJson(r.output)["error"]["message"].getStr.contains("nope")
+
+# =============================================================================
+# MIDI-порты и монитор (#93)
+# =============================================================================
+#
+# Тест чёрный и намеренно не требует MIDI-железа: главное утверждение —
+# команда не падает и говорит правду, даже когда librtmidi нет. На машине с
+# портами проверяется форма, а не их количество.
+
+suite "CLI: MIDI — порты и монитор (#93)":
+  test "midi list: код 0 и массив портов независимо от наличия librtmidi":
+    let r = runCli(["midi", "list", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["ok"].getBool
+    check node["backend"].getStr == "rtmidi"
+    check node["inputs"].kind == JArray
+    check node["outputs"].kind == JArray
+    # Нет адаптера — причина названа данными, а не спрятана.
+    if not fileExists("/usr/lib/librtmidi.so") and
+       not fileExists("/usr/lib/librtmidi.so.6"):
+      check node["initError"].getStr.len > 0
+
+  test "midi list: человекочитаемый вывод не путает «нет портов» с ошибкой":
+    let r = runCli(["midi", "list"])
+    check r.code == 0
+    check r.errput.len == 0
+    check r.output.len > 0
+
+  test "midi monitor --seconds: завершается сам, NDJSON парсится построчно":
+    let r = runCli(["midi", "monitor", "--seconds", "0.05", "--json"])
+    check r.code == 0
+    let lines = nonEmptyLines(r.output)
+    check lines.len >= 1
+    # Каждая строка — самостоятельный JSON, последняя — конверт команды.
+    for line in lines:
+      discard parseJson(line)
+    let last = parseJson(lines[^1])
+    check last["schema"].getInt == 1
+    check last["command"].getStr == "midi"
+    check last.hasKey("events")
+
+  test "midi monitor: неверный канал — код 1 и подсказка":
+    let r = runCli(["midi", "monitor", "--channel", "17", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("1…16")
+
+  test "midi monitor: неизвестный ключ — код 1":
+    let r = runCli(["midi", "monitor", "--nope", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("--nope")
+
