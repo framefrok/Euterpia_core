@@ -78,9 +78,10 @@ euterpia-<версия>-<ос>-<арх>/
 ```bash
 nim c -d:release --hints:off --out:build/euterpia cli.nim
 tools/package.sh build/euterpia
-docker run --rm -v "$PWD/build/dist:/pkg:ro" ubuntu:24.04 bash -lc '
-  cd /tmp && tar xzf /pkg/euterpia-*.tar.gz
-  PKG=$(ls -d euterpia-*); "$PKG/bin/euterpia" --version'
+docker run --rm \
+  -v "$PWD/tools:/tools:ro" \
+  -v "$PWD/build/dist:/pkg:ro" \
+  ubuntu:24.04 bash /tools/clean_machine_check.sh /pkg
 ```
 
 ## Ограничения (честно)

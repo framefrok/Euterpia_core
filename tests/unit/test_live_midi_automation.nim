@@ -100,6 +100,14 @@ proc oscFreq(rig: Rig): float32 =
 
 suite "live: MIDI-вход в граф (#413)":
 
+  test "движок выровнен под EventQueue (64 байта)":
+    # В движке живёт `EventQueue` с `{.align: 64.}`; `allocShared0` даёт
+    # выравнивание платформы, и UBSan справедливо падал на доступе к полю.
+    var rig = makeRig()
+    defer: rig.freeRig()
+    check rig.engine != nil
+    check (cast[uint](rig.engine) and 63'u) == 0'u
+
   test "note on доходит до ноды-цели и меняет частоту":
     var rig = makeRig()
     defer: rig.freeRig()

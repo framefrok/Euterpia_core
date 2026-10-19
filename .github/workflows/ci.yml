@@ -656,20 +656,10 @@ jobs:
 
       - name: "Чистая машина: версия, проект и рендер без dev-окружения"
         run: |
-          docker run --rm -v "$PWD/build/dist:/pkg:ro" ubuntu:24.04 bash -lc '
-            set -e
-            cd /tmp
-            tar xzf /pkg/euterpia-*.tar.gz
-            PKG=$(ls -d euterpia-*)
-            "$PKG/bin/euterpia" --version
-            "$PKG/bin/euterpia" init demo.eproj
-            "$PKG/bin/euterpia" node add osc --file demo.eproj >/dev/null
-            "$PKG/bin/euterpia" render demo.eproj out.wav --seconds 1 --json > report.json
-            grep -q ""ok":true" report.json
-            grep -q ""rendered":true" report.json
-            test -s out.wav
-            echo "ok: пакет работает на чистой Ubuntu без Nim"
-          '
+          docker run --rm \
+            -v "$PWD/tools:/tools:ro" \
+            -v "$PWD/build/dist:/pkg:ro" \
+            ubuntu:24.04 bash /tools/clean_machine_check.sh /pkg
 
       - name: Артефакт пакета
         uses: actions/upload-artifact@v4
