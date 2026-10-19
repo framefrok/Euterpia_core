@@ -10,7 +10,7 @@
 # секунд рендерить»: длина партитуры живёт в тиках, а файл измеряется
 # секундами, и перевод делается по темпу проекта.
 #
-# Формат вывода: WAV (PCM 16 или 24 бита, стерео). MP3/OGG ядро не пишет —
+# Формат вывода: WAV (PCM 16, 24 или 32 бита, стерео). MP3/OGG ядро не пишет —
 # в `offline_render` нет кодировщика, и CLI не имеет права делать вид, что
 # он есть: неизвестное расширение отвергается с указанием точки расширения.
 #
@@ -73,11 +73,13 @@ const
           default = $int(DefaultTailSeconds)),
       opt("--master", "id ноды, подключённой к мастеру; без ключа мастер определяется по графу",
           value = "id ноды"),
+      opt("--solo-track", "рендерить только эту дорожку (стем, #209)",
+          value = "id дорожки"),
       opt("--sample-rate", "частота дискретизации; без ключа — из проекта, затем настройки",
           value = "Гц"),
       opt("--block", "размер блока обработки", value = "кадры",
           default = $DefaultBlockSize),
-      opt("--bits", "глубина дискретизации WAV", value = "16 или 24",
+      opt("--bits", "глубина дискретизации WAV", value = "16, 24 или 32",
           default = $DefaultBits),
       switch("--progress", "показывать прогресс в stderr (по умолчанию — только если stderr это терминал)"),
       switch("--no-progress", "не показывать прогресс"),
@@ -101,6 +103,7 @@ const
       field("rendered", "отрендерено кадров"),
       field("dryRun", "план без записи"),
       field("masterNodeId", "нода, выбранная мастером"),
+      field("soloTrack", "id дорожки для стема (0 — мастер-микс)"),
       field("noteNodes", "ноды с нотными событиями"),
       field("automationLanes", "дорожки автоматизации, попавшие в рендер"),
       field("issues", "замечания рендера (не ошибки)"),
@@ -110,7 +113,7 @@ const
     ],
     notes: @[
       "пример MANIFEST §19: euterpia render project.eproj",
-      "вывод — WAV (PCM 16 или 24 бита, стерео); MP3/OGG требуют кодировщика и в ядре отсутствуют",
+      "вывод — WAV (PCM 16, 24 или 32 бита, стерео); MP3/OGG требуют кодировщика и в ядре отсутствуют",
       "проект без нотных событий требует --seconds: длину пустой партитуры CLI не выдумывает",
       "частота и блок: argv > метаданные проекта > настройки > умолчание",
       "--dry-run печатает план рендера и не пишет файл",
@@ -149,6 +152,8 @@ type
     tail: float64
     master: int
       ## -1 — «определить по графу» (правило живёт в `scene_loader`).
+    soloTrack: int32
+      ## -1 — полный микс; иначе только эта дорожка (стем, #209).
     sampleRate: int
     blockSize: int
     bits: int
@@ -203,6 +208,7 @@ proc scanArgs(args: seq[string]): RenderScan =
   result.path = DefaultProjectFile
   result.tail = DefaultTailSeconds
   result.master = -1
+  result.soloTrack = -1'i32
   result.bits = DefaultBits
   result.blockSize = DefaultBlockSize
 
@@ -267,6 +273,13 @@ proc scanArgs(args: seq[string]): RenderScan =
             "id ноды, подключённой к мастеру; без ключа мастер определяется по графу")
           return
         result.master = parsed.value
+      of "--solo-track":
+        let parsed = intArg(value, key, 1, high(int))
+        if not parsed.ok:
+          result.rep = usageError(parsed.message,
+            "id дорожки, чей стем нужно отрендерить (#209)")
+          return
+        result.soloTrack = int32(parsed.value)
       of "--sample-rate":
         let parsed = intArg(value, key, 1, MaxSampleRate)
         if not parsed.ok:
@@ -282,15 +295,15 @@ proc scanArgs(args: seq[string]): RenderScan =
           return
         result.blockSize = parsed.value
       else: # --bits
-        let parsed = intArg(value, key, DefaultBits, 24)
+        let parsed = intArg(value, key, DefaultBits, 32)
         if not parsed.ok:
           result.rep = usageError(parsed.message,
-            "глубина дискретизации: 16 или 24 бита")
+            "глубина дискретизации: 16, 24 или 32 бита")
           return
-        if parsed.value != 16 and parsed.value != 24:
-          result.rep = usageError("--bits принимает 16 или 24, получено: " &
+        if parsed.value notin [16, 24, 32]:
+          result.rep = usageError("--bits принимает 16, 24 или 32, получено: " &
                                   $parsed.value,
-            "других значений у WAV PCM в ядре нет")
+            "32 — целочисленный PCM; он нужен мастеру для точной обработки (#209)")
           return
         result.bits = parsed.value
     elif token.startsWith("-") and token.len > 1:
@@ -423,7 +436,7 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
   # состояния в CLI быть не должно (§72).
   var reg = builtinRegistry()
   var scene = loadScene(reg, proj, scan.master, int32(sampleRate),
-                        parentDir(scan.path))
+                        parentDir(scan.path), scan.soloTrack)
   defer:
     destroyScene(scene)
 
@@ -486,6 +499,7 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
     "scoreSeconds": scoreSeconds,
     "tempo": tempo,
     "masterNodeId": scene.masterNodeId,
+    "soloTrack": int(scan.soloTrack),
     "automationLanes": scene.automation.len,
     "issues": issuesJson(scene.issues),
   }

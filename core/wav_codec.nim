@@ -29,6 +29,7 @@ type
     dataOffset: int64
     bytesWritten: int64
     isRf64: bool
+    ditherState: uint32
 
 proc readFmtChunk(stream: FileStream, info: var AudioFileInfo, chunkSize: uint32): bool =
   let startPos = stream.getPosition()
@@ -215,6 +216,40 @@ proc close*(reader: var WavReader) =
     reader.stream.close()
     reader.stream = nil
 
+proc infoFields(meta: WavMetadata): seq[tuple[id, value: string]] =
+  ## Соответствие полей WAV INFO -> строки метаданных (issue #209).
+  ## Порядок фиксирован: одинаковый вход даёт байт-в-байт одинаковый файл.
+  if meta.title.len > 0: result.add ("INAM", meta.title)
+  if meta.artist.len > 0: result.add ("IART", meta.artist)
+  if meta.genre.len > 0: result.add ("IGNR", meta.genre)
+  if meta.comment.len > 0: result.add ("ICMT", meta.comment)
+  if meta.software.len > 0: result.add ("ISFT", meta.software)
+  if meta.date.len > 0: result.add ("ICRD", meta.date)
+
+proc writeInfoChunk(stream: FileStream; meta: WavMetadata): bool =
+  ## `LIST/INFO` перед `data`: RIFF допускает любые чанки, а читатели их
+  ## пропускают. Размер INFO известен заранее (строки уже есть), поэтому
+  ## переписывать шапку не нужно.
+  let fields = infoFields(meta)
+  if fields.len == 0:
+    return false
+  var size = 4'u32                     # "INFO"
+  for item in fields:
+    size += 8'u32 + uint32(item.value.len + 1)
+    if (item.value.len + 1) mod 2 != 0:
+      size += 1'u32                    # выравнивание чанка
+  stream.write("LIST")
+  stream.write(size)
+  stream.write("INFO")
+  for item in fields:
+    stream.write(item.id)
+    stream.write(uint32(item.value.len + 1))
+    stream.write(item.value)
+    stream.write('\0')
+    if (item.value.len + 1) mod 2 != 0:
+      stream.write('\0')
+  true
+
 proc openWavWriter*(path: string, info: AudioFileInfo): WavWriter =
   result.stream = newFileStream(path, fmWrite)
   if result.stream == nil:
@@ -223,6 +258,7 @@ proc openWavWriter*(path: string, info: AudioFileInfo): WavWriter =
   result.info = info
   result.info.format = afWav
   result.bytesWritten = 0
+  result.ditherState = 0x9E3779B9'u32
   
   let expectedSize = int64(info.numFrames) * int64(info.channels) * int64(info.bitsPerSample div 8)
   result.isRf64 = (expectedSize > MAX_RIFF_SIZE)
@@ -260,6 +296,10 @@ proc openWavWriter*(path: string, info: AudioFileInfo): WavWriter =
   result.stream.write(byteRate)
   result.stream.write(blockAlign)
   result.stream.write(uint16(info.bitsPerSample))
+
+  # INFO-чанк (issue #209): до `data`, поэтому `dataOffset` ниже учитывает
+  # его длину, а RIFF-размер в `close()` остаётся верным.
+  discard writeInfoChunk(result.stream, info.metadata)
   
   result.stream.write("data")
   if result.isRf64:
@@ -270,10 +310,32 @@ proc openWavWriter*(path: string, info: AudioFileInfo): WavWriter =
   
   result.dataOffset = result.stream.getPosition()
 
+proc nextDitherNoise(writer: var WavWriter): float32 =
+  ## TPDF-шум: разность двух равномерных величин. Детерминированный
+  ## xorshift32 — повторный рендер даёт байт-в-байт тот же файл (#102/#209).
+  ##
+  ## Амплитуда — ОДИН шаг квантования: ±1 LSB. Ошибка «поделить на 65536 и
+  ## не поделить на шкалу» давала шум ±1.0 (полная шкала!) — файл клиппился.
+  var x = writer.ditherState
+  x = x xor (x shl 13)
+  x = x xor (x shr 17)
+  x = x xor (x shl 5)
+  writer.ditherState = x
+  let a = float32(x and 0xFFFF'u32)
+  let b = float32((x shr 16) and 0xFFFF'u32)
+  let scale =
+    case writer.info.bitsPerSample
+    of 16: 32767.0'f32
+    of 24: 8388607.0'f32
+    else: 2147483647.0'f32
+  (a - b) / 65536.0f / scale
+
 proc writeFrames*(writer: var WavWriter, buffer: ptr UncheckedArray[float32], frames: int32) =
   let channels = int32(writer.info.channels)
   let bytesPerSample = writer.info.bitsPerSample div 8
   let totalSamples = frames * channels
+  let useDither = writer.info.dither and not writer.info.isFloat and
+                  writer.info.bitsPerSample in [16'i16, 24'i16, 32'i16]
   
   # Аллокация допустима, так как это Control/Background thread (экспорт), а не RT path
   var tempBuffer = newSeq[uint8](totalSamples * bytesPerSample)
@@ -287,6 +349,10 @@ proc writeFrames*(writer: var WavWriter, buffer: ptr UncheckedArray[float32], fr
     var sample = buffer[s]
     if sample != sample:          # NaN
       sample = 0.0f
+    if useDither:
+      # Шум добавляется ДО клиппинга: так ошибка квантования становится
+      # шумом, а не корреляцией с сигналом (truncation distortion).
+      sample += nextDitherNoise(writer)
     if sample > 1.0f:
       sample = 1.0f
     elif sample < -1.0f:

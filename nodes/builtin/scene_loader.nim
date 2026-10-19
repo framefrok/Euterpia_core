@@ -224,18 +224,23 @@ proc sequencerSongTicks*(proj: ProjectFormat): int32 =
         for nt in cl.notes:
           result = max(result, cl.startTick + nt.startTick + nt.duration)
 
-proc sequencerFromProject*(proj: ProjectFormat): Sequencer =
+proc sequencerFromProject*(proj: ProjectFormat;
+                           soloTrack: int32 = -1): Sequencer =
   ## Данные проекта → `Sequencer` Core. Единственное место, где формат файла
   ## и модель секвенсора сводятся вместе (Nodes знает оба, Core — нет).
   ##
   ## Аудиоклипы переносятся как записи без нот: секвенсор событий о них
   ## ничего не знает, а звук аудиоклипов даёт `euterpia.clip` (#107).
+  ##
+  ## `soloTrack >= 0` — рендер стема (#209): все остальные дорожки получают
+  ## `mute`, включая уже приглушённые (mute — данные, а не «выключить»).
   result.tracks = newSeq[Track](proj.sequencer.tracks.len)
   for i, src in proj.sequencer.tracks:
     var tr = Track(
       id: src.id, name: src.name, trackType: ttMidi,
       volume: src.volume, pan: src.pan,
-      mute: src.mute, solo: src.solo, armed: src.armed,
+      mute: src.mute or (soloTrack >= 0 and src.id != soloTrack),
+      solo: src.solo, armed: src.armed,
       inputChannel: src.inputChannel, outputBus: src.outputBus
     )
     tr.clips = newSeq[Clip](src.clips.len)
@@ -454,7 +459,8 @@ proc fillClips(nodeId: int; st: ptr ClipState; track: TrackFormat;
 proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
                 masterNodeId: int = -1;
                 sampleRate: int32 = 48000;
-                baseDir: string = ""): Scene =
+                baseDir: string = "";
+                soloTrack: int32 = -1): Scene =
   ## Собирает сцену из данных проекта.
   ##
   ## `reg` обязан жить дольше возвращённой сцены: состояния ссылаются на
@@ -492,6 +498,14 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
 
   if proj.graph.nodes.len == 0:
     bail("в проекте нет нод: собирать нечего")
+
+  if soloTrack >= 0:
+    var found = false
+    for track in proj.sequencer.tracks:
+      if track.id == soloTrack:
+        found = true
+    if not found:
+      bail("stem: дорожки #" & $soloTrack & " нет в проекте")
 
   # --- ноды ---------------------------------------------------------------
   var seenIds: seq[int] = @[]
@@ -590,7 +604,7 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
   # компиляция одна на сцену, ноды получают указатель. Раскладка «дорожка →
   # нотная нода» тогда отключается: иначе те же ноты прозвучали бы дважды.
   if sequencerStates.len > 0:
-    var src = sequencerFromProject(proj)
+    var src = sequencerFromProject(proj, soloTrack)
     let songTicks = max(sequencerSongTicks(proj), 1'i32)
     var compiled = src.compile(songTicks)
     let owned = new(CompiledSequencer)
@@ -631,6 +645,8 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
         $noteStates.len & ": добавьте нотные ноды в граф")
 
     for k in 0 ..< withNotes.len:
+      if soloTrack >= 0 and proj.sequencer.tracks[withNotes[k]].id != soloTrack:
+        continue
       fillPattern(noteStates[k].st, proj.sequencer.tracks[withNotes[k]],
                   result.issues, noteStates[k].id)
       let last = notesLastTick(noteStates[k].st[])
@@ -659,6 +675,10 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
 
   for k in 0 ..< withAudio.len:
     let track = proj.sequencer.tracks[withAudio[k]]
+    if soloTrack >= 0 and track.id != soloTrack:
+      # Стем: чужие аудиоклипы не грузим вовсе — иначе они звучали бы в
+      # каждом стеме, а память занимали бы все.
+      continue
     let clipErr = fillClips(clipStates[k].id, clipStates[k].st, track, proj,
                             baseDir, result.sampleRate,
                             float64(proj.metadata.tempo),

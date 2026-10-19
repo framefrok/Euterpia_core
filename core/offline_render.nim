@@ -93,8 +93,10 @@ type
     blockSize*: int32
     totalFrames*: int64
     bitsPerSample*: int32
-      ## 16 или 24. 16 — умолчание: файл вдвое меньше, а разница на
-      ## материале с суммой инструментов на слух не критична.
+      ## 16, 24 или 32. 16 — умолчание: файл вдвое меньше, а разница на
+      ## материале с суммой инструментов на слух не критична. 32 —
+      ## целочисленный PCM для промежуточного файла мастера (#209): после
+      ## него усиление не добавляет второго шума квантования.
     tempo*: float64
       ## Нужен только для автоматизации: тики переводятся в кадры той же
       ## формулой, что у транспорта.
@@ -202,8 +204,9 @@ proc renderToWav*(path: string; owned: sink OwnedPipeline;
   if opts.totalFrames <= 0:
     result.error = "длина рендера должна быть положительной"
     return
-  if opts.bitsPerSample notin [16, 24]:
-    result.error = "глубина — 16 или 24 бита, получено: " & $opts.bitsPerSample
+  if opts.bitsPerSample notin [16, 24, 32]:
+    result.error = "глубина — 16, 24 или 32 бита, получено: " &
+                   $opts.bitsPerSample
     return
 
   let tempo = if opts.tempo > 1.0: opts.tempo else: 120.0
