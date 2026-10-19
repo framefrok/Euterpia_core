@@ -24,6 +24,7 @@ import test_scene_ownership
 import test_scene_resources
 import test_backend_contract
 import test_backend_registry
+import test_lazy_adapters
 import test_input_path
 import test_plugin_api
 import test_eut_buffer
