@@ -8,7 +8,78 @@
 Версия пакета — единственная константа `euterpia_version.nim`, поэтому
 `euterpia --version`, поле `version` пакета и имя тега совпадают.
 
-## [0.3.3] — Функциональность P1 (v0.3.3)
+## [0.3.4] — Функциональность P2 (v0.3.4)
+
+### Добавлено
+- **`render --stems` и `--batch`** (issue #108): по WAV на дорожку с
+  `--name-template` (`{track}`, `{name}`, `{index}`), учёт mute/solo и
+  ненулевой код, если хоть один стем упал; батч идёт по списку проектов
+  последовательно (`--out` — каталог), сцена и движок освобождаются после
+  каждого, поэтому RSS не растёт. Сумма стемов совпадает с мастером
+  побитово (проверено тестом на 16-битном WAV)
+  ([#108](https://github.com/framefrok/Euterpia_core/issues/108)).
+- **`midi list` и `midi monitor`** (issue #93): порты входа/выхода из
+  RtMidi-адаптера, NDJSON-поток событий, фильтры `--channel`/`--only`,
+  относительное время от открытия порта; нет librtmidi — пустой список и
+  код 0, а не падение
+  ([#93](https://github.com/framefrok/Euterpia_core/issues/93)).
+- **`record`** (issue #94): запись входа в WAV через живой сеанс
+  (miniaudio), `--channels 1|2`, `--input-channel`, `--input-device`,
+  метрики `inputPeakL/R`, `inputXruns`, `droppedFrames`, корректный
+  SIGINT и `count-in` через метроном
+  ([#94](https://github.com/framefrok/Euterpia_core/issues/94)).
+- **`midi import`** (issue #111): SMF → клипы проекта, пересчёт PPQ в 960,
+  первый темп и размер переносятся в проект, `--track`/`--map SMF:проект`,
+  round-trip импорт → экспорт → импорт; CC/PB/aftertouch/program не входят
+  в формат клипа и считаются в `ignoredEvents`, SMPTE/format 2/несколько
+  темпов отвергаются явно
+  ([#111](https://github.com/framefrok/Euterpia_core/issues/111)).
+- **Метроном** (issue #112): нода `euterpia.metronome` (`enabled`,
+  `sound`, `accent`, `normal`), клик по сетке транспорта для 4/4, 3/4,
+  6/8, 5/4, команда `metronome on|off`, `record --count-in N`
+  ([#112](https://github.com/framefrok/Euterpia_core/issues/112)).
+- **`automation list|add|rm|clear`** (issue #114): точки линий в тиках и
+  единицах параметра, все четыре кривые, замена точки на том же тике,
+  лимит 1024; рендер применяет линии на границе чанка, поэтому
+  огибающая слышна и измерима
+  ([#114](https://github.com/framefrok/Euterpia_core/issues/114)).
+- **`project recover` и автосохранение сессии** (issue #110):
+  `session start --autosave N` перечитывает проект каждые N секунд и
+  пишет снимки через `core/autosave`; SIGKILL оставляет маркер, `project
+  recover` восстанавливает последний снимок, делает `.bak` и снимает
+  маркер; `--list`/`--from` дают выбор
+  ([#110](https://github.com/framefrok/Euterpia_core/issues/110)).
+- **Ленивая загрузка dynlib-адаптеров** (issue #267): PortAudio и RtMidi
+  грузятся в `backendInit`/`midiInit`, а не в инициализации модуля;
+  отсутствие библиотеки — `abeUnavailable`/`meUnavailable`, а не падение
+  до `main()`. Имя библиотеки переопределяется
+  `EUTERPIA_PORTAUDIO_LIB`/`EUTERPIA_RTMIDI_LIB` для проверки ветки
+  «библиотеки нет»
+  ([#267](https://github.com/framefrok/Euterpia_core/issues/267)).
+
+### Исправлено
+- **Метроном писал за границу planar-буфера**: `writeFrame` считал любой
+  буфер interleaved; при подключении к выходу движка это давало SIGSEGV
+  на первом клике. Раскладка (`layout`) теперь учитывается.
+- **`AudioRecorder` получил in-place инициализацию**: копирование
+  значения с уже запущенным `Thread` давало падение worker-потока; хост
+  (`record`) создаёт рекордер на месте, возвращающий вариант остался для
+  тестов.
+
+### Изменено
+- **CLI читает проект через Query API**: `metronome`, `automation` и
+  `project recover` не обходят модель; исключения guard'а описаны
+  поимённо (`tools/check_architecture.py`).
+
+### Перенесено в v0.3.5
+- Адаптерные задачи, требующие вендоренных библиотек или нового поля
+  формата проекта: LV2 (#39), libremidi/MIDI 2.0 (#38), ресемплинг (#8),
+  кодировщики FLAC/OGG/MP3 (#411) и полный plugin-хост CLI (#95).
+  Причина и объём зафиксированы в комментариях к issues; P2-функции CLI
+  этого шага закрыты.
+
+Версия пакета — `0.3.4` (релиз).
+
 
 ### Добавлено
 - **Нода `euterpia.sequencer`** (issue #87): клипы и дорожки проекта играет
