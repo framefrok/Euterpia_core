@@ -26,6 +26,7 @@ import context
 import cli_spec
 import cmd_project
 import cmd_render
+import preview_encoder
 import control/query
 import control_bridge
 import audio_file_io
@@ -38,8 +39,9 @@ const
   DefaultCeilingDb* = -1.0
   MasterBitsDefault* = 16
   MasterBitsAllowed = [16, 24, 32]
-  MasterFormats = @[".wav"]
-    ## Сдача: WAV. FLAC-энкодера в ядре нет — обещать его нельзя (#10).
+  MasterFormats* = @["wav", "flac", "ogg", "mp3"]
+    ## Сдаточный формат — WAV/FLAC (lossless). OGG/MP3 — ПРЕВЬЮ (#411):
+    ## манифест помечает их `role: preview`, `lossless: false`.
 
   MasterSpec* = CommandSpec(
     name: "master",
@@ -50,7 +52,11 @@ const
     ],
     options: @[
       opt("--file", "вход, если он не задан позиционно", value = "путь"),
-      opt("--out", "файл мастера", value = "файл.wav"),
+      opt("--out", "файл мастера; расширение должно совпадать с --format", value = "файл.wav"),
+      opt("--format", "формат сдачи: wav|flac (lossless) или ogg|mp3 (превью)", value = "wav|flac|ogg|mp3",
+          default = "wav"),
+      opt("--preview-bitrate", "битрейт lossy-превью, кбит/с", value = "кбит/с",
+          default = "192"),
       opt("--dir", "каталог сдачи (мастер + стемы + манифест)", value = "каталог"),
       opt("--target", "целевая громкость, LUFS", value = "LUFS",
           default = $DefaultTargetLufs),
@@ -72,7 +78,11 @@ const
     fields: @[
       field("input", "вход: проект или WAV"),
       field("out", "файл мастера"),
-      field("format", "формат вывода: `wav`"),
+      field("format", "формат вывода: wav|flac|ogg|mp3"),
+      field("codec", "кодек результата: pcm|flac|vorbis|mp3"),
+      field("lossless", "lossless-сдача (wav/flac) или превью"),
+      field("role", "`master` (сдача) или `preview`"),
+      field("bitrate", "битрейт превью, кбит/с (0 у lossless)"),
       field("bitsPerSample", "глубина итогового файла"),
       field("sampleRate", "частота"),
       field("dither", "включён ли TPDF-dither"),
@@ -95,7 +105,8 @@ const
       "dither — TPDF, детерминированный: повторная сдача даёт те же байты",
       "стемы рендерятся по дорожкам проекта (render --solo-track) и суммируются в мастер",
       "манифест содержит SHA-1 каждого файла: это контроль целостности пакета, не подпись",
-      "FLAC-энкодера в ядре нет; формат отвергается с указанием причины (#10)",
+      "FLAC пишется встроенным lossless-энкодером (#411); OGG/MP3 — превью через ffmpeg/lame/oggenc",
+      "для lossy-превью dither не применяется: шум квантования не имеет смысла перед сжатием",
     ])
 
 type
@@ -111,6 +122,8 @@ type
     target: float64
     ceiling: float64
     bits: int
+    format: string
+    previewBitrate: int
     dither: bool
     ditherSet: bool
     stems: bool
@@ -155,6 +168,8 @@ proc scanArgs(args: seq[string]): MasterScan =
   result.sampleRate = 0
   result.blockSize = 0
   result.master = -1
+  result.format = "wav"
+  result.previewBitrate = 192
 
   var i = 0
   while i < args.len:
@@ -207,6 +222,20 @@ proc scanArgs(args: seq[string]): MasterScan =
     of "--out":
       result.outPath = value
       result.haveOut = true
+    of "--format":
+      let fmt = value.toLowerAscii().strip()
+      if fmt notin MasterFormats:
+        result.rep = usageError("--format: ожидается wav|flac|ogg|mp3",
+          "получено: " & value)
+        return
+      result.format = fmt
+    of "--preview-bitrate":
+      let parsed = intArg(value, key, 32, 512)
+      if not parsed.ok:
+        result.rep = usageError(parsed.message,
+          "битрейт превью, например 192")
+        return
+      result.previewBitrate = parsed.value
     of "--dir":
       result.dir = value
     of "--target":
@@ -281,11 +310,19 @@ proc scanArgs(args: seq[string]): MasterScan =
   # dither по умолчанию включается для 16 бит: это сдача, а не черновик.
   if not result.ditherSet:
     result.dither = result.bits == 16
+  # Для lossy-превью dither не применяется (issue #411): шум квантования
+  # перед сжатием только увеличивает битрейт и ничего не маскирует.
+  if result.format in ["ogg", "mp3"]:
+    result.dither = false
 
-  if result.haveOut and result.outPath.toLowerAscii().rfind(".wav") < 0:
-    result.rep = usageError("формат вывода не поддержан: " & result.outPath,
-      "мастер пишется в WAV; FLAC-энкодера в ядре нет (#10)")
-    return
+  if result.haveOut:
+    let ext = result.outPath.splitFile().ext.toLowerAscii()
+    if ext != "." & result.format:
+      result.rep = usageError("расширение вывода не совпадает с --format: " &
+        result.outPath & " и " & result.format,
+        "укажите --out с расширением ." & result.format &
+        " или смените --format")
+      return
 
   result.ok = true
 
@@ -492,6 +529,107 @@ proc applyEnvelope(samples: var seq[float32]; channels: int;
     for ch in 0 ..< channels:
       samples[i * channels + ch] *= g
 
+proc masterRole(format: string): string =
+  if format in ["ogg", "mp3"]: "preview" else: "master"
+
+proc masterLossless(format: string): bool =
+  format in ["wav", "flac"]
+
+proc masterCodec(format: string): string =
+  case format
+  of "wav": "pcm"
+  of "flac": "flac"
+  of "ogg": "vorbis"
+  else: "mp3"
+
+type
+  MasterOutput = object
+    ok: bool
+    error: string
+    codec: string
+    lossless: bool
+    role: string
+    bitrate: int
+    tool: string
+
+proc writeMasterOutput(
+  outPath: string;
+  format: string;
+  master: AudioData;
+  bits: int;
+  dither: bool;
+  previewBitrate: int;
+  deliveryDir: string;
+  meta: WavMetadata
+): MasterOutput =
+  ## Записать итог в выбранном формате и проверить, что файл читается.
+  ##
+  ## Lossless (wav/flac) — сдача; lossy (ogg/mp3) — превью через внешний
+  ## кодировщик, с явной пометкой в манифесте (issue #411).
+  result.role = masterRole(format)
+  result.lossless = masterLossless(format)
+  result.codec = masterCodec(format)
+  result.bitrate = if result.lossless: 0 else: previewBitrate
+
+  if format == "wav":
+    let written = writeWav(outPath, master.samples, master.channels,
+                           master.sampleRate, bits, dither, meta)
+    if not written.ok:
+      result.error = written.error
+      return
+  elif format == "flac":
+    let info = AudioFileInfo(
+      sampleRate: int32(master.sampleRate),
+      channels: int16(master.channels),
+      bitsPerSample: int16(bits),
+      numFrames: int64(master.samples.len div master.channels),
+      isFloat: false, format: afFlac, dither: dither)
+    try:
+      exportAudio(outPath, info, master.samples)
+    except CatchableError as e:
+      result.error = "FLAC: " & e.msg
+      return
+  else:
+    # Превью кодируется из целочисленного WAV: 32-битный float-промежуток
+    # кодировщику не нужен, а 24 бита сохраняют запас по громкости.
+    let temp = deliveryDir / (".eut-preview-" & $getCurrentProcessId() &
+                              ".wav")
+    let previewBits = if bits == 32: 24 else: bits
+    let written = writeWav(temp, master.samples, master.channels,
+                           master.sampleRate, previewBits, false, meta)
+    if not written.ok:
+      result.error = written.error
+      return
+    let enc = encodePreview(temp, outPath, format, previewBitrate)
+    try: removeFile(temp)
+    except CatchableError: discard
+    if not enc.ok:
+      result.error = enc.error
+      return
+    result.tool = enc.tool
+    result.codec = enc.codec
+
+  # Читаемо ли то, что записали: битый файл не должен попасть в манифест.
+  try:
+    let (_, info) = readAllAudioFile(outPath)
+    if int(info.channels) != master.channels:
+      result.error = "каналы результата не совпали с мастером: " &
+                     $info.channels & " != " & $master.channels
+      return
+    let expected = int64(master.samples.len div master.channels)
+    # Lossy добавляет/срезает padding кодекa; допуск — четверть секунды.
+    let tolerance =
+      if result.lossless: 1'i64
+      else: max(1'i64, int64(master.sampleRate div 4))
+    if abs(info.numFrames - expected) > tolerance:
+      result.error = "длительность результата не совпала: " &
+        $info.numFrames & " != " & $expected & " кадров"
+      return
+  except CatchableError as e:
+    result.error = "результат не читается: " & e.msg
+    return
+  result.ok = true
+
 proc runMaster*(ctx: var Ctx; args: seq[string]): Report =
   let scan = scanArgs(args)
   if not scan.ok:
@@ -525,7 +663,7 @@ proc runMaster*(ctx: var Ctx; args: seq[string]): Report =
 
   var outPath = scan.outPath
   if outPath.len == 0:
-    outPath = deliveryDir / (stem & ".master.wav")
+    outPath = deliveryDir / (stem & ".master." & scan.format)
 
   # --- источник -----------------------------------------------------------
   var proj = ProjectFormat()
@@ -557,7 +695,12 @@ proc runMaster*(ctx: var Ctx; args: seq[string]): Report =
     var body = %*{
       "input": scan.path,
       "out": outPath,
-      "format": "wav",
+      "format": scan.format,
+      "codec": masterCodec(scan.format),
+      "lossless": masterLossless(scan.format),
+      "role": masterRole(scan.format),
+      "bitrate": (if masterLossless(scan.format): 0
+                  else: scan.previewBitrate),
       "bitsPerSample": scan.bits,
       "dither": scan.dither,
       "targetLufs": scan.target,
@@ -611,10 +754,12 @@ proc runMaster*(ctx: var Ctx; args: seq[string]): Report =
   let report = normalizeMaster(master.samples, master.channels,
                                float64(master.sampleRate), opts)
 
-  let written = writeWav(outPath, master.samples, master.channels,
-                         master.sampleRate, scan.bits, scan.dither, meta)
+  let written = writeMasterOutput(outPath, scan.format, master, scan.bits,
+                                  scan.dither, scan.previewBitrate,
+                                  deliveryDir, meta)
   if not written.ok:
-    return envError(written.error, "проверьте каталог и права: " & outPath)
+    return envError(written.error, "проверьте каталог, права и кодировщик: " &
+                                  outPath)
 
 
   # --- стемы --------------------------------------------------------------
@@ -699,6 +844,11 @@ proc runMaster*(ctx: var Ctx; args: seq[string]): Report =
       "file": outPath,
       "bytes": getFileSize(outPath),
       "sha1": sha1Of(outPath),
+      "format": scan.format,
+      "codec": written.codec,
+      "lossless": written.lossless,
+      "role": written.role,
+      "bitrate": written.bitrate,
       "bitsPerSample": scan.bits,
       "sampleRate": master.sampleRate,
       "channels": master.channels,
@@ -723,7 +873,11 @@ proc runMaster*(ctx: var Ctx; args: seq[string]): Report =
   var body = %*{
     "input": scan.path,
     "out": outPath,
-    "format": "wav",
+    "format": scan.format,
+    "codec": written.codec,
+    "lossless": written.lossless,
+    "role": written.role,
+    "bitrate": written.bitrate,
     "bitsPerSample": scan.bits,
     "sampleRate": master.sampleRate,
     "channels": master.channels,
@@ -764,8 +918,11 @@ proc runMaster*(ctx: var Ctx; args: seq[string]): Report =
     "усиление: " & formatFloat(report.appliedGainDb, ffDecimal, 2) & " дБ" &
       (if report.limitedFrames > 0:
          ", лимитер: " & $report.limitedFrames & " кадров" else: ""),
-    "формат: WAV " & $scan.bits & " бит, " & $master.sampleRate &
-      " Гц, стерео" & (if scan.dither: ", TPDF dither" else: ""),
+    "формат: " & scan.format.toUpperAscii() & " " & $scan.bits & " бит, " &
+      $master.sampleRate & " Гц, " & $master.channels & " кан." &
+      (if written.role == "preview": ", превью " & $written.bitrate & " кбит/с"
+       else: "") &
+      (if scan.dither: ", TPDF dither" else: ""),
   ]
   if scan.stems:
     lines.add "стемов: " & $stemRecords.len & ", манифест: " & manifestPath

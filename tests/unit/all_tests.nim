@@ -18,6 +18,8 @@ import test_offline_automation
 import test_native_abi
 import test_ring_buffer
 import test_midi_api
+import test_ump
+import test_src
 import test_midi_smf
 import test_midi_export
 import test_scene_ownership
@@ -27,6 +29,7 @@ import test_backend_registry
 import test_lazy_adapters
 import test_input_path
 import test_plugin_api
+import test_lilv_backend
 import test_eut_buffer
 import test_clap_host_extensions
 import test_clap_plugin_extensions
@@ -44,6 +47,8 @@ import test_graph_compiler
 import test_pipeline_ownership
 import test_runtime_session
 import test_live_session
+import test_live_resampler
+import test_live_midi_automation
 import test_pdc
 import test_rt_guard
 import test_engine_retire
@@ -65,6 +70,7 @@ import test_cli_spec
 import test_logger
 import test_undo_redo
 import test_waveform_cache
+import test_flac_encoder
 import test_audio_file_io
 import test_codecs
 import test_codec_api

@@ -64,6 +64,15 @@ const
     ## `resourceId >= 0` мало — аудиоклип помечается ещё и видом.
 
 type
+  PluginStateHook* = proc(nodeId: int; nodeType: string; state: pointer)
+    {.closure, raises: [].}
+    ## Восстановление состояния внешнего плагина (issue #95).
+    ##
+    ## Nodes не знают формата плагинов (§27): байты состояния лежат в
+    ## проекте, а загружает их хост (CLI/Editor) через `plugin_api`. Загрузчик
+    ## лишь сообщает, какой ноде и какому состоянию соответствует момент
+    ## «нода создана, параметры применены».
+
   SceneIssue* = object
     ## Замечание загрузки: сцена собрана, но что-то в данных проекта
     ## выглядит подозрительно.
@@ -460,7 +469,8 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
                 masterNodeId: int = -1;
                 sampleRate: int32 = 48000;
                 baseDir: string = "";
-                soloTrack: int32 = -1): Scene =
+                soloTrack: int32 = -1;
+                pluginStateHook: PluginStateHook = nil): Scene =
   ## Собирает сцену из данных проекта.
   ##
   ## `reg` обязан жить дольше возвращённой сцены: состояния ссылаются на
@@ -549,6 +559,12 @@ proc loadScene*(reg: var NodeRegistry; proj: ProjectFormat;
               "параметр \"" & name & "\" вне диапазона: " & $value &
               " → " & $clamped)
       entry.factory.setParam(en.userData, paramId, clamped, false)
+
+    # Состояние внешнего плагина — ПОСЛЕ параметров: блоб состояния
+    # включает и их, и внутренние данные плагина. Ошибку загрузки хост
+    # решает сам (обычно это замечание сцены, а не отказ загрузки).
+    if pluginStateHook != nil and node.nodeType.startsWith("plugin:"):
+      pluginStateHook(node.id, node.nodeType, en.userData)
 
 
   # --- связи ---------------------------------------------------------------

@@ -63,6 +63,12 @@ proc checkAdapters() =
   # {.compile.}), поэтому проверка быстрая; сборка+прогон — задача
   # `miniaudioSmoke`.
   exec "nim check --hints:off adapters/miniaudio/audio_backend_miniaudio.nim"
+  # Ресемплинг (issue #8): реализация за core/src_api.
+  exec "nim check --hints:off adapters/resample/stream_resampler.nim"
+  # libremidi (issue #38): фасад грузится лениво, библиотеки в CI может не быть.
+  exec "nim check --hints:off adapters/libremidi/midi_backend_libremidi.nim"
+  # LV2 через Lilv (issue #39): та же ленивая загрузка.
+  exec "nim check --hints:off adapters/lilv/lilv_plugin_backend.nim"
 
 # Флаги потоков и memory manager задаются в config.nims, чтобы они
 # были одинаковыми при любой точке входа (unit, integration, CLI).
@@ -236,6 +242,18 @@ task clapMock, "Сборка mock CLAP-плагина и сквозной тес
     " tests/mock/mock_clap_plugin.nim"
   buildLog "clap host end-to-end test"
   exec "nim c -r --hints:off --out:build/clap_mock_test tests/clap_mock_test.nim"
+  # Пользовательский путь (#95): scan → node add plugin → save → render.
+  buildLog "cli build"
+  exec "nim c --hints:off --out:" & cliBin & " cli.nim"
+  buildLog "plugin cli scenario"
+  let mockPath =
+    when defined(windows): "build/mockclap.dll"
+    elif defined(macosx): "build/libmockclap.dylib"
+    else: "build/libmockclap.so"
+  when defined(windows):
+    echo "skip: shell-сценарий плагинов исполняется в Linux-джобе clap (#95)"
+  else:
+    exec "bash tools/plugin_cli_scenario.sh " & cliBin & " " & mockPath
 
 # ---------------------------------------------------------------------------
 # Встраивание ядра (#213). Ядро без GUI проверяется не словами, а двумя

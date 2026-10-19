@@ -165,9 +165,22 @@ suite "audio_file_io: диспетчер форматов и ошибки":
     expect IOError:
       discard openDecoder("track.aiff")
 
-  test "openEncoder отвергает неподдерживаемое расширение":
+  test "openEncoder: FLAC поддержан (#411), неизвестное — отказ":
+    let path = getTempDir() / "euterpia_afio_enc.flac"
+    var enc = openEncoder(path, info(16, 2, false))
+    check enc.format == afFlac
+    var samples = sineSeq(256, 2, 440.0f)
+    enc.writeFrames(cast[ptr UncheckedArray[float32]](addr samples[0]), 128)
+    enc.close()
+    check fileExists(path)
+    check getFileSize(path) > 0
+    removeFile(path)
+
+    # Unknown extension and lossy formats (CLI-only preview) — honest refusal.
     expect IOError:
-      discard openEncoder("mix.flac", info(16, 2, false))
+      discard openEncoder("mix.xyz", info(16, 2, false))
+    expect IOError:
+      discard openEncoder("mix.ogg", info(16, 2, false))
 
   test "расширение распознаётся без учёта регистра":
     let path = getTempDir() / "euterpia_afio_upper.WAV"

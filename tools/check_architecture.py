@@ -278,6 +278,9 @@ DOCUMENT_ACCESS_ALLOWED: dict[str, dict[str, str]] = {
         "findLane": "поиск линии автоматизации по ноде и параметру (#114)",
         "runAutomation": "list/add/rm/clear линий автоматизации (#114)",
     },
+    "cli/cmd_plugin.nim": {
+        "runSave": "снимок состояния плагина пишется в `pluginStates` (#95)",
+    },
     "cli/cmd_transport.nim": {
         "setProjectField": "запись темпа и размера в документ (`transport tempo/meter`, #257)",
     },

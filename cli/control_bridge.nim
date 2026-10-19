@@ -19,6 +19,7 @@
 # Обратное направление (ядро → CLI) здесь единственное: ядро ничего не знает
 # ни о файлах, ни о stdout, ни о кодах возврата.
 
+import std/tables
 import std/os
 
 import project
@@ -26,12 +27,15 @@ import handles
 import control/error_frame
 import control/commands
 import control/document
+import type_registry
 
 import catalog
 import context
 import stamp
 
 proc cliNodeTypeProvider*(nodeType: string; spec: var NodeTypeSpec): bool =
+  if lookupControlTypeSpec(nodeType, spec):
+    return true
   ## Описатель типа из каталога CLI. Флаги параметра переводятся в один факт
   ## (`integerLike`): control-слой не знает перечисления `NodeParamFlag`, но
   ## обязан знать, что параметр не принимает дробное значение.
@@ -95,6 +99,9 @@ proc frameReport*(frame: ErrorFrame): Report =
 proc openDocument*(path: string; proj: ProjectFormat): Document =
   ## Документ из загруженного проекта: идентификатор документа тот же, что у
   ## адресов (#143), описатели типов — каталог CLI, часы — `stampClock`.
+  # Контекстные типы (плагины) описываются по самому проекту: без этого
+  # `connect`/`param` не знали бы порты `plugin:<id>` (#95).
+  runContextRegistrar(proj)
   var doc: Document
   initDocument(doc, proj, documentIdForPath(absolutePath(path)),
                cliNodeTypeProvider, stampClock)

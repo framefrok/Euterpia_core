@@ -36,6 +36,7 @@ import context
 import config
 import control/query
 import control_bridge
+import plugin_host
 import cmd_project
 import project
 import catalog
@@ -495,8 +496,17 @@ proc renderProject(ctx: var Ctx; scan: RenderScan; proj: ProjectFormat;
   # Реестр собирается на вызов: он и так статический, а общего изменяемого
   # состояния в CLI быть не должно (§72).
   var reg = builtinRegistry()
+  # Плагины проекта (issue #95): типы-обёртки регистрируются до загрузки
+  # сцены, иначе загрузчик отвергнет `plugin:<id>` как неизвестный тип.
+  let doc = openDocument(scan.path, proj)
+  var pluginErr = ""
+  discard registerProjectPlugins(reg, doc, pluginErr)
+  if pluginErr.len > 0:
+    return usageError("плагины проекта не загружены: " & pluginErr,
+      "проверьте путь и `euterpia plugin scan`, затем повторите рендер")
   var scene = loadScene(reg, proj, scan.master, int32(sampleRate),
-                        parentDir(scan.path), scan.soloTrack)
+                        parentDir(scan.path), scan.soloTrack,
+                        pluginStateHookFor(doc))
   defer:
     destroyScene(scene)
 

@@ -1,0 +1,95 @@
+name: Release
+
+# Релиз по тегу (issue #229): сборки Linux/Windows/macOS, архивы с
+# ассоциациями файлов проекта и SHA256, затем публикация в GitHub Release.
+# Версия тега обязана совпасть с `euterpia_version.nim` (#113): релиз не
+# может выпустить бинарь, который сам себе врёт о версии.
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup nim
+        uses: ./.github/actions/setup-nim
+        with:
+          nim-version: '2.2.12'
+
+      - name: Build CLI (release)
+        shell: bash
+        run: |
+          bin=build/euterpia
+          if [ "${{ runner.os }}" = "Windows" ]; then bin=build/euterpia.exe; fi
+          nim c -d:release --hints:off --out:$bin cli.nim
+
+      - name: Tag совпадает с версией пакета (#113)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          expected=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' euterpia_version.nim | head -1)
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag: $tag, version: $expected"
+          if [ "$tag" != "$expected" ]; then
+            echo "::error::тег $tag не совпадает с euterpia_version.nim ($expected)"
+            exit 1
+          fi
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tools/package.sh build/euterpia
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/package.ps1 -Cli build/euterpia.exe
+
+      - name: Артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: euterpia-${{ matrix.os }}
+          path: |
+            build/dist/*.tar.gz
+            build/dist/*.tar.gz.sha256
+            build/dist/*.zip
+            build/dist/*.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    name: github release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Скачать пакеты
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Публикация
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          notes="$(awk '/^## \[/{n++} n==1' CHANGELOG.md | head -60)"
+          gh release create "$tag" dist/* \
+            --title "EUTERPIA $tag" \
+            --notes "$notes" \
+            --verify-tag || \
+          gh release upload "$tag" dist/* --clobber

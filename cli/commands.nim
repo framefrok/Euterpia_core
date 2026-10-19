@@ -28,6 +28,7 @@ import cmd_render
 import cmd_master
 import cmd_analyze
 import cmd_midi
+import cmd_plugin
 import cmd_automation
 import cmd_transport
 import cmd_session
@@ -278,6 +279,7 @@ proc setupRegistry*() =
     CommandDef(spec: InitSpec, run: runInit),
     CommandDef(spec: ProjectSpec, run: runProject),
     CommandDef(spec: MidiSpec, run: runMidi),
+    CommandDef(spec: PluginSpec, run: runPlugin),
     CommandDef(spec: TransportSpec, run: runTransport),
     CommandDef(spec: SessionSpec, run: runSession),
     CommandDef(spec: DeviceSpec, run: runDevice),

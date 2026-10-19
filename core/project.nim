@@ -102,6 +102,11 @@ type
     id*: int
     nodeType*: string         # ID для NodeFactory (например, "fx.gain")
     name*: string
+    pluginPath*: string
+      ## Путь к файлу плагина для нод `plugin:<id>` (issue #95).
+      ## Пустая строка — обычная нода. Остаётся ОПЦИОНАЛЬНЫМ полем JSON:
+      ## старые проекты читаются без него, новые — не ломают старый CLI.
+
     audioInCount*: int
     audioOutCount*: int
     ctrlInCount*: int
@@ -255,6 +260,8 @@ proc toJson*(p: ProjectFormat): JsonNode =
     result["id"] = %n.id
     result["nodeType"] = %n.nodeType
     result["name"] = %n.name
+    if n.pluginPath.len > 0:
+      result["pluginPath"] = %n.pluginPath
     result["audioInCount"] = %n.audioInCount
     result["audioOutCount"] = %n.audioOutCount
     result["ctrlInCount"] = %n.ctrlInCount
@@ -494,6 +501,7 @@ proc parseNode(n: JsonNode, err: var string; depth = 0): NodeFormat =
     return
   result.nodeType = safeStr(n, "nodeType")
   result.name = safeStr(n, "name")
+  result.pluginPath = safeStr(n, "pluginPath")
   result.audioInCount = safeInt(n, "audioInCount")
   result.audioOutCount = safeInt(n, "audioOutCount")
   result.ctrlInCount = safeInt(n, "ctrlInCount")
@@ -572,6 +580,14 @@ proc subgraphDepthWithinLimit(nodes: seq[NodeFormat]; depth: int): bool =
     if not subgraphDepthWithinLimit(n.subgraphNodes, depth + 1):
       return false
   true
+
+proc pluginNodes*(project: ProjectFormat):
+    seq[tuple[nodeId: int, nodeType, pluginPath: string]] =
+  ## Ноды внешних плагинов (issue #95): тип, путь и id. Хелпер для хоста:
+  ## клиенту не нужно обходить `graph.nodes` самому (§63).
+  for node in project.graph.nodes:
+    if node.nodeType.startsWith("plugin:"):
+      result.add (node.id, node.nodeType, node.pluginPath)
 
 proc saveProject*(project: ProjectFormat, filepath: string): ProjectResult[void] =
   ## Атомарная запись проекта (issue #390): tmp-файл рядом с целью + flush +

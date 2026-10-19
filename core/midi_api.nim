@@ -34,6 +34,10 @@ export logger
 
 {.push raises: [].}
 
+const
+  UmpMaxWords* = 4
+    ## Максимум слов в одном UMP-пакете (MT 0x5/0xD — 128 бит).
+
 type
   MidiError* = enum
     meOk = 0,
@@ -71,6 +75,42 @@ type
     reserved*: uint8
     timestamp*: float64
     portId*: int32
+
+  UmpMessageKind* = enum
+    ## Вид UMP-пакета после разбора (issue #38). Имена нейтральны к версии
+    ## MIDI: один и тот же вид приходит и из MT 0x2, и из MT 0x4.
+    umkNoop = 0,
+    umkNoteOff,
+    umkNoteOn,
+    umkPolyPressure,
+    umkControlChange,
+    umkProgramChange,
+    umkChannelPressure,
+    umkPitchBend,
+    umkSystem,          ## System Common/Real Time (MT 0x1)
+    umkData,            ## SysEx7/8 (MT 0x3/0x5)
+    umkUtility,         ## Utility (MT 0x0): часы, timestamp, noop
+    umkUnsupported
+
+  UmpMessage* {.bycopy.} = object
+    ## Один UMP-пакет. POD: живёт в SPSC-кольце между callback'ом
+    ## библиотеки и realtime-потоком, поэтому GC-полей иметь не может.
+    words*: array[UmpMaxWords, uint32]
+    wordCount*: int32
+    kind*: UmpMessageKind
+    group*: uint8
+      ## UMP Group (0..15) — аналог «порта» в MIDI 2.0.
+    timestamp*: float64
+      ## Абсолютное время в секундах от открытия порта (как у RtMidi).
+
+  UmpEvent* = object
+    ## Разобранный канал-войс-пакет в терминах Core.
+    kind*: UmpMessageKind
+    channel*: uint8       ## 0..15
+    group*: uint8
+    data1*: uint32        ## нота / номер CC / номер программы
+    data2*: uint32        ## 16- или 32-битное значение
+    midi2*: bool          ## true — пакет MT 0x4 (MIDI 2.0)
 
   MidiBackendApi* = object
     ## Таблица методов адаптера.
@@ -116,6 +156,21 @@ type
     ): int32 {.cdecl, raises: [], gcsafe.}
       ## Realtime-path: слить до maxCount сообщений из кольца порта в dst.
       ## Возвращает число реально прочитанных сообщений.
+
+    # -- UMP / MIDI 2.0 (issue #38, опционально) --
+    enableUmp*: proc(api: ptr MidiBackendApi; handle: MidiPortHandle;
+      enabled: bool): bool {.cdecl, raises: [], gcsafe.}
+      ## Переключить порт в режим UMP. `false` — бэкенд не умеет UMP:
+      ## Core продолжает работать через MIDI 1.0 (`poll`).
+
+    pollUmp*: proc(
+      api: ptr MidiBackendApi;
+      handle: MidiPortHandle;
+      dst: ptr UncheckedArray[UmpMessage];
+      maxCount: int32
+    ): int32 {.cdecl, raises: [], gcsafe.}
+      ## Realtime-path: слить до maxCount UMP-пакетов. Пакеты, не влезшие
+      ## в dst, остаются в кольце (как у `poll`).
 
 # ==============================================================================
 # Nil-safe обёртки (control-path + realtime poll)
@@ -185,6 +240,24 @@ proc midiPoll*(
   if api.isNil or api.poll.isNil or handle.isNil or dst.isNil or maxCount <= 0:
     return 0
   api.poll(api, handle, dst, maxCount)
+
+proc midiEnableUmp*(api: ptr MidiBackendApi; handle: MidiPortHandle;
+                    enabled: bool): bool =
+  if api.isNil or api.enableUmp.isNil or handle.isNil:
+    return false
+  api.enableUmp(api, handle, enabled)
+
+proc midiPollUmp*(
+  api: ptr MidiBackendApi;
+  handle: MidiPortHandle;
+  dst: ptr UncheckedArray[UmpMessage];
+  maxCount: int32
+): int32 =
+  ## Realtime-обёртка UMP. Бэкенд без UMP даёт 0 — вызывающий обязан
+  ## иметь путь MIDI 1.0 (`midiPoll`), а не падать.
+  if api.isNil or api.pollUmp.isNil or handle.isNil or dst.isNil or maxCount <= 0:
+    return 0
+  api.pollUmp(api, handle, dst, maxCount)
 
 proc midiBackendNameOf*(api: ptr MidiBackendApi): string =
   ## Имя бэкенда для логов и диагностики. Control-path.

@@ -22,7 +22,7 @@
 # Безопасность записи — как у `project set` (#89): чтение и проверка формата
 # ДО правки, атомарная запись, `--dry-run` не касается диска.
 
-import std/[algorithm, json, math, strutils, tables]
+import std/[algorithm, json, math, strutils, tables, os]
 
 import project
 import context
@@ -30,6 +30,8 @@ import checks
 import catalog
 import cmd_project
 import control_bridge
+import plugin_api
+import plugin_host
 import history_file
 import control/error_frame
 import control/commands
@@ -48,6 +50,7 @@ const
     opt("--type", "только ноды этого типа (`node list`)", value = "id типа"),
     opt("--limit", "сколько нод показать (`node list`)", value = "число"),
     opt("--offset", "сколько нод пропустить (`node list`)", value = "число"),
+    opt("--path", "файл .clap для `node add plugin:<id>`", value = "файл.clap"),
   ]
     ## Ключи команд графа (`node`, `connect`, `disconnect`, `param`, `graph`) —
     ## разбор у них общий, значит и описание общее: три копии разъехались бы.
@@ -209,6 +212,8 @@ type
       ## `--limit`: сколько нод показать; 0 — без ограничения.
     offset: int
       ## `--offset`: сколько нод пропустить.
+    pluginPath: string
+      ## `--path`: библиотека внешнего плагина (`node add plugin:<id>`, #95).
 
 proc looksLikeNumber(s: string): bool =
   ## true для `-12`, `-0.15`, `+3`, `1.5` — это ЗНАЧЕНИЯ, а не ключи.
@@ -274,6 +279,8 @@ proc scanArgs(args: seq[string]; what: string): ArgScan =
                                   "например: euterpia node list --limit 20")
           return
         result.limit = parseInt(value)
+      of "--path":
+        result.pluginPath = value
       of "--offset":
         if value.len == 0 or not value.allCharsInSet({'0'..'9'}):
           result.rep = usageError("--offset принимает целое число, получено: " & value,
@@ -458,6 +465,24 @@ proc resolvePort(doc: Document; cat: seq[NodeTypeInfo];
 
   let typeIdx = typeIndexOf(cat, node.node.nodeType)
   if typeIdx < 0:
+    # Типы вне builtin (плагины, #95) описывает хозяин документа; порт всё
+    # равно проверяется по описателю, а не «на веру».
+    var spec: NodeTypeSpec
+    if doc.typeSpec(node.node.nodeType, spec).isOk():
+      let available =
+        case parsed.kind
+        of pkAudio: (if isSource: spec.audioOut else: spec.audioIn)
+        of pkCtrl: (if isSource: spec.ctrlOut else: spec.ctrlIn)
+        of pkEvent: (if isSource: spec.eventOut else: spec.eventIn)
+      if parsed.index >= available:
+        return (false, PortRef(), usageError(
+          "у ноды " & $node.node.id & " (" & spec.name & ") нет порта " &
+          parsed.kind.portKindName &
+          (if isSource: "-out" else: "-in") & " с номером " & $parsed.index &
+          ": доступно " & $available,
+          "порты ноды показывает: euterpia node show " & $node.node.id))
+      return (true, PortRef(nodeId: node.node.id, kind: parsed.kind,
+                            index: parsed.index), okReport())
     return (false, PortRef(),
             usageError("тип ноды " & node.node.nodeType & " не зарегистрирован",
                        "доступные типы: euterpia node types"))
@@ -727,8 +752,72 @@ proc runNodeAdd(ctx: var Ctx; scan: ArgScan): Report =
                       $scan.positionals.len,
                       "например: euterpia node add oscillator")
 
-  let cat = catalog()
   let query = scan.positionals[0]
+
+  # --- нода внешнего плагина (issue #95) ----------------------------------
+  # Типа `plugin:<id>` нет в каталоге builtin, и это нормально: описатель
+  # строит хост (CLI) по данным самого плагина, а create-команда пишет
+  # `pluginPath` в проект. Core формат плагина не знает.
+  if query.startsWith("plugin:"):
+    if scan.pluginPath.len == 0:
+      return usageError("node add " & query & ": нужен --path <файл.clap>",
+        "например: euterpia node add plugin:com.example.synth --path Foo.clap")
+    if not fileExists(scan.pluginPath):
+      return envError("файл плагина не найден: " & scan.pluginPath,
+        "проверьте путь; список библиотек: euterpia plugin scan <каталог>")
+    let api = pluginHostApi()
+    if api.isNil:
+      return envError("CLAP-адаптер недоступен: ноду-плагин не создать",
+        "проверьте сборку CLI; `euterpia doctor`")
+    let wanted = query["plugin:".len .. ^1]
+    let index = findPluginIndex(api, scan.pluginPath, wanted)
+    if index < 0:
+      return usageError("плагин не найден в библиотеке: " & wanted,
+        "перечислите плагины: euterpia plugin scan " & scan.pluginPath)
+    var info: PluginInfo
+    if not pluginInfo(api, cstring(scan.pluginPath), index, info):
+      return envError("не удалось прочитать плагин: " & scan.pluginPath,
+        "проверьте формат и `euterpia plugin scan`")
+    var scratchReg = builtinRegistry()
+    var spec: NodeTypeSpec
+    var pluginErr = ""
+    if not registerPluginNodeType(scratchReg, query, scan.pluginPath, index,
+                                  info, spec, pluginErr):
+      return envError("плагин не зарегистрирован: " & pluginErr,
+        "проверьте библиотеку и `euterpia plugin validate`")
+    registerControlTypeSpec(spec)
+
+    let loadedPlugin = loadAt(scan.path)
+    if not loadedPlugin.ok: return loadedPlugin.rep
+    var docPlugin = openDocument(scan.path, loadedPlugin.proj)
+    let requested = (if scan.haveId: int32(scan.id) else: 0'i32)
+    let planPlugin = docPlugin.applyTransaction(
+      @[createNode(query, scan.name, requested,
+                   pluginPath = scan.pluginPath)],
+      "добавить ноду " & query)
+    if not planPlugin.frame.isOk(): return frameReport(planPlugin.frame)
+    let allPlugin = docPlugin.queryNodes()
+    if not allPlugin.frame.isOk(): return frameReport(allPlugin.frame)
+    let newId = allPlugin.nodes[^1].id
+    let addedPlugin = docPlugin.queryNode($newId)
+    if not addedPlugin.ok: return frameReport(addedPlugin.frame)
+
+    var body = projectBody(docPlugin, scan.path)
+    body["node"] = nodeJson(addedPlugin.node, catalog())
+    body["node"]["pluginPath"] = %scan.pluginPath
+    body["change"] = %*{"action": "node.add", "id": newId,
+                        "type": query, "name": addedPlugin.node.name}
+    return commitEditWithHistory(ctx, scan.path, docPlugin.proj, planPlugin, body, @[
+      "файл: " & scan.path,
+      "добавлена нода-плагин #" & $newId & " " & addedPlugin.node.name &
+        " (" & query & ")",
+      "библиотека: " & scan.pluginPath,
+      "порты: audio in " & $info.audioInCount & "/out " & $info.audioOutCount &
+        ", параметров " & $info.paramCount,
+    ])
+    return
+
+  let cat = catalog()
   let matches = matchingTypes(cat, query)
   if matches.len == 0:
     return usageError("неизвестный тип ноды: " & query,

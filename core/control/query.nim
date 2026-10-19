@@ -89,6 +89,9 @@ type
     handleRef*: string
       ## Полный адрес с документом `node:3.1@4d379bc5`.
     name*, nodeType*: string
+    pluginPath*: string
+      ## Путь к файлу плагина для нод `plugin:<id>` (issue #95). Клиент не
+      ## читает `ProjectFormat`: путь приходит через Query API.
     typeName*, category*: string
       ## Человеческие имя и категория типа; пусто, если тип не зарегистрирован.
     known*: bool
@@ -332,6 +335,20 @@ proc paramInfoOf*(doc: Document; nodeId: int; spec: NodeTypeSpec;
     integerLike: p.integerLike,
     automatable: p.automatable, modulatable: p.modulatable, hidden: p.hidden)
 
+proc pluginStateBytes*(doc: Document; nodeId: int): seq[byte] =
+  ## Непрозрачный снимок состояния плагина для узла (issue #95). Пустой
+  ## результат — состояния нет. Core байты не интерпретирует: их пишет и
+  ## читает хост через `plugin_api`.
+  for st in doc.proj.pluginStates:
+    if st.nodeId == nodeId:
+      return st.state
+  @[]
+
+proc pluginStateNodeIds*(doc: Document): seq[int] =
+  ## Узлы, у которых есть сохранённое состояние плагина.
+  for st in doc.proj.pluginStates:
+    result.add st.nodeId
+
 proc nodeInfoOf*(doc: Document; index: int): NodeInfo =
   ## Снимок ноды. Порядок параметров — как в описателе типа (устойчив к
   ## переименованию), а для незарегистрированного типа — по имени из файла,
@@ -345,6 +362,7 @@ proc nodeInfoOf*(doc: Document; index: int): NodeInfo =
     handleRef: handleToTextQualified(doc.handles.nodeHandle(node.id)),
     name: node.name,
     nodeType: node.nodeType,
+    pluginPath: node.pluginPath,
     known: known,
     isSubgraph: node.isSubgraph,
     audioIn: node.audioInCount, audioOut: node.audioOutCount,

@@ -33,6 +33,7 @@ import project
 import catalog
 import control/query
 import control_bridge
+import plugin_host
 import control/document
 import control/commands
 import control/history
@@ -42,11 +43,16 @@ import audio_backend_api
 import backend_manager
 import backend_registry
 import live_session
+import src_api
+import stream_resampler
 import transport
 import signal_types
 import logger
 
 import audio_backend_miniaudio
+import midi_api
+import midi_backend_rtmidi
+import sdk/node_registry
 import builtin/scene_loader
 
 when defined(posix):
@@ -183,18 +189,27 @@ const
       opt("--file", "проект, если он не задан позиционно", value = "проект.eproj"),
       opt("--backend", "аудио-бэкенд: miniaudio", value = "имя"),
       opt("--device", "индекс или имя устройства вывода", value = "N|имя"),
-      opt("--sample-rate", "частота дискретизации; без ключа — из проекта", value = "Гц"),
+      opt("--sample-rate", "частота ПРОЕКТА; без ключа — из проекта", value = "Гц"),
+      opt("--device-rate", "частота УСТРОЙСТВА; без ключа — родная частота устройства", value = "Гц"),
+      opt("--src", "ресемплинг между устройством и проектом: auto|on|off", value = "auto|on|off",
+          default = "auto"),
       opt("--block", "размер блока", value = "кадры", default = $DefaultBlock),
       opt("--seconds", "играть N секунд; без ключа — до SIGINT", value = "секунды"),
       opt("--master", "id ноды, подключённой к мастеру", value = "id ноды"),
+      opt("--midi-in", "MIDI-порт для живой игры (индекс или имя)", value = "N|имя"),
+      opt("--midi-target", "id ноды-приёмника MIDI; по умолчанию — единственный инструмент", value = "id ноды"),
     ],
     example: "euterpia play demo.eproj --seconds 10",
     fields: @[
       field("path", "проект"),
       field("backend", "открытый бэкенд"),
       field("device", "индекс устройства вывода"),
-      field("sampleRate", "частота сеанса"),
-      field("blockSize", "размер блока"),
+      field("sampleRate", "частота проекта"),
+      field("deviceSampleRate", "частота устройства"),
+      field("resampling", "мост частот включён (устройство ≠ проект)"),
+      field("resamplerLatency", "задержка моста, кадров устройства"),
+      field("blockSize", "размер блока драйвера"),
+      field("engineBlockSize", "размер блока движка (может отличаться при SRC)"),
       field("seconds", "сколько длился сеанс"),
       field("frames", "отрендерено кадров"),
       field("xruns", "xrun'ы за сеанс"),
@@ -204,6 +219,12 @@ const
       field("rmsL", "последний RMS левого канала"),
       field("rmsR", "последний RMS правого канала"),
       field("graphVersion", "версия играющего графа"),
+      field("midiPort", "открытый MIDI-вход (пусто — живого входа нет)"),
+      field("midiTarget", "нода-приёмник MIDI"),
+      field("midiEvents", "принято MIDI-событий"),
+      field("midiDropped", "события, не влезшие в очередь блока"),
+      field("midiLate", "события вне текущего блока"),
+      field("automationLanes", "линий автоматизации в живом пути"),
       field("position", "позиция: `frames`, `bar`, `beat`, `tick`"),
       field("state", "состояние транспорта"),
       field("exitReason", "`seconds`|`signal`|`transport-stopped`"),
@@ -226,10 +247,16 @@ type
     deviceName: string
     haveDevice: bool
     sampleRate: int
+    deviceRate: int
+    srcMode: string
     blockSize: int
     seconds: float64
     haveSeconds: bool
     master: int
+    midiIn: int
+    midiInName: string
+    haveMidiIn: bool
+    midiTarget: int
 
 # =============================================================================
 # Разбор аргументов
@@ -260,6 +287,8 @@ proc floatArg(text, key: string; high: float64): tuple[ok: bool; value: float64;
 proc scanArgs(args: seq[string]; isDevice: bool): LiveScan =
   result.blockSize = DefaultBlock
   result.master = -1
+  result.midiTarget = -1
+  result.srcMode = "auto"
   var positionals: seq[string] = @[]
   var i = 0
   while i < args.len:
@@ -296,6 +325,25 @@ proc scanArgs(args: seq[string]; isDevice: bool): LiveScan =
       if not parsed.ok:
         return LiveScan(ok: false, rep: usageError(parsed.message))
       result.sampleRate = parsed.value
+    of "--device-rate":
+      inc i
+      if i >= args.len:
+        return LiveScan(ok: false,
+          rep: usageError("--device-rate: нужно значение в Гц"))
+      let parsed = intArg(args[i], "--device-rate", 1, 1_000_000)
+      if not parsed.ok:
+        return LiveScan(ok: false, rep: usageError(parsed.message))
+      result.deviceRate = parsed.value
+    of "--src":
+      inc i
+      if i >= args.len:
+        return LiveScan(ok: false,
+          rep: usageError("--src: нужно auto, on или off"))
+      let mode = args[i].toLowerAscii()
+      if mode notin ["auto", "on", "off"]:
+        return LiveScan(ok: false,
+          rep: usageError("--src: ожидается auto|on|off, получено «" & args[i] & "»"))
+      result.srcMode = mode
     of "--block":
       inc i
       if i >= args.len:
@@ -321,6 +369,26 @@ proc scanArgs(args: seq[string]; isDevice: bool): LiveScan =
       if not parsed.ok:
         return LiveScan(ok: false, rep: usageError(parsed.message))
       result.master = parsed.value
+    of "--midi-in":
+      inc i
+      if i >= args.len:
+        return LiveScan(ok: false,
+          rep: usageError("--midi-in: нужен индекс или имя порта"))
+      let parsed = intArg(args[i], "--midi-in", 0, 1_000_000)
+      if parsed.ok:
+        result.midiIn = parsed.value
+      else:
+        result.midiInName = args[i]
+      result.haveMidiIn = true
+    of "--midi-target":
+      inc i
+      if i >= args.len:
+        return LiveScan(ok: false,
+          rep: usageError("--midi-target: нужен id ноды"))
+      let parsed = intArg(args[i], "--midi-target", 0, int(high(int32)))
+      if not parsed.ok:
+        return LiveScan(ok: false, rep: usageError(parsed.message))
+      result.midiTarget = parsed.value
     else:
       if a.len > 1 and a[0] == '-':
         return LiveScan(ok: false, rep: usageError("неизвестный ключ: " & a))
@@ -463,6 +531,18 @@ proc validateDevice(backend: string; device: int): string =
     if int(info.id) == device:
       return ""
   "устройства вывода #" & $device & " нет: доступно " & $infos.len
+
+proc deviceRateOf(backend: string; device: int): float64 =
+  ## Родная частота устройства вывода (0 — неизвестна). Нужна мосту SRC (#8):
+  ## проект 44.1k на устройстве 48k должен играть в темпе, а не «на полтона
+  ## ниже». Список берётся у адаптера, устройство при этом не открывается.
+  var infos: seq[AudioDeviceInfo]
+  if not listOutputs(backend, infos):
+    return 0.0
+  for info in infos:
+    if int(info.id) == device and info.defaultSampleRate > 0.0:
+      return info.defaultSampleRate
+  0.0
 
 # =============================================================================
 # Живой рендер
@@ -694,6 +774,105 @@ proc scanRecordArgs(args: seq[string]): RecordScan =
         "укажите --project"))
   result.ok = true
 
+# =============================================================================
+# Живой MIDI-вход (issue #413)
+# =============================================================================
+
+type
+  MidiInputRig = object
+    api: ptr MidiBackendApi
+    port: MidiPortHandle
+    name: string
+    index: int
+
+proc autoMidiTarget(doc: Document): tuple[ok: bool; nodeId: int;
+                                        message: string] =
+  ## Нода-приёмник MIDI по умолчанию — единственная нода с event-входом.
+  ## Угадывать среди нескольких нельзя: ноты ушли бы не в тот инструмент.
+  var reg = builtinRegistry()
+  var candidates: seq[int] = @[]
+  # Чтение — через Query API (§63): DTO уже содержит тип ноды.
+  let nodes = queryNodes(doc)
+  for node in nodes.nodes:
+    let entry = reg.findNodeType(node.nodeType)
+    if not entry.isNil and entry.desc.eventInCount > 0:
+      candidates.add node.id
+  if candidates.len == 0:
+    return (false, -1, "в проекте нет ноды с MIDI-входом")
+  if candidates.len > 1:
+    var list: seq[string] = @[]
+    for id in candidates: list.add "#" & $id
+    return (false, -1, "на MIDI-вход претендует несколько нод (" &
+                       list.join(", ") & "): укажите --midi-target")
+  (true, candidates[0], "")
+
+proc openMidiInput(scan: LiveScan): tuple[rig: MidiInputRig; error: string] =
+  ## Открыть порт входа. Пустой `error` — успех; иначе причина для кода 2.
+  var log = silentLogger()
+  let api = createRtMidiBackend(log)
+  if api.isNil:
+    return (MidiInputRig(), "MIDI-адаптер не создан")
+  let initErr = midiInit(api, addr log)
+  if initErr != meOk:
+    destroyRtMidiBackend(api)
+    return (MidiInputRig(), "MIDI-адаптер недоступен: " & $initErr)
+
+  let count = midiDeviceCount(api, mpdInput)
+  var index = scan.midiIn
+  if scan.midiInName.len > 0:
+    index = -1
+    var i = 0'i32
+    while i < count:
+      var info: MidiBackendPortInfo
+      if midiDeviceInfo(api, mpdInput, i, info) and info.name == scan.midiInName:
+        index = int(i)
+        break
+      inc i
+    if index < 0:
+      midiShutdown(api)
+      destroyRtMidiBackend(api)
+      return (MidiInputRig(), "MIDI-порт не найден: «" & scan.midiInName & "»")
+  elif index < 0 or index >= int(count):
+    midiShutdown(api)
+    destroyRtMidiBackend(api)
+    return (MidiInputRig(), "MIDI-порта #" & $index & " нет: входов " & $count)
+
+  var info: MidiBackendPortInfo
+  discard midiDeviceInfo(api, mpdInput, int32(index), info)
+  let port = midiOpenPort(api, mpdInput, int32(index))
+  if port.isNil:
+    midiShutdown(api)
+    destroyRtMidiBackend(api)
+    return (MidiInputRig(), "не удалось открыть MIDI-порт #" & $index)
+  result.rig = MidiInputRig(api: api, port: port, name: info.name, index: index)
+
+proc closeMidiInput(rig: var MidiInputRig) =
+  if rig.api.isNil:
+    return
+  if not rig.port.isNil:
+    midiClosePort(rig.api, rig.port)
+    rig.port = nil
+  midiShutdown(rig.api)
+  destroyRtMidiBackend(rig.api)
+  rig.api = nil
+
+proc liveAutomationFromProject(proj: ProjectFormat):
+    tuple[lanes: seq[LiveAutomationLane]; droppedPoints: int] =
+  ## Линии проекта -> POD-набор живого пути. Точки сверх лимита линии
+  ## считаются (`droppedPoints`), а не теряются молча.
+  let offline = automationFromProject(proj)
+  for lane in offline:
+    var item = LiveAutomationLane(nodeId: lane.nodeId, paramId: lane.paramId)
+    var dropped = 0
+    for p in lane.points:
+      if item.pointCount >= MaxLiveAutomationPoints:
+        inc dropped
+        continue
+      item.addLiveAutomationPoint(p.tick, p.value, uint8(ord(p.curve)))
+    result.droppedPoints += dropped
+    if item.pointCount > 0:
+      result.lanes.add item
+
 proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   var path = scan.path
   if path.len == 0 and fileExists(DefaultProjectFile):
@@ -748,9 +927,42 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
       "список устройств: euterpia device list; без устройства работает " &
       "офлайн-рендер: euterpia render " & path)
 
+  # --- частоты: устройство ↔ проект (issue #8) ----------------------------
+  # `--device-rate` задаёт частоту драйвера явно; иначе берётся родная
+  # частота устройства. Если она отличается от частоты проекта, включается
+  # мост: движок считает в частоте проекта (темп, автоматизация, PDC),
+  # драйвер — в своей. `--src off` запрещает мост (диагностика/совместимость).
+  var deviceRate = sr
+  var srcEnabled = false
+  let nativeRate =
+    if scan.deviceRate > 0: float64(scan.deviceRate)
+    else: deviceRateOf(backend, device)
+  if scan.srcMode != "off" and nativeRate > 0.0 and
+     abs(nativeRate - float64(sr)) > 0.5:
+    if not liveRateCompatible(nativeRate, float64(sr)):
+      return usageError("частота устройства и проекта несовместимы: " &
+        $nativeRate & " Гц и " & $sr & " Гц",
+        "отношение вне 1/16..16; проверьте `euterpia device list`")
+    deviceRate = int(round(nativeRate))
+    srcEnabled = true
+  let engineBlock: int32 =
+    if srcEnabled: liveProjectBlock(int32(bs), float64(deviceRate), float64(sr))
+    else: int32(bs)
+  if engineBlock <= 0 or engineBlock > MaxBlockSize:
+    return usageError("блок движка вне диапазона: " & $engineBlock,
+      "уменьшите --block (при SRC блок движка пересчитывается)")
+
   # --- сцена --------------------------------------------------------------
   var reg = builtinRegistry()
-  var scene = loadScene(reg, proj, scan.master, int32(sr), parentDir(path))
+  # Плагины проекта: тип-обёртка и сохранённое состояние (#95).
+  let doc = openDocument(path, proj)
+  var pluginErr = ""
+  discard registerProjectPlugins(reg, doc, pluginErr)
+  if pluginErr.len > 0:
+    return usageError("плагины проекта не загружены: " & pluginErr,
+      "проверьте путь и `euterpia plugin scan`")
+  var scene = loadScene(reg, proj, scan.master, int32(sr), parentDir(path),
+                        pluginStateHook = pluginStateHookFor(doc))
   if not scene.ok:
     return usageError(scene.error,
       "проверьте граф: euterpia graph check " & path)
@@ -762,7 +974,7 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   # Пайплайн переходит живому сеансу; сцена остаётся владельцем состояний
   # нод и скомпилированных секвенсоров, поэтому живёт до `closeLiveSession`.
   var pipeline = detachPipeline(scene)
-  var session = initLiveSession(float32(sr), int32(bs), move(pipeline))
+  var session = initLiveSession(float32(sr), int32(engineBlock), move(pipeline))
   if not session.isActive:
     destroyScene(scene)
     return panicError("не удалось создать живой сеанс",
@@ -772,8 +984,32 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   discard session.postPlay()
   session.flushQueuedCommands()
 
+  # Мост создаётся ДО открытия устройства: его буферы и ресемплеры обязаны
+  # существовать к первому callback (в RT-пути аллокаций нет).
+  var srcApi: ptr SrcApi = nil
+  var srcLatency = 0'i32
+  var srcLog = silentLogger()
+  if srcEnabled:
+    srcApi = newSrcApi()
+    var srcReady = false
+    if not srcApi.isNil and srcInit(srcApi, addr srcLog) == seOk:
+      srcReady = session.enableLiveResampling(
+        srcApi, int32(bs), float64(deviceRate), float64(sr))
+    if not srcReady:
+      if not srcApi.isNil:
+        srcShutdown(srcApi)
+        freeSrcApi(srcApi)
+        srcApi = nil
+      discard session.postStop()
+      session.closeLiveSession()
+      destroyScene(scene)
+      return envError("ресемплинг недоступен: адаптер SRC не создан",
+        "проверьте EUTERPIA_SRC_LIB и сборку; либо `--src off` на устройстве " &
+        "с частотой проекта")
+    srcLatency = session.liveResamplingLatency()
+
   var cfg = AudioStreamConfig(
-    sampleRate: float64(sr),
+    sampleRate: float64(deviceRate),
     blockSize: int32(bs),
     inputChannels: 0,
     outputChannels: MaxAudioChannels,
@@ -796,6 +1032,10 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   if openErr != bmOk:
     discard session.postStop()
     session.closeLiveSession()
+    if not srcApi.isNil:
+      srcShutdown(srcApi)
+      freeSrcApi(srcApi)
+      srcApi = nil
     destroyScene(scene)
     let reason =
       case openErr
@@ -808,6 +1048,47 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
       "проверьте `euterpia device list`; без звуковой подсистемы работает " &
       "офлайн-рендер: euterpia render " & path)
 
+
+  # --- живой MIDI-вход и автоматизация (issue #413) ------------------------
+  # MIDI открывается ПОСЛЕ устройства: порт без работающего audio-потока
+  # бессмыслен, а путь раннего отказа остаётся коротким (закрыть движок).
+  var midiRig = MidiInputRig()
+  var midiTarget = scan.midiTarget
+  var midiAccepted = 0
+  if scan.haveMidiIn:
+    if midiTarget < 0:
+      let target = autoMidiTarget(doc)
+      if not target.ok:
+        discard session.postStop()
+        mgr.closeBackend()
+        session.closeLiveSession()
+        if not srcApi.isNil:
+          srcShutdown(srcApi)
+          freeSrcApi(srcApi)
+          srcApi = nil
+        destroyScene(scene)
+        return usageError("живой MIDI-вход: " & target.message,
+          "укажите ноду явно: euterpia play ... --midi-in 0 --midi-target 1")
+      midiTarget = target.nodeId
+    let opened = openMidiInput(scan)
+    if opened.error.len > 0:
+      discard session.postStop()
+      mgr.closeBackend()
+      session.closeLiveSession()
+      if not srcApi.isNil:
+        srcShutdown(srcApi)
+        freeSrcApi(srcApi)
+        srcApi = nil
+      destroyScene(scene)
+      return envError("живой MIDI-вход недоступен: " & opened.error,
+        "список портов: euterpia midi list")
+    midiRig = opened.rig
+    session.setMidiInputTarget(int32(midiTarget))
+
+  # Автоматизация проекта применяется живым продюсером на границе блока.
+  # До этого `play` брал только стартовые значения параметров.
+  let auto = liveAutomationFromProject(proj)
+  let autoAccepted = session.postLiveAutomation(auto.lanes)
 
   # --- сеанс --------------------------------------------------------------
   installStopHandlers()
@@ -846,7 +1127,25 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
         cliStdout(metricLine(snap))
       inc snapshots
 
-    sleep(10)
+    if not midiRig.port.isNil:
+      # Порт опрашивается часто (2 мс): задержка входа — свойство живого
+      # режима, а не «побочный эффект» 10-миллисекундного ожидания.
+      var scratch: array[64, MidiMessage]
+      let got = midiPoll(midiRig.api, midiRig.port,
+        cast[ptr UncheckedArray[MidiMessage]](addr scratch[0]),
+        int32(scratch.len))
+      var k = 0'i32
+      while k < got:
+        let m = scratch[k]
+        # timestamp порта — секунды от открытия; транспорт начинает с 0,
+        # поэтому кадр проекта = timestamp * projectRate.
+        let frame = int64(m.timestamp * float64(sr))
+        if session.postMidiEventAtFrame(m.status, m.data1, m.data2, frame):
+          inc midiAccepted
+        inc k
+      sleep(2)
+    else:
+      sleep(10)
 
   # --- завершение: транспорт → адаптер → движок → сцена --------------------
   # Итоговую позицию снимаем ДО `postStop`: стоп сбрасывает её в ноль, и
@@ -857,7 +1156,12 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   discard session.postStop()
   session.flushQueuedCommands()
   mgr.closeBackend()
+  closeMidiInput(midiRig)
   session.closeLiveSession()
+  if not srcApi.isNil:
+    srcShutdown(srcApi)
+    freeSrcApi(srcApi)
+    srcApi = nil
   destroyScene(scene)
 
   let elapsedMs = (getMonoTime() - started).inMilliseconds
@@ -866,12 +1170,22 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
     "backend": backend,
     "device": device,
     "sampleRate": sr,
+    "deviceSampleRate": deviceRate,
+    "resampling": srcEnabled,
+    "resamplerLatency": srcLatency,
     "blockSize": bs,
+    "engineBlockSize": engineBlock,
     "seconds": float64(elapsedMs) / 1000.0,
     "frames": finalFrame,
     "xruns": totalXruns,
     "droppedMetrics": dropped,
     "graphVersion": (if haveMetric: lastMetric.graphVersion else: 0'u64),
+    "midiPort": (if midiRig.port.isNil: "" else: midiRig.name),
+    "midiTarget": midiTarget,
+    "midiEvents": midiAccepted,
+    "midiDropped": session.midiDroppedCount(),
+    "midiLate": session.midiLateCount(),
+    "automationLanes": autoAccepted,
     "position": positionJson(finalFrame, tempo, float32(sr), num, den),
     "state": "stopped",
     "exitReason": exitReason,
@@ -1127,7 +1441,15 @@ proc runRecord(ctx: var Ctx; scan: RecordScan): Report =
   var session: LiveSession
   if haveProject:
     var reg = builtinRegistry()
-    scene = loadScene(reg, proj, -1, int32(sr), parentDir(scan.project))
+    let doc = openDocument(scan.project, proj)
+    var pluginErr = ""
+    discard registerProjectPlugins(reg, doc, pluginErr)
+    if pluginErr.len > 0:
+      destroyScene(scene)
+      return usageError("плагины проекта не загружены: " & pluginErr,
+        "проверьте путь и `euterpia plugin scan`")
+    scene = loadScene(reg, proj, -1, int32(sr), parentDir(scan.project),
+                      pluginStateHook = pluginStateHookFor(doc))
     if not scene.ok:
       closeLiveRecorder(rec)
       return usageError(scene.error,

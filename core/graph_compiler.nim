@@ -44,7 +44,16 @@ type
     sigType*: SignalType
 
   EditorNode* = object
-    id*: int               
+    id*: int
+    sourceId*: int
+      ## Идентификатор ноды В ПРОЕКТЕ (issue #413).
+      ##
+      ## `flattenGraph` переприсваивает внутренние id (начиная с 100000),
+      ## чтобы развести совпадающие локальные id субграфов. Хосту же нужен
+      ## исходный id: по нему адресуются параметры, автоматизация и
+      ## внешний MIDI-вход. Для листьев верхнего уровня `sourceId == id`.
+      ## Для нод внутри субграфа это локальный id (внешний адрес — субграф).
+               
     name*: string
     nodeType*: string
     processProc*: ProcessProc
@@ -242,10 +251,20 @@ proc processDelayComp*(ctx: ptr NodeProcessContext,
     if rFrame < 0: rFrame += ringFrames
     let rPos = rFrame * ringCh
 
+    # Вход читается ДО записи выхода (аудит P3, #95/#411): анализ времён
+    # жизни буферов вправе переиспользовать входной буфер PDC-ноды под её
+    # выход (смерть входа = рождение выхода), то есть `outBuf == inBuf`.
+    # Прежний порядок «сначала выход, затем чтение входа» в этом случае
+    # записывал в кольцо уже занулённые сэмплы — ветвь с задержкой отдавала
+    # тишину навсегда (проявлялось на первом же плагине с latency > 0).
+    var frameIn: array[DelayCompensationRingChannels, float32]
+    for ch in 0 ..< ringed:
+      let idx = if planar: ch * stride + i else: i * int(channels) + ch
+      frameIn[ch] = inBuf.data[idx]
     for ch in 0 ..< ringed:
       let idx = if planar: ch * stride + i else: i * int(channels) + ch
       outBuf.data[idx] = ring[rPos + ch]
-      ring[wPos + ch] = inBuf.data[idx]
+      ring[wPos + ch] = frameIn[ch]
 
     state.writePos = (state.writePos + 1) mod ringFrames
 
@@ -390,6 +409,8 @@ proc flattenContainer(
       let safeId = allocator.nextId()
       idRemap[key] = safeId
       var leaf = child
+      if leaf.sourceId == 0:
+        leaf.sourceId = child.id
       leaf.id = safeId
       leaf.isSubgraph = false
       leaf.subgraphNodes = @[]
@@ -981,6 +1002,7 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
 
   for stepIdx, id in order:
     let node = g.nodes.getOrDefault(id, EditorNode())
+    p.steps[stepIdx].nodeId = int32(node.sourceId)
     p.steps[stepIdx].processProc = node.processProc
     p.steps[stepIdx].userData = node.userData
     

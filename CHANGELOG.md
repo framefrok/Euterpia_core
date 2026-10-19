@@ -8,6 +8,88 @@
 Версия пакета — единственная константа `euterpia_version.nim`, поэтому
 `euterpia --version`, поле `version` пакета и имя тега совпадают.
 
+## [0.3.5] — Функциональность P3 и полировка (v0.3.5)
+
+### Добавлено
+- **Ресемплинг «устройство ↔ проект»** (issue #8): контракт
+  `core/src_api`, polyphase-sinc адаптер `adapters/resample` и мост в
+  live-пути — проект 44.1 кГц играет в темпе на устройстве 48 кГц и
+  наоборот. Очереди предвыделены, `process` без аллокаций; задержка моста
+  входит в отчёт (`resamplerLatency`), транспорт идёт со скоростью проекта
+  ([#8](https://github.com/framefrok/Euterpia_core/issues/8)).
+- **UMP / MIDI 2.0** (issue #38): `core/ump.nim` разбирает MT 0x0/0x2/0x4,
+  собирает MIDI 1.0 → UMP и сводит 16/32-битные значения к MIDI 1.0 с
+  документированной потерей; `adapters/libremidi` реализует `midi_api` через
+  C-фасад с ленивой загрузкой и graceful degrade. RtMidi-адаптер сохранён
+  как альтернатива (решение зафиксировано в README адаптера)
+  ([#38](https://github.com/framefrok/Euterpia_core/issues/38)).
+- **LV2 через Lilv** (issue #39): `adapters/lilv` за `plugin_api` —
+  перечисление плагинов бандла, инстанс, аудио/control-порты, параметры и
+  latency-порт (идёт в PDC). Lazy-dynlib: нет liblilv — `peUnavailable`.
+  Atom/MIDI-порты и состояние LV2 не поддержаны и честно отказывают
+  ([#39](https://github.com/framefrok/Euterpia_core/issues/39)).
+- **Живой MIDI-вход и продюсер автоматизации** (issue #413):
+  `AudioEngine.postMidiEventAtFrame` (SPSC, без аллокаций) доставляет
+  события в event-вход выбранной ноды; события вне блока считаются
+  `midiLate`, переполнение — `midiDropped`. `play --midi-in 0
+  --midi-target 3` играет с порта, автоматизация проекта применяется на
+  границе блока (`postLiveAutomation`, двойной буфер) — те же тики, что у
+  офлайн-рендера ([#413](https://github.com/framefrok/Euterpia_core/issues/413)).
+- **FLAC-lossless и lossy-превью сдачи** (issue #411): встроенный
+  FLAC-энкодер (VERBATIM-кадры, CRC-8/CRC-16, точный total_samples),
+  round-trip ≤ 1 LSB и `flac -t`; `master --format flac|ogg|mp3`,
+  `--preview-bitrate`, поля манифеста `codec`/`lossless`/`role`/`bitrate`.
+  OGG/MP3 — превью через `ffmpeg`/`lame`/`oggenc`; нет инструмента — код 2
+  ([#411](https://github.com/framefrok/Euterpia_core/issues/411)).
+- **Плагины в CLI** (issue #95): `plugin scan/info/params/save`, хостинг
+  `plugin:<id>` в графе (osc → плагин → мастер), `node add
+  plugin:<id> --path <файл.clap>`, состояние плагина в проекте и его
+  восстановление при render/play/record. Сквозной сценарий на mock-плагине
+  исполняется в CI (`tools/plugin_cli_scenario.sh`)
+  ([#95](https://github.com/framefrok/Euterpia_core/issues/95)).
+- **`plugin validate`** (issue #260): честная обёртка официального
+  `clap-validator` — поиск `--validator` → `PATH`, человеко- и
+  машиночитаемый вывод проверок, коды 0/1/2; нет валидатора — код 2 с
+  подсказкой установки ([#260](https://github.com/framefrok/Euterpia_core/issues/260)).
+- **Поставка** (issue #229): архивы Linux/Windows/macOS, `install.sh` /
+  `install.ps1` с ассоциациями `*.eproj`/`*.eut` (freedesktop MIME, HKCU,
+  `CFBundleDocumentTypes`), SHA256, workflow `Release` по тегу и CI-джоб
+  `package`, который запускает собранный пакет в `ubuntu:24.04` без Nim
+  ([#229](https://github.com/framefrok/Euterpia_core/issues/229)).
+
+### Исправлено
+- **PDC зануляла ветвь с задержкой**: анализ времён жизни буферов вправе
+  переиспользовать входной буфер PDC-ноды под её выход; прежний порядок
+  «записать выход, затем прочитать вход» записывал в кольцо уже нули, и
+  первый же плагин с `latency > 0` давал тишину. Вход читается до записи
+  выхода; регрессия покрыта тестом `test_pdc` (аудит P3).
+- **`play` без `--midi-in` не меняет поведение**: ресемплинг включается
+  только при реальном расхождении частот, `--src off` возвращает прежний
+  путь; автоматизация без линий ничего не публикует.
+
+### Изменено
+- **`midi_api` расширен UMP** (`enableUmp`/`pollUmp`, опциональные поля
+  таблицы): RtMidi-адаптер продолжает работать без изменений.
+- **`PipelineStep.nodeId` и `EditorNode.sourceId`**: шаг пайплайна знает id
+  ноды проекта, хотя `flattenGraph` переприсваивает внутренние id — без
+  этого внешнее событие нельзя адресовать конкретной ноде.
+- **`loadScene` принимает хук состояния плагина**: Nodes по-прежнему не
+  знают форматов плагинов, байты восстанавливает хост (§27).
+
+### Ограничения шага (зафиксированы, а не замалчиваются)
+- **libremidi и Lilv не вендорены**: адаптеры компилируются и честно
+  деградируют, но для реального хостинга нужна установленная библиотека
+  (инструкция — `adapters/libremidi/README.md`). Это осознанно: тащить в
+  репозиторий C++-код и C-зависимости без воспроизводимой сборки хуже, чем
+  явная зависимость.
+- **LV2 Atom/MIDI и состояние**: не поддержаны, `stateSave` возвращает -1;
+  плагины с обязательными atom-портами могут давать тишину — ограничение
+  адаптера, а не Core.
+- **FLAC-энкодер без предсказания**: файл больше, чем у libFLAC (VERBATIM),
+  но lossless и читается `flac -t`; предсказание — отдельный шаг.
+- **Поставка**: нет подписи кода и `.deb`/`.rpm`/MSI; macOS-архив — под
+  архитектуру раннера (`docs/delivery.md`).
+
 ## [0.3.4] — Функциональность P2 (v0.3.4)
 
 ### Добавлено

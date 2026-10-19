@@ -22,6 +22,12 @@ import
   node_interface,
   graph_compiler
 
+# Node SDK — публичная поверхность для авторов нод: типы процесса
+# (`NodeProcessContext`, `NodeAudioPorts`, `EventQueue`) реэкспортируются,
+# чтобы хост-обёртки (например, плагины в CLI, #95) не импортировали
+# `core/node_interface` напрямую.
+export node_interface
+
 const
   NodeApiVersion* = 1'u32
 
@@ -97,6 +103,14 @@ type
 
     params*: array[NodeMaxParams, NodeParamDesc]
     paramCount*: int32
+
+    ## Непрозрачные данные ХОСТА для нод-обёрток (issue #95).
+    ##
+    ## Используется обёрткой внешнего плагина: по этому указателю её
+    ## фабрика находит загруженный `PluginApi` и путь к библиотеке.
+    ## Nodes/Core поле не читают; ABI Node API от этого не меняется —
+    ## указатель живёт только на control-path.
+    pluginHost*: pointer
 
 # -----------------------------------------------------------------------------
 # Фабрика
@@ -380,6 +394,7 @@ proc makeEditorNode*(desc: ptr NodeDesc; factory: ptr NodeFactory;
   ## на состояние. Владение состоянием остаётся у вызывающего.
   EditorNode(
     id: nodeId,
+    sourceId: nodeId,
     name: readFixed(desc.name),
     nodeType: readFixed(desc.id),
     processProc: factory.process,

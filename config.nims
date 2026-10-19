@@ -26,6 +26,12 @@ switch("path", "adapters/clap")
 switch("path", "adapters/eut")
 switch("path", "adapters/reference")
 switch("path", "adapters/miniaudio")
+# Ресемплинг (issue #8): контракт `core/src_api`, реализация в адаптере.
+switch("path", "adapters/resample")
+# libremidi (issue #38) и LV2/Lilv (issue #39) — только `nim check` в CI,
+# библиотек на машине сборки может не быть.
+switch("path", "adapters/libremidi")
+switch("path", "adapters/lilv")
 switch("path", "tests")
 
 # Корень пакета (issue #88).

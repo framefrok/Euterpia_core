@@ -19,7 +19,14 @@ import
   audio_engine,
   audio_recorder,
   compiled_pipeline,
-  ipc_bus
+  ipc_bus,
+  live_resampler,
+  live_automation,
+  src_api
+
+# Живой путь принимает линии автоматизации и MIDI-события теми же типами,
+# что и Core: CLI не заводит вторую копию DTO.
+export live_automation
 
 {.push raises: [].}
 
@@ -42,6 +49,9 @@ type
     ## Владелец движка в живом режиме. Адрес объекта передаётся драйверу,
     ## поэтому объект обязан жить на стабильном адресе (не копировать).
     engine*: ptr AudioEngine
+    bridge*: LiveSrcBridge
+      ## Мост «частота устройства ≠ частота проекта» (issue #8).
+      ## Неактивен, пока CLI не вызовет `enableLiveResampling`.
 
   LiveRecorder* = object
     ## Запись входа (issue #94). Владелец — CLI: движок держит только
@@ -78,10 +88,67 @@ proc isActive*(s: LiveSession): bool {.inline.} =
   s.engine != nil
 
 proc closeLiveSession*(s: var LiveSession) =
+  ## Освободить сеанс. Мост — ДО движка: его callback больше не будет
+  ## вызван, а конвертеры ссылаются только на адаптер SRC.
+  if s.bridge.active:
+    s.bridge.closeLiveSrcBridge()
   if s.engine.isNil:
     return
   destroyAudioEngine(s.engine)
   s.engine = nil
+
+# =============================================================================
+# Ресемплинг сеанса (issue #8)
+# =============================================================================
+
+proc enableLiveResampling*(
+  s: var LiveSession;
+  api: ptr SrcApi;
+  deviceFrames: int32;
+  deviceRate, projectRate: float64
+): bool =
+  ## Включить мост. Вызывается на control-path ДО открытия устройства.
+  ##
+  ## `deviceFrames` — блок, который драйвер реально отдаёт в callback;
+  ## `deviceRate` — фактическая частота устройства; `projectRate` — частота
+  ## проекта. Блок ДВИЖКА при этом должен быть равен
+  ## `liveProjectBlock(...)` (CLI создаёт сеанс уже с ним).
+  if s.engine.isNil:
+    return false
+  if s.bridge.active:
+    return false
+  if deviceFrames != s.engine.blockSize and
+     live_resampler.projectBlockFor(deviceFrames, deviceRate, projectRate) !=
+       s.engine.blockSize:
+    # Движок обязан уметь принять столько кадров, сколько даст мост.
+    return false
+  s.bridge.initLiveSrcBridge(api, deviceFrames, deviceRate, projectRate)
+
+proc disableLiveResampling*(s: var LiveSession) =
+  if s.bridge.active:
+    s.bridge.closeLiveSrcBridge()
+
+proc liveResamplingActive*(s: LiveSession): bool {.inline.} =
+  s.bridge.active
+
+proc liveResamplingLatency*(s: LiveSession): int32 {.inline.} =
+  if s.bridge.active: s.bridge.latencyFrames else: 0
+
+proc liveResamplingDropped*(s: LiveSession): uint32 {.inline.} =
+  if s.bridge.active: s.bridge.droppedFrames else: 0
+
+proc liveResamplingAvailable*(): bool {.inline.} =
+  ## Совместимость: мост не требует внешней библиотеки, поэтому доступен
+  ## всегда. Отдельная проба оставлена для CLI-отчёта.
+  true
+
+proc liveRateCompatible*(deviceRate, projectRate: float64): bool {.inline.} =
+  ## Отношение частот устройства и проекта допустимо для моста.
+  live_resampler.bridgeRateOk(deviceRate, projectRate)
+
+proc liveProjectBlock*(deviceFrames: int32; deviceRate, projectRate: float64): int32 {.inline.} =
+  ## Размер блока движка для сеанса с мостом (см. `enableLiveResampling`).
+  live_resampler.projectBlockFor(deviceFrames, deviceRate, projectRate)
 
 # =============================================================================
 # Запись входа (issue #94)
@@ -165,6 +232,10 @@ proc liveRender*(
   if engineCtx.isNil or driverOut.isNil:
     return
   let session = cast[ptr LiveSession](engineCtx)
+  if session.bridge.active and
+     session.bridge.bridgeProcess(session.engine, driverIn, driverOut,
+                                  inputChannels, frames):
+    return
   renderBlock(session.engine, driverIn, inputChannels, driverOut)
 
 proc liveStatus*(engineCtx: pointer; statusFlags: uint32)
@@ -203,6 +274,37 @@ proc currentFrame*(s: LiveSession): int64 = currentFrame(s.engine)
 proc xrunCount*(s: LiveSession): uint32 = xrunCount(s.engine)
 
 proc droppedMetrics*(s: LiveSession): uint32 = droppedMetricsCount(s.engine)
+
+# ==============================================================================
+# Живой MIDI-вход и автоматизация (issue #413)
+# ==============================================================================
+
+proc setMidiInputTarget*(s: LiveSession; nodeId: int32) =
+  ## Направить внешний MIDI в ноду графа. Control-path, до/во время игры.
+  setMidiInputTarget(s.engine, nodeId)
+
+proc postMidiEventAtFrame*(s: LiveSession; status, data1, data2: uint8;
+                           frame: int64): bool =
+  ## Событие в очередь audio-потока. `frame` — абсолютный кадр проекта:
+  ## CLI считает его из timestamp порта (`timestamp * projectRate`).
+  postMidiEventAtFrame(s.engine, status, data1, data2, frame)
+
+proc midiLateCount*(s: LiveSession): uint32 =
+  midiLateCount(s.engine)
+
+proc midiDroppedCount*(s: LiveSession): uint32 =
+  midiDroppedCount(s.engine)
+
+proc postLiveAutomation*(s: LiveSession;
+                         lanes: openArray[LiveAutomationLane]): int32 =
+  ## Опубликовать линии автоматизации в движок (двойной буфер).
+  postLiveAutomation(s.engine, lanes)
+
+proc clearLiveAutomation*(s: LiveSession) =
+  clearLiveAutomation(s.engine)
+
+proc liveAutomationLaneCount*(s: LiveSession): int32 =
+  liveAutomationLaneCount(s.engine)
 
 proc pollMetrics*(s: LiveSession; m: var LiveMetrics): bool =
   ## Прочитать последнюю метрику из очереди. `false` — новых снимков нет
