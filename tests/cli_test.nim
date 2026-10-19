@@ -2957,6 +2957,8 @@ suite "CLI: MIDI — порты и монитор (#93)":
     let r = runCli(["midi", "monitor", "--seconds", "0.05", "--json"])
     check r.code == 0
     let lines = nonEmptyLines(r.output)
+
+
     check lines.len >= 1
     # Каждая строка — самостоятельный JSON, последняя — конверт команды.
     for line in lines:
@@ -2976,3 +2978,52 @@ suite "CLI: MIDI — порты и монитор (#93)":
     check r.code == 1
     check parseJson(r.output)["error"]["message"].getStr.contains("--nope")
 
+
+# =============================================================================
+# Запись входа (#94)
+# =============================================================================
+
+suite "CLI: record — запись входа (#94)":
+  let dir = getTempDir() / "euterpia_cli_record"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  test "record: пишет WAV или честно отказывает кодом 2 без устройства":
+    let outPath = dir / "take.wav"
+    let r = runCli(["record", outPath, "--seconds", "0.05", "--json"])
+    # Машина с устройством запишет файл; машина без входа — код 2 и
+    # сообщение. Паника/код 3 запрещены в обоих случаях.
+    check r.code in [0, 2]
+    let node = parseJson(r.output)
+    if r.code == 0:
+      check node["ok"].getBool
+      check node["frames"].getInt > 0
+      check node["channels"].getInt == 1
+      check fileExists(outPath)
+      # Заголовок WAV читается тем же анализатором, что и любой файл.
+      check runCli(["analyze", outPath, "--json"]).code == 0
+    else:
+      check node["error"]["kind"].getStr == "env"
+      check not fileExists(outPath)
+
+  test "record: моно/стерео — единственные допустимые ширины":
+    let bad = runCli(["record", dir / "bad.wav", "--channels", "3", "--json"])
+    check bad.code == 1
+    check parseJson(bad.output)["error"]["message"].getStr.contains("1..2")
+
+  test "record: сжатый выход отвергается до открытия устройства":
+    let r = runCli(["record", dir / "take.mp3", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("WAV")
+
+  test "record: путь обязателен и не угадывается":
+    let r = runCli(["record", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("файл записи")
+
+  test "record: неверный --input-device — ошибка использования":
+    let r = runCli(["record", dir / "take.wav", "--input-device", "x",
+                    "--json"])
+    check r.code == 1

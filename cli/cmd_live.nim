@@ -29,6 +29,7 @@ import context
 import cli_spec
 import config
 import cmd_project
+import project
 import catalog
 import control/query
 import control_bridge
@@ -82,6 +83,54 @@ const
       "на машине без звуковой подсистемы команда успешна: пустой список и причина, а не паника (#92)",
       "CLI собирается с miniaudio статически; portaudio в этой сборке не залинкован",
       "устройства описываются данными адаптера (`backendDeviceInfo`), CLI не угадывает поля",
+    ])
+
+  RecordSpec* = CommandSpec(
+    name: "record",
+    summary: "запись входа в WAV через аудиоустройство (arm/start/stop, метрики)",
+    synopsis: "record <выход.wav> [--seconds N] [--channels 1|2] [--input-channel N]",
+    args: @[
+      arg("выход.wav", "куда писать запись; расширение `.wav` обязательно"),
+    ],
+    options: @[
+      opt("--project", "проект, чей граф держать открытым во время записи",
+          value = "проект.eproj"),
+      opt("--backend", "аудио-бэкенд: miniaudio", value = "имя"),
+      opt("--device", "индекс или имя устройства вывода", value = "N|имя"),
+      opt("--input-device", "индекс устройства ввода", value = "N"),
+      opt("--sample-rate", "частота дискретизации записи", value = "Гц"),
+      opt("--block", "размер блока", value = "кадры", default = $DefaultBlock),
+      opt("--seconds", "писать N секунд; без ключа — до SIGINT", value = "секунды"),
+      opt("--channels", "ширина записи: 1 (моно) или 2 (стерео)", value = "1|2",
+          default = "1"),
+      opt("--input-channel", "первый канал входа (0 — первый доступный)", value = "N",
+          default = "0"),
+    ],
+    example: "euterpia record take.wav --seconds 30 --channels 2",
+    fields: @[
+      field("path", "записанный WAV"),
+      field("project", "проект, если он был указан"),
+      field("backend", "открытый бэкенд"),
+      field("device", "индекс устройства вывода"),
+      field("inputDevice", "индекс устройства ввода"),
+      field("sampleRate", "частота записи"),
+      field("blockSize", "размер блока"),
+      field("channels", "каналов в файле"),
+      field("seconds", "длительность сеанса"),
+      field("frames", "записано кадров"),
+      field("droppedFrames", "потерянные кадры (переполнение кольца)"),
+      field("inputPeakL", "последний пик входа, левый канал"),
+      field("inputPeakR", "последний пик входа, правый канал"),
+      field("inputXruns", "xrun'ы входного тракта"),
+      field("exitReason", "`seconds`|`signal`"),
+    ],
+    notes: @[
+      "на машине без входного устройства команда завершается кодом 2, файл не создаётся",
+      "рекордер создаётся ДО открытия потока: открытие файла не даёт xrun на старте",
+      "SIGINT/SIGTERM: запись останавливается, WAV-заголовок закрывается, exit 0",
+      "--channels 1 пишет первый входной канал, --channels 2 — пару каналов",
+      "потери кольца считаются (`droppedFrames`) и печатаются в отчёте, а не теряются молча",
+      "`--json` печатает итоговый конверт один раз (запись — не поток метрик)",
     ])
 
   PlaySpec* = CommandSpec(
@@ -475,6 +524,124 @@ proc metricLine(snap: JsonNode): string =
 # play
 # =============================================================================
 
+type
+  RecordScan = object
+    ok: bool
+    rep: Report
+    path: string
+    project: string
+    backend: string
+    device: int
+    deviceName: string
+    haveDevice: bool
+    inputDevice: int
+    sampleRate: int
+    blockSize: int
+    seconds: float64
+    haveSeconds: bool
+    channels: int
+    inputChannel: int
+
+proc scanRecordArgs(args: seq[string]): RecordScan =
+  ## Разбор `record`. Выход — позиционный и обязательный: запись без пути
+  ## означала бы «куда-нибудь», а таких решений CLI не принимает.
+  result.device = -1
+  result.inputDevice = -1
+  result.inputChannel = 0
+  result.channels = 1
+  result.blockSize = DefaultBlock
+
+  var haveOut = false
+  var i = 0
+  while i < args.len:
+    let key = args[i]
+    if key in ["--project", "--backend", "--device", "--input-device",
+               "--sample-rate", "--block", "--seconds", "--channels",
+               "--input-channel"]:
+      if i + 1 >= args.len:
+        return RecordScan(ok: false,
+          rep: usageError(key & ": нужно значение",
+            "например: euterpia record take.wav --seconds 10"))
+      let value = args[i + 1]
+      case key
+      of "--project":
+        if not isProjectPath(value):
+          return RecordScan(ok: false,
+            rep: usageError("--project: ожидается проект (*.eproj), получено: " & value,
+              "историческое расширение .eut принимается"))
+        result.project = value
+      of "--backend":
+        result.backend = value
+      of "--device":
+        let parsed = intArg(value, "--device", -1, 1_000_000)
+        if not parsed.ok:
+          result.deviceName = value
+        else:
+          result.device = parsed.value
+          result.haveDevice = true
+      of "--input-device":
+        let parsed = intArg(value, "--input-device", 0, 1_000_000)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "индекс устройства ввода: euterpia device list"))
+        result.inputDevice = parsed.value
+      of "--sample-rate":
+        let parsed = intArg(value, "--sample-rate", 1, 1_000_000)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "частота дискретизации в герцах"))
+        result.sampleRate = parsed.value
+      of "--block":
+        let parsed = intArg(value, "--block", 1, MaxBlockSize)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "размер блока в кадрах: 1 … " & $MaxBlockSize))
+        result.blockSize = parsed.value
+      of "--seconds":
+        let parsed = floatArg(value, "--seconds", MaxPlaySeconds)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "длительность записи в секундах; без ключа — до SIGINT"))
+        result.seconds = parsed.value
+        result.haveSeconds = true
+      of "--channels":
+        let parsed = intArg(value, "--channels", 1, 2)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "ширина записи: 1 (моно) или 2 (стерео)"))
+        result.channels = parsed.value
+      else: # --input-channel
+        let parsed = intArg(value, "--input-channel", 0, 64)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message,
+            "первый канал входа: 0 — первый доступный"))
+        result.inputChannel = parsed.value
+      i += 2
+      continue
+    elif key.startsWith("-"):
+      return RecordScan(ok: false,
+        rep: usageError("неизвестный ключ: " & key,
+          "ключи record: --project, --backend, --device, --input-device, " &
+          "--sample-rate, --block, --seconds, --channels, --input-channel"))
+    else:
+      if haveOut:
+        return RecordScan(ok: false,
+          rep: usageError("файл записи указан дважды: " & result.path & " и " & key,
+            "выход задаётся одним позиционным аргументом"))
+      result.path = key
+      haveOut = true
+    inc i
+
+  if not haveOut:
+    return RecordScan(ok: false,
+      rep: usageError("record: не указан файл записи",
+        "например: euterpia record take.wav --seconds 10"))
+  if not result.path.toLowerAscii().endsWith(".wav"):
+    return RecordScan(ok: false,
+      rep: usageError("record пишет только WAV: " & result.path,
+        "запись в сжатые форматы — кодировщик сдачи (#411), не recorder"))
+  result.ok = true
+
 proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   var path = scan.path
   if path.len == 0 and fileExists(DefaultProjectFile):
@@ -675,6 +842,234 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   okReport(body = body, lines = lines)
 
 # =============================================================================
+# Запись входа (#94)
+# =============================================================================
+
+proc runRecord(ctx: var Ctx; scan: RecordScan): Report =
+  ## Запись входа в WAV. Порядок важен и зафиксирован:
+  ##   1. рекордер и файл трека — ДО открытия потока (иначе первый блок
+  ##      тратится на fopen и даёт xrun);
+  ##   2. движок/сцена → attachRecorder → openBackend;
+  ##   3. stop → закрыть поток → detach → уничтожить движок → уничтожить
+  ##      рекордер. Обратный порядок оставил бы висячий указатель в callback.
+  let outPath = scan.path
+  let outDir = if parentDir(outPath).len > 0: parentDir(outPath) else: "."
+  if not dirExists(outDir):
+    try:
+      createDir(outDir)
+    except CatchableError:
+      return envError("каталог записи недоступен: " & outDir,
+        "проверьте права и путь", errorKind = "io")
+
+  # --- проект и частота -----------------------------------------------------
+  var proj: ProjectFormat
+  var haveProject = false
+  var sr = scan.sampleRate
+  if scan.project.len > 0:
+    let loaded = loadAt(scan.project)
+    if not loaded.ok:
+      return loaded.rep
+    proj = loaded.proj
+    haveProject = true
+    if sr <= 0:
+      let meta = queryMetadata(openDocument(scan.project, proj))
+      let fromProject = int(round(float64(meta.sampleRate)))
+      if fromProject > 0:
+        sr = fromProject
+  if sr <= 0:
+    sr = configInt(ctx, "sampleRate", 48000)
+  let bs = if scan.blockSize > 0: scan.blockSize
+           else: configInt(ctx, "blockSize", DefaultBlock)
+
+  # --- рекордер -------------------------------------------------------------
+  var rec: LiveRecorder
+  initLiveRecorder(rec, int32(sr), int32(bs), outDir,
+                   int32(scan.channels))
+  if not addLiveRecorderTrack(rec, int32(scan.inputChannel),
+                              int32(scan.channels), 0):
+    closeLiveRecorder(rec)
+    return envError("не удалось создать трек записи",
+      "проверьте каталог " & outDir & " и ширину --channels")
+  armLiveRecorder(rec)
+
+  # --- сцена/сеанс ----------------------------------------------------------
+  var scene: Scene
+  var session: LiveSession
+  if haveProject:
+    var reg = builtinRegistry()
+    scene = loadScene(reg, proj, 0, int32(sr), parentDir(scan.project))
+    if not scene.ok:
+      closeLiveRecorder(rec)
+      return usageError(scene.error,
+        "проверьте граф: euterpia graph check " & scan.project)
+    session = initLiveSession(float32(sr), int32(bs), detachPipeline(scene))
+  else:
+    session = initEmptyLiveSession(float32(sr), int32(bs))
+
+  if not session.isActive:
+    if haveProject:
+      destroyScene(scene)
+    closeLiveRecorder(rec)
+    return panicError("не удалось создать сеанс записи",
+      "проверьте sampleRate/blockSize: " & $sr & "/" & $bs)
+
+  attachLiveRecorder(session, rec)
+  setLiveInputChannels(session, int32(scan.channels))
+
+  # --- бэкенд и устройство --------------------------------------------------
+  var mgr = initBackendManager()
+  registerCliBackends(mgr)
+  var backend = scan.backend
+  if backend.len == 0:
+    backend = ctx.config.entry("backend").value
+  if backend.len == 0:
+    backend = "miniaudio"
+  if not mgr.hasBackend(backend):
+    detachLiveRecorder(session)
+    session.closeLiveSession()
+    if haveProject: destroyScene(scene)
+    closeLiveRecorder(rec)
+    return usageError("неизвестный аудио-бэкенд: " & backend,
+      "доступны: " & mgr.backendNames().join(", "))
+
+  var device = int(DefaultDeviceIndex)
+  if scan.haveDevice:
+    device = if scan.deviceName.len > 0: resolveDevice(backend, scan.deviceName)
+             else: scan.device
+    if device == -2:
+      detachLiveRecorder(session)
+      session.closeLiveSession()
+      if haveProject: destroyScene(scene)
+      closeLiveRecorder(rec)
+      return envError("устройство вывода не найдено: «" & scan.deviceName & "»",
+        "список устройств: euterpia device list")
+
+  var cfg = AudioStreamConfig(
+    sampleRate: float64(sr),
+    blockSize: int32(bs),
+    inputChannels: int32(scan.channels),
+    outputChannels: MaxAudioChannels,
+    inputDevice: int32(scan.inputDevice),
+    outputDevice: int32(device),
+    reportStatus: liveStatus
+  )
+
+  let explicit = scan.backend.len > 0 or
+                 ctx.config.entry("backend").value.len > 0
+  let openErr =
+    if explicit:
+      mgr.openBackend(backend, cfg, liveRender, cast[pointer](addr session))
+    else:
+      mgr.openPreferred(cfg, liveRender, cast[pointer](addr session),
+                        ["miniaudio"])
+
+  if openErr != bmOk:
+    detachLiveRecorder(session)
+    session.closeLiveSession()
+    if haveProject: destroyScene(scene)
+    closeLiveRecorder(rec)
+    let reason =
+      case openErr
+      of bmUnknownBackend: "бэкенд не зарегистрирован: " & backend
+      of bmUnavailable: "адаптер недоступен"
+      of bmOpenFailed: "не удалось открыть устройство ввода/вывода"
+      of bmAlreadyOpen: "менеджер уже открыт"
+      else: "неизвестная ошибка бэкенда"
+    return envError("запись недоступна: " & reason,
+      "проверьте `euterpia device list --json`; нужен вход с " &
+      $scan.channels & " каналом(ами)")
+
+  # --- сеанс записи ---------------------------------------------------------
+  installStopHandlers()
+  startLiveRecording(rec, 0)
+  let started = getMonoTime()
+  let limitMs = if scan.haveSeconds: int64(scan.seconds * 1000.0) else: -1'i64
+  var lastMetric: LiveMetrics
+  var haveMetric = false
+  var exitReason = "signal"
+
+  while not liveRequested():
+    let elapsed = (getMonoTime() - started).inMilliseconds
+    if limitMs >= 0 and elapsed >= limitMs:
+      exitReason = "seconds"
+      break
+    session.pollReclamation()
+    var m: LiveMetrics
+    while session.pollMetrics(m):
+      lastMetric = m
+      haveMetric = true
+    sleep(10)
+
+  stopLiveRecording(rec)
+
+  # Worker финализирует файл по rcStop. Ждём регион коротко; ждать вечно
+  # нельзя — «повисший» writer не должен превращать запись в зависание.
+  var regions: seq[LiveRegion] = @[]
+  for _ in 0 ..< 200:
+    for r in liveRecordedRegions(rec):
+      regions.add r
+    if regions.len > 0:
+      break
+    sleep(10)
+
+  let dropped = liveDroppedFrames(rec)
+  mgr.closeBackend()
+  detachLiveRecorder(session)
+  session.closeLiveSession()
+  if haveProject:
+    destroyScene(scene)
+  closeLiveRecorder(rec)
+
+  var finalPath = outPath
+  var frames = 0'i64
+  if regions.len > 0:
+    frames = regions[0].lengthSamples
+    let src = regions[0].filename
+    if src != outPath:
+      try:
+        if fileExists(outPath):
+          removeFile(outPath)
+        moveFile(src, outPath)
+      except CatchableError:
+        finalPath = src
+  else:
+    return envError("запись не создала файл: " & outPath,
+      "устройство не отдало входные кадры; проверьте `--channels`, " &
+      "`--input-device` и `euterpia device list`")
+
+  let elapsedMs = (getMonoTime() - started).inMilliseconds
+  var body = %*{
+    "path": finalPath,
+    "project": scan.project,
+    "backend": backend,
+    "device": device,
+    "inputDevice": scan.inputDevice,
+    "sampleRate": sr,
+    "blockSize": bs,
+    "channels": scan.channels,
+    "seconds": float64(elapsedMs) / 1000.0,
+    "frames": frames,
+    "droppedFrames": dropped,
+    "inputXruns": (if haveMetric: int(lastMetric.inputXruns) else: 0),
+    "exitReason": exitReason,
+  }
+  if haveMetric:
+    body["inputPeakL"] = %lastMetric.inputPeakL
+    body["inputPeakR"] = %lastMetric.inputPeakR
+
+  var lines = @[
+    "запись остановлена (" &
+      (if exitReason == "seconds": "истекло --seconds"
+       else: "сигнал завершения") & ")",
+    "бэкенд: " & backend & ", выход: " & $device &
+      ", вход: " & $scan.inputChannel & ", " & $sr & " Гц / " &
+      $bs & " кадров",
+    "кадров: " & $frames & ", потеряно: " & $dropped &
+      ", файл: " & finalPath,
+  ]
+  okReport(body = body, lines = lines)
+
+# =============================================================================
 # Точки входа команд
 # =============================================================================
 
@@ -693,4 +1088,10 @@ proc runPlay*(ctx: var Ctx; args: seq[string]): Report =
   if not scan.ok:
     return scan.rep
   runPlay(ctx, scan)
+
+proc runRecordCmd*(ctx: var Ctx; args: seq[string]): Report =
+  let scan = scanRecordArgs(args)
+  if not scan.ok:
+    return scan.rep
+  runRecord(ctx, scan)
 

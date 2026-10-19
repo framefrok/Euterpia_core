@@ -1064,13 +1064,19 @@ proc destroyTrackSlot(slot: var TrackSlot) =
 # ---------------------------------------------------------------------------
 
 proc initAudioRecorder*(
+    rec: var AudioRecorder;
     sampleRate: int32 = 48000,
     blockSize: int32 = 128,
     outputDir: string = "recordings",
     inputChannels: int32 = 2,
     ringFrames: int32 = 65536
-): AudioRecorder =
-  ## Создаёт рекордер.
+) =
+  ## Создаёт рекордер НА МЕСТЕ.
+  ##
+  ## In-place вариант нужен хосту (#94): `AudioRecorder` владеет потоком,
+  ## и копирование/перенос значения с уже запущенным `Thread` — источник
+  ## неопределённого поведения. Здесь поток создаётся сразу в поле `rec`,
+  ## без временного объекта.
   ##
   ## При compileOption("threads") (в этом проекте он всегда включён
   ## через config.nims) запускается writer thread.
@@ -1104,10 +1110,22 @@ proc initAudioRecorder*(
     # Ошибка каталога позже приведёт к ошибке открытия файлов.
     discard
 
-  result.core = core
+  rec.core = core
 
   when compileOption("threads"):
-    createThread(result.worker, recorderWorker, core)
+    createThread(rec.worker, recorderWorker, core)
+
+proc initAudioRecorder*(
+    sampleRate: int32 = 48000,
+    blockSize: int32 = 128,
+    outputDir: string = "recordings",
+    inputChannels: int32 = 2,
+    ringFrames: int32 = 65536
+): AudioRecorder =
+  ## Возвращающий вариант — удобен тестам и одноразовым утилитам.
+  ## Хосту с долгим владением нужен in-place вариант выше.
+  initAudioRecorder(result, sampleRate, blockSize, outputDir,
+                    inputChannels, ringFrames)
 
 proc destroyAudioRecorder*(rec: var AudioRecorder) =
   ## Останавливает поток, закрывает ресурсы и освобождает память.

@@ -281,6 +281,7 @@ proc setupRegistry*() =
     CommandDef(spec: SessionSpec, run: runSession),
     CommandDef(spec: DeviceSpec, run: runDevice),
     CommandDef(spec: PlaySpec, run: runPlay),
+    CommandDef(spec: RecordSpec, run: runRecordCmd),
     CommandDef(spec: NodeSpec, run: runNode),
     CommandDef(spec: ConnectSpec, run: runConnectCommand),
     CommandDef(spec: DisconnectSpec, run: runDisconnectCommand),

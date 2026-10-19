@@ -17,6 +17,7 @@
 
 import
   audio_engine,
+  audio_recorder,
   compiled_pipeline,
   ipc_bus
 
@@ -33,11 +34,24 @@ type
     activeVoices*: int32
     transportState*: string
       ## `stopped`|`playing`|`recording`|`paused` — те же имена, что у CLI.
+    inputPeakL*, inputPeakR*: float32
+      ## Пики входного тракта (issue #94): по сырому буферу драйвера.
+    inputXruns*: uint32
 
   LiveSession* = object
     ## Владелец движка в живом режиме. Адрес объекта передаётся драйверу,
     ## поэтому объект обязан жить на стабильном адресе (не копировать).
     engine*: ptr AudioEngine
+
+  LiveRecorder* = object
+    ## Запись входа (issue #94). Владелец — CLI: движок держит только
+    ## указатель (`attachLiveRecorder`) и обязан быть отсоединён до
+    ## уничтожения рекордера.
+    rec*: AudioRecorder
+    trackId*: int32
+
+  LiveRegion* = audio_recorder.RecordedRegion
+    ## Завершённый регион записи — DTO без внутренних структур рекордера.
 
 proc engineStateName(s: ipc_bus.TransportState): string =
   case s
@@ -68,6 +82,70 @@ proc closeLiveSession*(s: var LiveSession) =
     return
   destroyAudioEngine(s.engine)
   s.engine = nil
+
+# =============================================================================
+# Запись входа (issue #94)
+# =============================================================================
+#
+# CLI не импортирует `audio_recorder` (§20): он получает этот узкий фасад.
+# Владение остаётся у CLI, движок хранит только указатель — контракт
+# `attachRecorder`/`detachRecorder` не меняется.
+
+proc initLiveRecorder*(r: var LiveRecorder; sampleRate, blockSize: int32;
+                       outputDir: string; inputChannels: int32 = 1;
+                       ringFrames: int32 = 65536)
+    {.raises: [CatchableError].} =
+  ## Создать рекордер и один трек записи. Поток записи запускается здесь
+  ## же (control-path), до открытия аудиопотока — иначе первые блоки
+  ## потерялись бы на создании файла.
+  r.rec = default(AudioRecorder)
+  initAudioRecorder(r.rec, sampleRate, blockSize, outputDir,
+                    inputChannels, ringFrames)
+  r.trackId = 1
+
+proc addLiveRecorderTrack*(r: var LiveRecorder; inputChannel: int32 = 0;
+                           channels: int32 = 1;
+                           preRollFrames: int32 = 0): bool =
+  ## Вооружаемый трек: канал входа, ширина (1/2) и pre-roll.
+  addTrackRecorder(r.rec, r.trackId, inputChannel, channels, preRollFrames)
+
+proc armLiveRecorder*(r: var LiveRecorder) =
+  armTrack(r.rec, r.trackId)
+
+proc startLiveRecording*(r: var LiveRecorder; currentSample: int64) =
+  startRecording(r.rec, currentSample)
+
+proc stopLiveRecording*(r: var LiveRecorder) =
+  stopRecording(r.rec)
+
+proc liveRecordedRegions*(r: var LiveRecorder): seq[LiveRegion] =
+  getRecordedRegions(r.rec)
+
+proc liveDroppedFrames*(r: var LiveRecorder): int64 =
+  getTrackDroppedFrames(r.rec, r.trackId)
+
+proc isLiveRecording*(r: var LiveRecorder): bool =
+  isRecording(r.rec)
+
+proc closeLiveRecorder*(r: var LiveRecorder) =
+  destroyAudioRecorder(r.rec)
+
+proc attachLiveRecorder*(s: LiveSession; r: var LiveRecorder) =
+  ## Движок начинает вызывать `recordBlock`. Рекордер обязан пережить
+  ## отсоединение: сначала `detachLiveRecorder`, потом `closeLiveRecorder`.
+  attachRecorder(s.engine, addr r.rec)
+
+proc detachLiveRecorder*(s: LiveSession) =
+  detachRecorder(s.engine)
+
+proc setLiveInputChannels*(s: LiveSession; channels: int32) =
+  ## Сколько каналов входа у открытого устройства (0 — входа нет).
+  setInputChannels(s.engine, channels)
+
+proc initEmptyLiveSession*(sampleRate: float32; blockSize: int32): LiveSession =
+  ## Сеанс без графа: запись входа не нуждается в нодах, но движку нужен
+  ## опубликованный (пустой) пайплайн — публикация пустого разрешена §402.
+  initLiveSession(sampleRate, blockSize, newOwnedPipeline())
 
 # =============================================================================
 # Callback драйвера
@@ -140,6 +218,9 @@ proc pollMetrics*(s: LiveSession; m: var LiveMetrics): bool =
   m.xruns = raw.xruns
   m.graphVersion = raw.graphVersion
   m.activeVoices = raw.activeVoices
+  m.inputPeakL = raw.inputPeakL
+  m.inputPeakR = raw.inputPeakR
+  m.inputXruns = raw.inputXruns
   m.transportState = engineStateName(ipc_bus.TransportState(raw.transportState))
   true
 
