@@ -156,4 +156,3 @@ suite "офлайн: кривые автоматизации (аудит P2)":
     check automationValueAt(lane, -1.0) == 0.0f
     check abs(automationValueAt(lane, 5005.0) - 500.5f) < 1e-3f
     check automationValueAt(lane, 20000.0) == 1023.0f
-

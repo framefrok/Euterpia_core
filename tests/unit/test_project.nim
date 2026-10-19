@@ -599,5 +599,3 @@ suite "project: пределы разбора (P0-аудит)":
     check loaded.success
     check loaded.value.graph.connections.len == 1
     check loaded.value.graph.connections[0].sigType == 99
-
-

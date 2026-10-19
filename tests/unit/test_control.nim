@@ -475,4 +475,3 @@ suite "control: обратимость узлов и связей (аудит P1
     check doc.proj.graph.connections.len == 0
     # Откат существует (нода), битая связь просто не вошла в него.
     check plan.undo.len >= 1
-
