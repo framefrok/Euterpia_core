@@ -175,7 +175,7 @@ suite "control: история":
 suite "control: контракт команды на проводе":
   test "команда переживает JSON-раунд для всех реализованных видов":
     let cases = @[
-      createNode("test.osc", "Лид", 7, 5'u32),
+      createNode("test.osc", "Лид", 7, id = 5'u32),
       deleteNode(3, 6'u32),
       connect(port(1, cpkAudio, 0), port(2, cpkEvent, 2), 7'u32),
       disconnect(port(1, cpkControl, 1), port(2, cpkControl, 0), false, 8'u32),

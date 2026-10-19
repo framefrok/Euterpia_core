@@ -374,3 +374,89 @@ suite "control: дорожки и клипы (#373)":
     check plan.undo[0].toJson.fromJson(back2)
     check back2.kind == ccRestoreClip
     check back2.restoreClipData.name == "C"
+
+# =============================================================================
+# Обратимость узлов и связей (аудит, P1)
+# =============================================================================
+
+suite "control: обратимость узлов и связей (аудит P1)":
+  test "undo deleteNode возвращает значения параметров, а не дефолты":
+    var doc = newDoc()
+    discard doc.applyCommand(createNode("test.osc", "Lead", 1))
+    check doc.applyCommand(setParameter(1, 220.0f32, "freq")).isOk()
+    check doc.applyCommand(setParameter(1, 1.5f32, "level")).isOk()
+    let before = doc.proj.graph.nodes[0].parameters
+
+    let plan = doc.applyTransaction(@[deleteNode(1)], "delete node")
+    check plan.frame.isOk()
+    check doc.proj.graph.nodes.len == 0
+
+    let back = doc.applyTransaction(plan.undo, "undo delete node")
+    check back.frame.isOk()
+    check doc.proj.graph.nodes.len == 1
+    check doc.proj.graph.nodes[0].parameters == before
+    check doc.proj.graph.nodes[0].parameters["freq"] == 220.0f32
+    check doc.proj.graph.nodes[0].parameters["level"] == 1.5f32
+
+  test "undo disconnect не создаёт ноду заново и не дублирует оставшиеся связи":
+    var doc = newDoc()
+    for id in [1'i32, 2, 3]:
+      check doc.applyCommand(createNode("test.gain", "", id)).isOk()
+    check doc.applyCommand(
+      connect(port(1, cpkAudio, 0), port(2, cpkAudio, 0))).isOk()
+    check doc.applyCommand(
+      connect(port(1, cpkAudio, 0), port(3, cpkAudio, 0))).isOk()
+    check doc.proj.graph.connections.len == 2
+
+    # Снимаем только одну из двух связей источника.
+    let plan = doc.applyTransaction(
+      @[disconnect(port(1, cpkAudio, 0), port(2, cpkAudio, 0))], "disconnect")
+    check plan.frame.isOk()
+    check doc.proj.graph.connections.len == 1
+
+    # Старый undo пытался создать ноду #1 (ecAlreadyExists) и вернуть обе
+    # связи (ecDuplicateConnection) — откат отвергался целиком.
+    let back = doc.applyTransaction(plan.undo, "undo disconnect")
+    check back.frame.isOk()
+    check doc.proj.graph.connections.len == 2
+    check doc.proj.graph.nodes.len == 3
+
+  test "setParameter без ключа в parameters не бросает KeyError":
+    var doc = newDoc()
+    discard doc.applyCommand(createNode("test.gain"))
+    # Нода из старого проекта: ключа параметра в словаре нет.
+    doc.proj.graph.nodes[0].parameters.clear()
+
+    let plan = doc.applyTransaction(@[setParameter(1, 0.25f32, "gain")], "param")
+    check plan.frame.isOk()
+    check doc.proj.graph.nodes[0].parameters["gain"] == 0.25f32
+
+    let back = doc.applyTransaction(plan.undo, "undo param")
+    check back.frame.isOk()
+    # Прежнее значение — дефолт описателя, а не KeyError.
+    check doc.proj.graph.nodes[0].parameters["gain"] == 1.0f32
+
+  test "createNode с параметрами переживает JSON истории":
+    var params = initTable[string, float32]()
+    params["freq"] = 123.5f32
+    params["waveform"] = 2.0f32
+    let cmd = createNode("test.osc", "Lead", 5, params)
+
+    var back: ControlCommand
+    check cmd.toJson.fromJson(back)
+    check back.kind == ccCreateNode
+    check back.newNodeId == 5
+    check back.parameters.len == 2
+    check back.parameters["freq"] == 123.5f32
+    check back.parameters["waveform"] == 2.0f32
+
+  test "createNode с параметрами не выходит за границы описателя":
+    var params = initTable[string, float32]()
+    params["freq"] = 1_000_000.0f32     # max типа — 20000
+    params["noSuchParam"] = 1.0f32      # тип такого не знает
+    var doc = newDoc()
+    check doc.applyCommand(createNode("test.osc", "", 1, params)).isOk()
+    let node = doc.proj.graph.nodes[0]
+    check node.parameters["freq"] == 20000.0f32
+    check not node.parameters.hasKey("noSuchParam")
+
