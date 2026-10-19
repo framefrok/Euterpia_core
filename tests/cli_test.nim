@@ -21,6 +21,7 @@ import euterpia_version
 # мимо CLI и сравнивает результат (критерий #139 — один путь исполнения).
 import project
 import handles
+import audio_file_io
 import control/error_frame
 import control/commands
 import control/document
@@ -2205,6 +2206,7 @@ suite "CLI: спецификация команд — один источник 
     check runCliIn(specDir, ["connect", "3:event:0", "1:event:0",
                              "spec.eproj"]).code == 0
     writeFile(specDir / "spec.notes", "c4/4 d e f\n")
+    writeFile(specDir / "spec.batch", "spec.eproj b1.wav --seconds 1\n")
     check runCliIn(specDir, ["notation", "import", "spec.notes", "--file",
                              "spec.eproj"]).code == 0
     let rendered = runCliIn(specDir, ["render", "spec.eproj", "spec.wav",
@@ -2230,7 +2232,9 @@ suite "CLI: спецификация команд — один источник 
                   @["param", "set", "1", "freq", "330", "spec.eproj"]]),
       ("graph", @[@["graph", "check", "spec.eproj"]]),
       ("render", @[@["render", "spec.eproj", "spec2.wav", "--seconds", "1"],
-                   @["render", "spec.eproj", "--seconds", "1", "--dry-run"]]),
+                   @["render", "spec.eproj", "--seconds", "1", "--dry-run"],
+                   @["render", "spec.eproj", "--stems", "stems", "--seconds", "1"],
+                   @["render", "--batch", "spec.batch", "--out", "bout"]]),
       ("notation", @[@["notation", "check", "spec.notes"],
                      @["notation", "import", "spec.notes", "--file",
                        "spec.eproj", "--name", "Second"]]),
@@ -3027,3 +3031,105 @@ suite "CLI: record — запись входа (#94)":
     let r = runCli(["record", dir / "take.wav", "--input-device", "x",
                     "--json"])
     check r.code == 1
+
+# =============================================================================
+# Стемы и батч (#108)
+# =============================================================================
+
+suite "CLI: render — стемы и батч (#108)":
+  let dir = getTempDir() / "euterpia_cli_stems"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  # Фикстура: два инструмента, две нотные ноды, микшер и две дорожки.
+  # Собирается CLI-командами, поэтому тест не зависит от compositions/.
+  check runCliIn(dir, ["init", "p.eproj"]).code == 0
+  for node in ["piano", "notes", "piano", "notes", "mix"]:
+    check runCliIn(dir, ["node", "add", node, "p.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "2:event:0", "1:event:0", "p.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "4:event:0", "3:event:0", "p.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "1:out", "5:in", "p.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "3:out", "5:in", "p.eproj"]).code == 0
+  writeFile(dir / "a.notes", "c4/4 d e f\n")
+  writeFile(dir / "b.notes", "g3/2 a b\n")
+  check runCliIn(dir, ["notation", "import", "a.notes", "--file", "p.eproj",
+                       "--name", "A"]).code == 0
+  check runCliIn(dir, ["notation", "import", "b.notes", "--file", "p.eproj",
+                       "--name", "B", "--track", "1"]).code == 0
+
+  test "стемы: по файлу на дорожку, сумма совпадает с мастером":
+    let r = runCliIn(dir, ["render", "p.eproj", "master.wav", "--seconds",
+                           "0.2", "--json"])
+    check r.code == 0
+    let masterPath = dir / "master.wav"
+    check fileExists(masterPath)
+
+    let s = runCliIn(dir, ["render", "p.eproj", "--stems", "stems", "--seconds",
+                           "0.2", "--json"])
+    check s.code == 0
+    let node = parseJson(s.output)
+    check node["ok"].getBool
+    check node["stems"].len == 2
+    check node["stemsFailed"].getInt == 0
+    for item in node["stems"]:
+      check fileExists(dir / item["file"].getStr)
+
+    # Критерий #108: линейная сумма стемов = мастер (1 LSb 16-бита).
+    let master = readAllAudioFile(masterPath)
+    var sum = newSeq[float32](master.samples.len)
+    for item in node["stems"]:
+      let stem = readAllAudioFile(dir / item["file"].getStr)
+      check stem.samples.len == master.samples.len
+      for i in 0 ..< min(sum.len, stem.samples.len):
+        sum[i] += stem.samples[i]
+    var maxDiff = 0.0'f32
+    for i in 0 ..< master.samples.len:
+      let d = abs(master.samples[i] - sum[i])
+      if d > maxDiff:
+        maxDiff = d
+    check maxDiff <= 1.0'f32 / 32768.0'f32
+
+  test "стемы: --name-template и отсутствие затирания имён":
+    let r = runCliIn(dir, ["render", "p.eproj", "--stems", "tpl",
+                           "--name-template", "same.wav", "--seconds", "0.1",
+                           "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["stems"].len == 2
+    check node["stems"][0]["file"].getStr != node["stems"][1]["file"].getStr
+    check node["stems"][0]["file"].getStr.endsWith(".wav")
+
+  test "--stems и --solo-track несовместимы":
+    let r = runCliIn(dir, ["render", "p.eproj", "--stems", "x",
+                           "--solo-track", "1", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("solo-track")
+
+  test "батч: строки рендерятся в --out, отчёт по каждому":
+    writeFile(dir / "batch.txt",
+              "# два варианта одного проекта\n" &
+              "p.eproj one.wav --seconds 0.1\n" &
+              "p.eproj two.wav --seconds 0.1\n")
+    let r = runCliIn(dir, ["render", "--batch", "batch.txt", "--out", "batch",
+                           "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["ok"].getBool
+    check node["batchTotal"].getInt == 2
+    check node["batchFailed"].getInt == 0
+    check fileExists(dir / "batch" / "one.wav")
+    check fileExists(dir / "batch" / "two.wav")
+
+  test "батч: ошибка одной строки даёт ненулевой код и общий отчёт":
+    writeFile(dir / "bad.txt", "p.eproj ok.wav --seconds 0.1\nнет-такого.eproj\n")
+    let r = runCliIn(dir, ["render", "--batch", "bad.txt", "--out", "badout",
+                           "--json"])
+    check r.code in [1, 2]
+    let node = parseJson(r.output)
+    check not node["ok"].getBool
+    check node["batchFailed"].getInt == 1
+    check node["batch"].len == 2
+    check fileExists(dir / "badout" / "ok.wav")
+
