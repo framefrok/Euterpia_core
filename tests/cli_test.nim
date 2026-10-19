@@ -2227,6 +2227,12 @@ suite "CLI: спецификация команд — один источник 
                  @["midi", "list"],
                  @["midi", "monitor", "--seconds", "0.05"]]),
       ("metronome", @[@["metronome", "spec.eproj", "on"]]),
+      ("automation", @[@["automation", "add", "spec.eproj", "--node", "2",
+                          "--param", "gain", "--tick", "0", "--value", "-6"],
+                        @["automation", "list", "spec.eproj"],
+                        @["automation", "rm", "spec.eproj", "--node", "2",
+                          "--param", "gain", "--tick", "0"],
+                        @["automation", "clear", "spec.eproj"]]),
       ("node", @[@["node", "list", "spec.eproj"], @["node", "types"],
                  @["node", "show", "1", "spec.eproj"],
                  @["node", "add", "gain", "spec.eproj"],
@@ -3275,4 +3281,100 @@ suite "CLI: metronome — клик по транспорту (#112)":
                     dir / "empty.eproj", "--count-in", "1", "--json"])
     check r.code == 1
     check parseJson(r.output)["error"]["message"].getStr.contains("метроном")
+
+
+# =============================================================================
+# Автоматизация (#114)
+# =============================================================================
+
+suite "CLI: automation — линии параметров (#114)":
+  let dir = getTempDir() / "euterpia_cli_automation"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  check runCliIn(dir, ["init", "a.eproj"]).code == 0
+  check runCliIn(dir, ["node", "add", "osc", "a.eproj"]).code == 0
+  check runCliIn(dir, ["node", "add", "gain", "a.eproj"]).code == 0
+  check runCliIn(dir, ["connect", "1:out", "2:in", "a.eproj"]).code == 0
+  check runCliIn(dir, ["param", "set", "2", "gain", "-20", "a.eproj"]).code == 0
+
+  test "add/list/rm/clear: точки сортируются, повтор заменяет":
+    let add = runCliIn(dir, ["automation", "add", "a.eproj", "--node", "2",
+                             "--param", "gain", "--tick", "960",
+                             "--value", "0", "--curve", "smooth", "--json"])
+    check add.code == 0
+    let n = parseJson(add.output)
+    check n["points"].getInt == 1
+    check n["param"].getStr == "gain"
+    check n["curve"].getStr == "smooth"
+
+    # Точка на том же тике заменяется, а не дублируется.
+    check runCliIn(dir, ["automation", "add", "a.eproj", "--node", "2",
+                         "--param", "gain", "--tick", "960",
+                         "--value", "-3"]).code == 0
+    let list = runCliIn(dir, ["automation", "list", "a.eproj", "--json"])
+    check list.code == 0
+    let lanes = parseJson(list.output)["lanes"]
+    check lanes.len == 1
+    check lanes[0]["count"].getInt == 1
+    check lanes[0]["points"][0]["value"].getFloat == -3.0
+
+    # Вторая точка и проверка порядка.
+    check runCliIn(dir, ["automation", "add", "a.eproj", "--node", "2",
+                         "--param", "gain", "--tick", "0",
+                         "--value", "-40"]).code == 0
+    let ordered = parseJson(runCliIn(dir, ["automation", "list", "a.eproj",
+                                           "--json"]).output)
+    check ordered["lanes"][0]["points"][0]["tick"].getInt == 0
+    check ordered["lanes"][0]["points"][1]["tick"].getInt == 960
+
+    let rm = runCliIn(dir, ["automation", "rm", "a.eproj", "--node", "2",
+                            "--param", "gain", "--tick", "960", "--json"])
+    check rm.code == 0
+    check rm.output.len > 0
+    let cleared = runCliIn(dir, ["automation", "clear", "a.eproj", "--json"])
+    check cleared.code == 0
+    check parseJson(cleared.output)["lanes"].getInt == 0
+
+  test "рендер применяет линию: RMS растёт вслед за gain":
+    check runCliIn(dir, ["render", "a.eproj", "plain.wav", "--seconds",
+                         "0.5", "--json"]).code == 0
+    check runCliIn(dir, ["automation", "add", "a.eproj", "--node", "2",
+                         "--param", "gain", "--tick", "0",
+                         "--value", "0", "--json"]).code == 0
+    let r = runCliIn(dir, ["render", "a.eproj", "auto.wav", "--seconds",
+                           "0.5", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["automationLanes"].getInt == 1
+    let plain = readAllAudioFile(dir / "plain.wav")
+    let auto = readAllAudioFile(dir / "auto.wav")
+    var plainRms = 0.0'f64
+    var autoRms = 0.0'f64
+    for s in plain.samples: plainRms += float64(s) * float64(s)
+    for s in auto.samples: autoRms += float64(s) * float64(s)
+    check autoRms > plainRms * 1.5
+
+  test "ошибки: нет ноды, нет параметра, неизвестная кривая":
+    let noNode = runCliIn(dir, ["automation", "add", "a.eproj", "--node",
+                                "99", "--param", "gain", "--tick", "0",
+                                "--value", "1", "--json"])
+    check noNode.code == 1
+    let noParam = runCliIn(dir, ["automation", "add", "a.eproj", "--node",
+                                 "2", "--param", "nope", "--tick", "0",
+                                 "--value", "1", "--json"])
+    check noParam.code == 1
+    let badCurve = runCliIn(dir, ["automation", "add", "a.eproj", "--node",
+                                  "2", "--param", "gain", "--tick", "0",
+                                  "--value", "1", "--curve", "bounce", "--json"])
+    check badCurve.code == 1
+
+  test "--dry-run не пишет проект":
+    let before = readFile(dir / "a.eproj")
+    let r = runCliIn(dir, ["automation", "clear", "a.eproj", "--dry-run",
+                           "--json"])
+    check r.code == 0
+    check readFile(dir / "a.eproj") == before
 
