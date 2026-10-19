@@ -358,3 +358,36 @@ suite "project: порты субграфа (#403)":
         check node.subgraphOutputs[0].localNodeId == 101
     check found
 
+
+# =============================================================================
+# #405: latency из файла не заворачивается в uint32
+# =============================================================================
+
+suite "project: latency и предел (#405)":
+  test "огромная/отрицательная latency превращается в маркер превышения":
+    let path = getTempDir() / "euterpia_proj_latency.json"
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "metadata":{"name":"L","sampleRate":48000,"tempo":120},
+      "graph":{"nodes":[
+        {"id":1,"nodeType":"fx.gain","latencyReported":-1,
+         "latencyIntrinsic":999999999999},
+        {"id":2,"nodeType":"fx.gain","latencyReported":128}],
+        "connections":[]}}""")
+    defer: removeFile(path)
+
+    let loaded = loadProject(path)
+    check loaded.success
+
+    var node1: NodeFormat
+    var node2: NodeFormat
+    for node in loaded.value.graph.nodes:
+      if node.id == 1: node1 = node
+      if node.id == 2: node2 = node
+
+    # Оба «плохих» значения — маркер MaxLatencyFrames+1, а не 0 и не
+    # случайное маленькое число после uint32-обрезки.
+    check node1.latencyReported == MaxLatencyFrames + 1'u32
+    check node1.latencyIntrinsic == MaxLatencyFrames + 1'u32
+    # Нормальное значение не меняется.
+    check node2.latencyReported == 128'u32
+

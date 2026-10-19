@@ -304,3 +304,76 @@ suite "graph_compiler: субграфы (#403)":
     let cr = compileGraph(g)
     check not cr.success
     check cr.error == cekInvalidSubgraphPort
+
+# =============================================================================
+# #404, #405: лимиты компилятора и latency
+# =============================================================================
+
+suite "graph_compiler: лимиты и latency (#404, #405)":
+  test "слишком глубокая вложенность субграфов отвергается":
+    var child = makeNode(1, "leaf", 0, 1)
+    for i in 0 ..< MaxSubgraphDepth + 2:
+      var container = EditorNode(
+        id: 100 + i, name: "S" & $i, nodeType: "core.subgraph",
+        isSubgraph: true
+      )
+      container.subgraphNodes = @[child]
+      child = container
+
+    var g: NodeGraph
+    g.nodes[1] = child
+    let cr = compileGraph(g)
+    check not cr.success
+    check cr.error == cekSubgraphDepthExceeded
+
+  test "превышение числа листьев после flattening отвергается":
+    var g: NodeGraph
+    for i in 0 ..< MaxFlattenedNodes + 1:
+      g.nodes[i] = makeNode(i, "n" & $i, 0, 1)
+
+    let cr = compileGraph(g)
+    check not cr.success
+    check cr.error == cekNodeLimitExceeded
+
+  test "превышение числа связей отвергается":
+    var g: NodeGraph
+    g.nodes[1] = makeNode(1, "a", 0, 1)
+    g.nodes[2] = makeNode(2, "b", 1, 0)
+    for i in 0 ..< MaxGraphConnections + 1:
+      g.connections.add EditorConnection(
+        srcNodeId: 1, srcPortIdx: 0, dstNodeId: 2, dstPortIdx: 0,
+        sigType: sigAudio
+      )
+
+    let cr = compileGraph(g)
+    check not cr.success
+    check cr.error == cekConnectionLimitExceeded
+
+  test "latency больше предела — ошибка компиляции, а не uint32-wrap":
+    var g: NodeGraph
+    var a = makeNode(1, "A", 0, 1)
+    a.latency = LatencyProfile(reported: MaxLatencyFrames, intrinsic: 1)
+    g.nodes[1] = a
+
+    let cr = compileGraph(g)
+    check not cr.success
+    check cr.error == cekLatencyOverflow
+
+  test "бюджет памяти PDC проверяется до аллокации":
+    var g: NodeGraph
+    g.nodes[1] = makeNode(1, "S", 0, 1)
+    var l = makeNode(2, "L", 1, 1)
+    l.latency = LatencyProfile(reported: MaxLatencyFrames)
+    g.nodes[2] = l
+
+    # Много параллельных ветвей с максимальной задержкой: сумма колец
+    # превышает MaxPdcBufferSamples, и компилятор обязан отказать.
+    for i in 0 ..< 100:
+      g.connections.add EditorConnection(
+        srcNodeId: 1, srcPortIdx: 0, dstNodeId: 2, dstPortIdx: 0,
+        sigType: sigAudio
+      )
+
+    let cr = compileGraph(g)
+    check not cr.success
+    check cr.error == cekPdcLimitExceeded
