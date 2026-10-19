@@ -661,6 +661,70 @@ suite "CLI: проект — init/show/set/validate (#89)":
     check graphFacts != nil
     check graphFacts["dangling"].len == 1
 
+  test "validate: порт проверяется в namespace СВОЕГО сигнала (#399)":
+    let path = dir / "ports.eut"
+    # У ноды 1 есть audioOut=1 и ctrlOut=1. Индекс 1 для audio НЕ существует,
+    # хотя сумма счётчиков (2) его пропускала. sigType 0 = audio.
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "metadata":{"name":"Ports","sampleRate":48000,"tempo":120},
+      "graph":{"nodes":[
+        {"id":1,"nodeType":"fx.gain","audioInCount":1,"audioOutCount":1,
+         "ctrlInCount":1,"ctrlOutCount":1},
+        {"id":2,"nodeType":"fx.gain","audioInCount":1,"audioOutCount":1}],
+        "connections":[
+          {"srcNodeId":1,"srcPortIdx":1,"dstNodeId":2,"dstPortIdx":0,
+           "sigType":0}]}}""")
+
+    let human = runCli(["project", "validate", path])
+    check human.code == 1
+    check "порт вне диапазона своего вида" in human.output
+
+    let node = parseJson(runCli(["project", "validate", path, "--json"]).output)
+    var facts: JsonNode = nil
+    for section in node["sections"]:
+      if section["id"].getStr != "graph":
+        continue
+      for checkItem in section["checks"]:
+        if checkItem["id"].getStr == "connections":
+          facts = checkItem["facts"]
+    check facts != nil
+    check facts["outOfRange"].len == 1
+
+    # Неизвестный вид сигнала — тоже отказ данных.
+    let badSignal = dir / "bad-signal.eut"
+    writeFile(badSignal, """{"format":"euterpia-project","version":1,
+      "metadata":{"name":"Ports","sampleRate":48000,"tempo":120},
+      "graph":{"nodes":[
+        {"id":1,"nodeType":"fx.gain","audioOutCount":1},
+        {"id":2,"nodeType":"fx.gain","audioInCount":1}],
+        "connections":[
+          {"srcNodeId":1,"srcPortIdx":0,"dstNodeId":2,"dstPortIdx":0,
+           "sigType":9}]}}""")
+    let bad = parseJson(runCli(["project", "validate", badSignal,
+                                "--json"]).output)
+    check bad["summary"]["fail"].getInt > 0
+    var badFacts: JsonNode = nil
+    for section in bad["sections"]:
+      if section["id"].getStr != "graph":
+        continue
+      for checkItem in section["checks"]:
+        if checkItem["id"].getStr == "connections":
+          badFacts = checkItem["facts"]
+    check badFacts != nil
+    check badFacts["badSignal"].len == 1
+
+    # Корректный порт того же вида — без провалов.
+    let okPath = dir / "ports-ok.eut"
+    writeFile(okPath, """{"format":"euterpia-project","version":1,
+      "metadata":{"name":"Ports","sampleRate":48000,"tempo":120},
+      "graph":{"nodes":[
+        {"id":1,"nodeType":"fx.gain","audioOutCount":1,"ctrlOutCount":1},
+        {"id":2,"nodeType":"fx.gain","audioInCount":1}],
+        "connections":[
+          {"srcNodeId":1,"srcPortIdx":0,"dstNodeId":2,"dstPortIdx":0,
+           "sigType":0}]}}""")
+    check runCli(["project", "validate", okPath]).code == 0
+
   test "новые команды видны в справке, машинной справке и автодополнении":
     let names = machineCommandNames()
     check "init" in names
@@ -2620,3 +2684,233 @@ suite "CLI: транспорт — tempo/meter/position/seek/loop/state (#257)":
     check n["state"].getStr == "stopped"
     check n["tempo"].getFloat == 120.0
 
+
+# =============================================================================
+# #407: headless runtime-сессия переживает вызовы CLI
+# =============================================================================
+
+suite "CLI: runtime-сессия (#407)":
+  test "play в одном запуске виден state в другом; stop закрывает движок":
+    let dir = getTempDir() / "euterpia_cli_session"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    # Демон не должен пережить тест даже при провале проверки.
+    defer:
+      discard runCliIn(dir, ["session", "stop", "demo.eproj"])
+      removeDir(dir)
+
+    check runCliIn(dir, ["init", "demo.eproj"]).code == 0
+
+    let started = runCliIn(dir, ["session", "start", "demo.eproj", "--json"])
+    check started.code == 0
+    let startedJson = parseJson(started.output)
+    check startedJson["running"].getBool
+    check startedJson["pid"].getInt > 0
+
+    let play = runCliIn(dir, ["transport", "play", "demo.eproj", "--json"])
+
+    check play.code == 0
+    check parseJson(play.output)["state"].getStr == "playing"
+
+    # Позиция идёт в ДРУГОМ процессе: сессия живёт между вызовами CLI.
+    sleep(400)
+    let state = runCliIn(dir, ["transport", "state", "demo.eproj", "--json"])
+    check state.code == 0
+    let stateJson = parseJson(state.output)
+    check stateJson["state"].getStr == "playing"
+    check stateJson["position"]["frames"].getBiggestInt > 0
+
+    let stop = runCliIn(dir, ["transport", "stop", "demo.eproj", "--json"])
+    check stop.code == 0
+    let stopJson = parseJson(stop.output)
+    check stopJson["state"].getStr == "stopped"
+    check stopJson["position"]["frames"].getBiggestInt == 0
+
+    let stopped = runCliIn(dir, ["session", "stop", "demo.eproj", "--json"])
+    check stopped.code == 0
+    check not parseJson(stopped.output)["running"].getBool
+
+    let status = runCliIn(dir, ["session", "status", "demo.eproj", "--json"])
+    check status.code == 0
+    check not parseJson(status.output)["running"].getBool
+
+    # После остановки offline-состояние не врёт: оно stopped/0.
+    let offline = runCliIn(dir, ["transport", "state", "demo.eproj", "--json"])
+    check offline.code == 0
+    let offlineJson = parseJson(offline.output)
+    check offlineJson["state"].getStr == "stopped"
+    check offlineJson["position"]["frames"].getBiggestInt == 0
+
+# =============================================================================
+# #92: устройства и живое воспроизведение
+# =============================================================================
+
+suite "CLI: устройства и живое воспроизведение (#92)":
+  test "device list --json отдаёт бэкенды и массив устройств":
+    let r = runCli(["device", "list", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["ok"].getBool
+    check node["command"].getStr == "device"
+    check node["backend"].getStr == "miniaudio"
+    var hasMiniaudio = false
+    for b in node["backends"]:
+      if b.getStr == "miniaudio":
+        hasMiniaudio = true
+    check hasMiniaudio
+    check node["devices"].kind == JArray
+    check node["outputs"].getInt >= 0
+    # Отсутствие подсистемы — не ошибка: причина названа полем.
+    check node.hasKey("initError")
+
+  test "device list человеческим выводом называет бэкенд":
+    let r = runCli(["device", "list"])
+    check r.code == 0
+    check r.output.contains("бэкенд: miniaudio")
+    check r.output.contains("устройств вывода")
+
+  test "неизвестный бэкенд — ошибка использования, а не паника":
+    let r = runCli(["device", "list", "--backend", "nope", "--json"])
+    check r.code == 1
+    let node = parseJson(r.output)
+    check not node["ok"].getBool
+    check node["errorCode"].getInt != 0
+    check node["error"]["message"].getStr.contains("неизвестный аудио-бэкенд")
+
+  test "play без проекта — код 1 и подсказка":
+    let dir = getTempDir() / "euterpia_cli_live_none"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    let r = runCliIn(dir, ["play", "--json"])
+    check r.code == 1
+    let node = parseJson(r.output)
+    check not node["ok"].getBool
+    check node["error"]["message"].getStr.contains("не указан проект")
+    check node["error"]["hint"].getStr.contains("euterpia play")
+
+  test "play на машине без устройства — код 2, с устройством — граф":
+    let dir = getTempDir() / "euterpia_cli_live_project"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    check runCliIn(dir, ["init", "live.eproj"]).code == 0
+
+    let list = runCliIn(dir, ["device", "list", "--json"])
+    check list.code == 0
+    let listJson = parseJson(list.output)
+    let outputs = listJson["outputs"].getInt
+
+    let r = runCliIn(dir, ["play", "live.eproj", "--seconds", "0.1", "--json"])
+    if outputs == 0:
+      # Критерий приёмки #92: нет устройства — код 2 с понятным сообщением.
+      check r.code == 2
+      let node = parseJson(r.output)
+      check node["error"]["kind"].getStr == "env"
+      check node["error"]["message"].getStr.contains("живое воспроизведение")
+    else:
+      # Устройство есть: пустой проект отвергается как данные (нет нод).
+      check r.code == 1
+      check parseJson(r.output)["error"]["message"].getStr.contains("нет нод")
+
+      # Явно неверный индекс устройства не должен молча играть «куда-нибудь».
+      let bad = runCliIn(dir, ["play", "live.eproj", "--device", "9999",
+                               "--seconds", "0.1", "--json"])
+      check bad.code == 2
+      check parseJson(bad.output)["error"]["message"].getStr.contains(
+        "устройства вывода #9999 нет")
+
+  test "play --seconds nan отвергается до открытия устройства":
+    let r = runCli(["play", "x.eproj", "--seconds", "nan", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("--seconds")
+
+# =============================================================================
+# #209: сдача — метрики, dither, метаданные, стемы
+# =============================================================================
+
+suite "CLI: master — сдача материала (#209)":
+  let tone = "tests/fixtures/tone.wav"
+
+  test "WAV приводится к целевой громкости и потолку":
+    let dir = getTempDir() / "euterpia_cli_master"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    let outPath = dir / "master.wav"
+
+    let r = runCli(["master", tone, "--out", outPath, "--target", "-20",
+                    "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["ok"].getBool
+    check node["format"].getStr == "wav"
+    check abs(node["outputLufs"].getFloat - (-20.0)) < 0.5
+    check node["truePeakDb"].getFloat <= node["ceilingDb"].getFloat + 0.01
+    check node["bitsPerSample"].getInt == 16
+    check node["dither"].getBool
+    check fileExists(outPath)
+    check node["sha1"].getStr.len == 40
+
+  test "dither детерминирован: тот же вход — те же байты":
+    let dir = getTempDir() / "euterpia_cli_master_det"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    let a = dir / "a.wav"
+    let b = dir / "b.wav"
+    check runCli(["master", tone, "--out", a, "--target", "-18",
+                  "--json"]).code == 0
+    check runCli(["master", tone, "--out", b, "--target", "-18",
+                  "--json"]).code == 0
+    check readFile(a) == readFile(b)
+
+  test "метаданные попадают в INFO-чанк":
+    let dir = getTempDir() / "euterpia_cli_master_meta"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    let outPath = dir / "tagged.wav"
+    let r = runCli(["master", tone, "--out", outPath, "--target", "-20",
+                    "--meta", "title=Test Song", "--meta", "artist=Unit",
+                    "--bits", "24", "--json"])
+    check r.code == 0
+    let raw = readFile(outPath)
+    check raw.find("LIST") >= 0
+    check raw.find("INAM") >= 0
+    check raw.find("IART") >= 0
+    check raw.find("Test Song") >= 0
+    check raw.find("Unit") >= 0
+    # 24 бита в fmt-чанке (смещение 34, little-endian).
+    check int(uint8(raw[34])) == 24
+
+  test "проект рендерится в 32-бит и мастерится одной командой":
+    let dir = getTempDir() / "euterpia_cli_master_proj"
+    if dirExists(dir):
+      removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    check runCliIn(dir, ["init", "p.eproj"]).code == 0
+    check runCliIn(dir, ["node", "add", "osc", "--name", "o", "--file", "p.eproj"]).code == 0
+    let r = runCliIn(dir, ["master", "p.eproj", "--seconds", "1",
+                           "--out", "p.master.wav", "--json"])
+    check r.code == 0
+    let node = parseJson(r.output)
+    check node["input"].getStr == "p.eproj"
+    check fileExists(dir / "p.master.wav")
+
+  test "--stems требует проект, а не готовый файл":
+    let r = runCli(["master", tone, "--stems", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("--stems")
+
+  test "неизвестный ключ --meta — ошибка использования":
+    let r = runCli(["master", tone, "--meta", "nope=1", "--json"])
+    check r.code == 1
+    check parseJson(r.output)["error"]["message"].getStr.contains("nope")

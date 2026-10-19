@@ -5,7 +5,8 @@
 # Формат буферов в EUTERPIA (задаётся компилятором графа, см.
 # graph_compiler.compileGraph и CompiledPipeline.audioArena):
 #
-#   ВНУТРИ графа  — planar stereo: channels = 2, stride = arenaFrames.
+#   ВНУТРИ графа  — planar stereo: channels = signal_types.MaxAudioChannels,
+#                   stride = arenaFrames (issue #401: ширина одна на ядро).
 #                   Каналы лежат подряд, поэтому на канал можно
 #                   передать непрерывный указатель в C-ядро.
 #
@@ -28,10 +29,19 @@ import node_interface
 
 proc isPlanar*(buf: PAudioBuffer): bool {.inline.} =
   ## true — каналы лежат подряд (planar), false — interleaved.
+  ##
+  ## Явный `layout` читается первым делом (issue #392): он часть буфера, а
+  ## не вывод из математики. `alAuto` (буфер создан без раскладки — тесты,
+  ## сторонний код) — фолбэк на старую эвристику `stride >= frames`; для
+  ## frames<=1 она неразрешима, поэтому моно всегда planar.
   if buf.isNil or buf.channels <= 1:
     return true
-  let stride = if buf.stride > 0: buf.stride else: buf.frames
-  stride >= buf.frames
+  case buf.layout
+  of alPlanar: true
+  of alInterleaved: false
+  of alAuto:
+    let stride = if buf.stride > 0: buf.stride else: buf.frames
+    stride >= buf.frames
 
 proc channelCount*(buf: PAudioBuffer): int32 {.inline.} =
   if buf.isNil: return 0

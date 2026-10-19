@@ -19,6 +19,7 @@ import signal_types
 import transport
 import node_interface
 import graph_compiler
+import compiled_pipeline
 import audio_engine
 import audio_recorder
 import ipc_bus
@@ -165,7 +166,7 @@ suite "input path: публикация входа":
     check engine != nil
     engine.setInputChannels(2)
 
-    check engine.postGraphUpdate(cr.pipeline)
+    check engine.postGraphUpdate(ownPipeline(cr.pipeline))
     check engine.postPlay()
 
     var inBuf: array[BlockSize * 2, float32]
@@ -202,7 +203,7 @@ suite "input path: публикация входа":
     check engine != nil
     engine.setInputChannels(0)
 
-    check engine.postGraphUpdate(cr.pipeline)
+    check engine.postGraphUpdate(ownPipeline(cr.pipeline))
     check engine.postPlay()
 
     var outBuf: array[BlockSize * 2, float32]
@@ -265,7 +266,7 @@ suite "input path: offline не регрессирует":
     )
     check engine != nil
     engine.setInputChannels(2)
-    check engine.postGraphUpdate(cr.pipeline)
+    check engine.postGraphUpdate(ownPipeline(cr.pipeline))
     check engine.postPlay()
 
     let st = cast[ptr FlagProbeState](probeNode.userData)
@@ -328,7 +329,7 @@ suite "input path: запись в WAV":
     )
     check engine != nil
     engine.setInputChannels(2)
-    check engine.postGraphUpdate(cr.pipeline)
+    check engine.postGraphUpdate(ownPipeline(cr.pipeline))
     check engine.postPlay()
     engine.attachRecorder(addr rec)
     check engine.hasRecorder()
@@ -445,7 +446,7 @@ suite "input path: диагностика входа и позиции (#383, #3
     )
     check engine != nil
     engine.setInputChannels(4)
-    check engine.postGraphUpdate(cr.pipeline)
+    check engine.postGraphUpdate(ownPipeline(cr.pipeline))
     check engine.postPlay()
 
     var inBuf: array[BlockSize * 4, float32]
@@ -479,7 +480,7 @@ suite "input path: диагностика входа и позиции (#383, #3
     )
     check engine != nil
     engine.setInputChannels(2)
-    check engine.postGraphUpdate(cr.pipeline)
+    check engine.postGraphUpdate(ownPipeline(cr.pipeline))
     check engine.postPlay()
 
     var c: FrameRaceCtx
@@ -600,7 +601,7 @@ suite "transport: ctx BBT согласован со snapshot (#387)":
       check engine != nil
       check engine.postSetMeter(int32(num), int32(den))
       check engine.postSetTempo(120.0)
-      check engine.postGraphUpdate(cr.pipeline)
+      check engine.postGraphUpdate(ownPipeline(cr.pipeline))
       check engine.postSeekSamples(posSamples)
       check engine.postPlay()
 

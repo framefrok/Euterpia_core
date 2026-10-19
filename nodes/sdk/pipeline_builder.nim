@@ -83,9 +83,10 @@ proc bindMasterProc(p: ptr CompiledPipeline; outBuf: ptr UncheckedArray[float32]
     return
 
   b.masterOut.data = cast[ptr UncheckedArray[float32]](outBuf)
-  b.masterOut.channels = 2
+  b.masterOut.channels = signal_types.MaxAudioChannels
   b.masterOut.frames = frames
   b.masterOut.stride = 1
+  b.masterOut.layout = alInterleaved
   step.audio.outputs[0] = addr b.masterOut
 
 proc applyParamProc(p: ptr CompiledPipeline; nodeId: int32; paramId: uint32;
@@ -113,6 +114,33 @@ proc applyParamProc(p: ptr CompiledPipeline; nodeId: int32; paramId: uint32;
       return
     inc i
 
+proc channelsSupported*(desc: ptr NodeDesc): bool {.inline.} =
+  ## Укладывается ли обещание ноды в модель каналов ядра (issue #401).
+  ##
+  ## `maxChannels <= 0` — «нода не заявляет ширину» (например, чисто
+  ## событийная). Всё, что больше `MaxAudioChannels`, runtime исполнить не
+  ## может: арена, PDC и мастер-выход — стерео. Молча свести такую ноду к
+  ## двум каналам означало бы соврать API.
+  desc.isNil or desc.maxChannels <= signal_types.MaxAudioChannels
+
+proc validateChannelModel*(reg: var NodeRegistry; g: NodeGraph;
+                           offender: var string): bool =
+  ## Проверяет, что все типы графа помещаются в стерео-модель Core.
+  ##
+  ## Это часть контракта SDK, а не «диагностика»: `buildPipeline` вызывает
+  ## проверку до компиляции и возвращает false, если нода обещает больше
+  ## каналов, чем умеет ядро. `offender` — id типа, чтобы вызывающий мог
+  ## объяснить отказ, а не просто получить «не собралось».
+  offender = ""
+  for _, node in g.nodes:
+    let entry = reg.findNodeType(node.nodeType)
+    if entry.isNil:
+      continue
+    if not channelsSupported(entry.desc):
+      offender = node.nodeType
+      return false
+  true
+
 proc buildPipeline*(reg: var NodeRegistry; g: var NodeGraph;
                     masterNodeId: int;
                     cr: var CompileResult;
@@ -125,6 +153,13 @@ proc buildPipeline*(reg: var NodeRegistry; g: var NodeGraph;
   ## Возвращает false, если граф не скомпилировался, мастер-нода не
   ## найдена или состояния нод не совпали с порядком шагов.
   binding = nil
+
+  # issue #401: Core v0.x — стерео. Нода, обещающая больше каналов, чем
+  # умеет runtime, отвергается здесь, до аллокаций пайплайна: иначе API
+  # продолжал бы обещать N каналов, а граф молча работал бы с двумя.
+  var offender = ""
+  if not validateChannelModel(reg, g, offender):
+    return false
 
   cr = compileGraph(g)
   if not cr.success:
@@ -232,9 +267,10 @@ proc buildPipeline*(reg: var NodeRegistry; g: var NodeGraph;
     return false
 
   binding.masterStep = masterStep
-  binding.masterOut.channels = 2
+  binding.masterOut.channels = signal_types.MaxAudioChannels
   binding.masterOut.frames = 0
   binding.masterOut.stride = 0
+  binding.masterOut.layout = alPlanar
   binding.masterOut.data = nil
 
   p.userData = binding

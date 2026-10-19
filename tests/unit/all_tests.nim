@@ -11,8 +11,10 @@
 {.warning[UnusedImport]: off.}
 
 import test_signal_types
+import test_audio_layout
 import test_transport
 import test_transport_runtime
+import test_offline_automation
 import test_native_abi
 import test_ring_buffer
 import test_midi_api
@@ -37,17 +39,18 @@ import test_saturate
 import test_compressor
 import test_delay
 import test_graph_compiler
+import test_pipeline_ownership
+import test_runtime_session
+import test_live_session
 import test_pdc
-import test_node_registry
-import test_scheduler_stop
-import test_scheduler_pool
 import test_rt_guard
 import test_engine_retire
 import test_realtime_gcsafe
 import test_recorder
 import test_sequencer
+import test_sequencer_player
 import test_project
-import test_param_registry
+import test_autosave
 import test_param_flags
 import test_memory_pool
 import test_aligned_mem
@@ -65,8 +68,12 @@ import test_codec_api
 import test_instruments
 import test_mix
 import test_audio_inspect
+import test_loudness
 import test_graph_check
+import test_node_api_fixed
 import test_render_progress
 import test_compose_diagnostics
+import test_compose_musical
+import test_compose_production
 import test_docs_instruments
 import test_docs_embedding

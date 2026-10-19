@@ -1425,7 +1425,23 @@ proc runGraphCheck(ctx: var Ctx; scan: ArgScan): Report =
                 of gvNegativePortIdx:
                   "отрицательный индекс порта — задайте неотрицательный номер порта"
                 of gvMasterInvalid:
-                  "мастер-нода не может быть мастером — проверьте id, наличие аудиовыхода и отсутствие исходящих связей"),
+                  "мастер-нода не может быть мастером — проверьте id, наличие аудиовыхода и отсутствие исходящих связей"
+                of gvUnsupportedChannels:
+                  "Core v0.x — стерео: уберите ноду с maxChannels > 2 или " &
+                  "дождитесь многоканальной линии (#200)"
+                of gvInvalidSubgraphPort:
+                  "проверьте subgraphInputs/subgraphOutputs и локальные id " &
+                  "внутри субграфа"
+                of gvSubgraphDepth:
+                  "уменьшите вложенность субграфов: превышен предел компилятора"
+                of gvNodeLimit, gvConnectionLimit:
+                  "разбейте граф на несколько проектов/стемов: превышен предел " &
+                  "компилятора"
+                of gvLatencyOverflow:
+                  "проверьте latency нод и плагинов: сумма больше предела PDC"
+                of gvPdcLimit:
+                  "уменьшите задержки или число параллельных ветвей: " &
+                  "бюджет памяти PDC исчерпан"),
       body = compileFacts)
   sections.add Section(id: "compile", title: "graph: компиляция",
                        checks: @[compileCheck])

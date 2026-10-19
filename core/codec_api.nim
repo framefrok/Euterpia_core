@@ -26,6 +26,18 @@ type
     afMp3
     afAiff
 
+  WavMetadata* = object
+    ## Метаданные сдачи в WAV (RIFF `LIST/INFO`, issue #209).
+    ##
+    ## Поля — человеческие строки: кодек пишет их как NUL-terminated
+    ## подчанки, а не хранит в проекте. Пустое поле не пишется вовсе.
+    title*: string
+    artist*: string
+    genre*: string
+    comment*: string
+    software*: string
+    date*: string
+
   AudioFileInfo* = object
     ## Метаданные аудиофайла. Общий тип для чтения и записи: кодек заполняет
     ## его при открытии, фасад и вызывающие читают/задают поля.
@@ -36,3 +48,9 @@ type
     isFloat*: bool
     format*: AudioFileFormat
     duration*: float64
+    metadata*: WavMetadata
+      ## INFO-чанк при записи (#209). При чтении не разбирается: мастеру
+      ## нужны метрики, а не чужой тег.
+    dither*: bool
+      ## TPDF-dither при записи в целочисленный формат (#209). Действует
+      ## только на 16/24 бита и никогда — на float.

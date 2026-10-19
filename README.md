@@ -20,16 +20,44 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | MIDI | ✅ `midi_api` + RtMidi-адаптер, SMF-кодек в Commons |
 | Входной тракт и запись | ✅ вход → ноды/рекордер, RT-кольцо → worker → WAV |
 | Хостинг плагинов | ✅ `plugin_api` + CLAP 1.2 (host- и plugin-side, сквозной mock-тест, состояние в проекте) + EUT (#6, #53) |
-| DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + **17 инструментов** (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`, `strings`, `bell`, `harp`, `harpsichord`, `recorder`, `brass`, `timpani`, `choir`, `ukulele`, `accordion`, `harmonica`) + нотный секвенсор `notes`; всего 28 типов, полный каталог с параметрами — [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md); C-ядра с SIMD-дисплеями (#274, #301, #303, #321) |
+| DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + **17 инструментов** (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`, `strings`, `bell`, `harp`, `harpsichord`, `recorder`, `brass`, `timpani`, `choir`, `ukulele`, `accordion`, `harmonica`) + нотный секвенсор `notes`, плеер секвенсора `sequencer` и плеер аудиоклипов `clip`; всего 30 типов, полный каталог с параметрами — [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md); C-ядра с SIMD-дисплеями (#274, #301, #303, #321) |
 | Кодеки | ✅ WAV 16/24/32-бит, FLAC, MP3, OGG Vorbis (чтение), AIFF/AIFC (чтение и запись), Standard MIDI File (#10) |
 | Тесты | ✅ 300+ unit-проверок + интеграционный набор; Core/Commons/инструменты покрыты (#57, #274, #290) |
-| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258) и транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; живой `play` на устройстве, запись и плагины — впереди; справочник команд и JSON-схем — **[docs/cli.md](docs/cli.md)** |
+| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись и плагины — впереди; справочник команд и JSON-схем — **[docs/cli.md](docs/cli.md)** |
 | Инспектор аудио | 🟡 пассивный анализ WAV: клиппинг, DC, щелчки, провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость; отчёт с локализацией (#290); позже — помощник в v0.7 (#178) |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
 | Надёжность и диагностика | 🟡 план линии v0.5 — библиотека тестов ядра (golden, Node Contract Suite, fault injection, санитайзеры) и «отказ вместо краха»: модель ошибок, чёрный ящик, crash guard, containment нод и плагинов, изоляция скана (#115) |
 | Текущее ядро (долг) | ✅ v0.2 закрыта: планировщик (#9), realtime-guard (#11), macOS CI (#42), CI-долг (#249/#252/#254/#255); остаточный долг #5 — в плане |
 | Фундамент под GUI | 🟡 линия v0.4 (после CLI): снапшоты/события, telemetry нод, компонентные ноды, состояние редактора, модель клипа, роли узлов (#142) |
 | GUI (Editor) | 🟡 v0.4 — каркас, скелет и решение по графическому стеку (#152, #235); v0.6 — NotesGrid/DrumGrid, canvas, микшер, контролы в ноде и свой вид ноды, «объединить в клип», автоматизация и сайдчейн, монтаж, warp, онбординг; v0.7 — Camelot, NoteHelper, эффекты и инструменты, партитура (#178); AI-функции вне объёма |
+
+## Сдача материала: громкость, dither, стемы
+
+Готовый микс превращается в пакет для площадки одной командой:
+
+```bash
+euterpia master demo.eproj --target -14 --dir delivery --stems
+```
+
+`master` рендерит проект (или берёт готовый WAV/FLAC), измеряет громкость по
+BS.1770/EBU R128 (интегрированная LUFS, short-term, LRA, true peak ×4
+oversampling), приводит её к цели и держит потолок true peak lookahead-
+лимитером. Для 16 бит по умолчанию включён **TPDF-dither** — детерминированный,
+поэтому повторная сдача даёт те же байты. Метаданные (title/artist/genre/…)
+пишутся в RIFF `LIST/INFO`, а `--stems` добавляет по файлу на дорожку и
+`<имя>.manifest.json` с SHA-1 каждого файла: сумма стемов совпадает с мастером,
+потому что к ним применяется то же покадровое усиление, что и к миксу.
+
+| Что | Значение по умолчанию | Ключ |
+|---|---|---|
+| целевая громкость | -14 LUFS | `--target` |
+| потолок true peak | -1.0 dBTP | `--ceiling` |
+| глубина | 16 бит (24 — сдача, 32 — промежуточный) | `--bits` |
+| dither | включён для 16 бит | `--dither` / `--no-dither` |
+
+FLAC-энкодера в ядре нет (FLAC читается, но не пишется): `master` честно
+отказывает вместо «почти lossless». Подробности — `euterpia help master` и
+[docs/cli.md](docs/cli.md).
 
 ## Инспектор аудио и эталонная пьеса
 
@@ -75,19 +103,31 @@ CLI**: `compositions/neo-romantic` (#275, ~2:48) и `compositions/dark-fantasy`
 
 ## Композиция как код (`libs/`)
 
-Пьесы описаны **на Nim** через библиотеку `libs/compose` (#285): форма, мотивы
-и приёмы развития (транспозиция, увеличение) — типы языка, а проект (`.eproj`)
-собирается тем же кодом, что читает ядро (`core/project`), с параметрами из
-описателей нод. Это исключает расхождение форматов и внешние зависимости.
+Пьесы описаны **на Nim** через библиотеку `libs/compose` (#285): секции формы,
+гармония, ритмы, аккорд-осведомлённые партии и автоматизация — типы языка.
+Дальше один конвейер: `resolve` собирает Composition IR (решённые тики,
+дорожки, автоматизация), `compile` — раскладку, `buildProject` — проект
+(`.eproj`), который читает ядро; из того же источника получаются `.notes`,
+`.mid` и `.wav`. Формат не расходится, внешних зависимостей нет.
 
 ```bash
-nimble compose                          # собрать пьесу библиотекой и проверить
-./compositions/dark-fantasy/build.sh    # то же для одной пьесы
+nimble compose                               # собрать пьесу библиотекой и проверить
+nim r compositions/neon-pulse/generate.nim   # современный бит: eproj + notes + mid + wav
 ```
 
+Что умеет библиотека: время (`4.bars`), секции (intro/verse/chorus/drop),
+аккорды и лады, мелодии поверх гармонии (`chordTone`/`degree`/`stack`),
+паттерны и ритмы (`trapKit`, `tresillo`, `humanize`, `swing`), генераторы
+баса и мелодии по seed, вариации темы, пресеты инструментов, автоматизация и
+микс (`autom`/`ramp`, `gain`/`mute`/`solo`), музыкальная проверка (`validate`)
+и отчёт (`analyze`).
+
 Пишите музыку на Nim: полное руководство — **[docs/libs/compose](docs/libs/compose/README.md)**
-(алгоритм, примеры, компиляция) и каталог инструментов —
+(алгоритм, музыкальный слой, компиляция) и каталог инструментов —
 [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md).
+
+Регрессия библиотеки — `tests/unit/test_compose_{musical,production,diagnostics}.nim`
+(идут в общем прогоне `nimble test`).
 
 У каждой пьесы рядом лежит `build_via_cli.sh` — тот же состав, собранный только
 командами CLI (§19). Оба пути дают идентичный рендер.
@@ -141,7 +181,6 @@ MANIFEST.md  — архитектурный манифест
 | `audio_engine` | рендер блока, apply команд, retirement пайплайнов |
 | `graph_compiler` | сборка `CompiledPipeline`, PDC, отказ на циклах |
 | `compiled_pipeline` | неизменяемый объект графа: шаги, арены, версия |
-| `dsp_scheduler` | уровневый планировщик задач по воркерам |
 | `ipc_bus` | MPSC/SPSC очереди поверх `ring_buffer`, `EngineCommand`, `EngineMetric` |
 | `ring_buffer` | единое lock-free кольцо SPSC/MPSC (issue #37) |
 | `memory_pool` | фиксированные пулы, generation-handle против ABA/double-free |
@@ -149,7 +188,6 @@ MANIFEST.md  — архитектурный манифест
 | `project` | сериализация проекта (не runtime) |
 | `audio_recorder` | запись: RT-кольцо → worker thread → WAV |
 | `audio_buffer`, `signal_types`, `node_interface` | контракты буферов, событий, нод |
-| `param_registry`, `audio_params` | реестр параметров |
 | `wav_codec` | WAV read/write |
 | `audio_file_io` | фасад чтения/записи аудиофайлов (issue #5: перенесён из `commons/`) |
 | `waveform_cache` | кэш пиков волновой формы для таймлайна (issue #5) |
@@ -234,7 +272,7 @@ GUI**, **v0.5 — тесты ядра и надёжность**, **v0.6 — GUI:
 - [x] #43 инвалидация кэша C-ядер при правке `eut_dsp.h` (хеш заголовка в имени объекта)
 - [x] #12 CI-матрица, LICENSE, шаблоны; #14 `Logger` вместо `echo` в Core
 - [x] #57 unit-тесты на непокрытые модули (`sequencer`, `project`,
-      `param_registry`, `memory_pool`, `logger`, `undo_redo`,
+      `memory_pool`, `logger`, `undo_redo`,
       `waveform_cache`, `audio_file_io`, `transport`)
 - [x] #13 UBSan/ASan-цели: `nimble ubsan` / `nimble asan` + одноимённые CI-джобы
 - [x] #6 CLAP: host- и plugin-side расширения + сквозной mock-плагин и
@@ -251,7 +289,8 @@ GUI**, **v0.5 — тесты ядра и надёжность**, **v0.6 — GUI:
 - [x] #73 `retirePipelineRT`: аварийное освобождение вместо утечки при
       переполнении обоих уровней утилизации
 - [x] #74 `dsp_scheduler.renderBlock`: прерывание по `stopFlag` вместо
-      вечного spin-loop (+ `inRender`-инвариант для `deinit`)
+      вечного spin-loop (+ `inRender`-инвариант для `deinit`) — модуль удалён
+      в #396 как неинтегрированный (см. CHANGELOG)
 - [x] #75–#80 надёжность и долг: `parseNode` не создаёт «мусорные» ноды из
       не-объектов; `openWavWriter` пишет 0 вместо 0xFFFFFFFF (оборванный
       файл читается как пустой); кламп таймстампа MIDI ДО приведения
@@ -542,7 +581,7 @@ realtime-дисциплина и сборка. Milestone закрыт целик
 архитектурный долг #5 виден в линии v0.3.
 
 - [x] #9 persistent worker pool и двойной буфер расписания в `DspScheduler`
-      (`swapSchedule` меняет граф на ходу — без teardown и без разрыва звука)
+      (модуль удалён в #396 как неинтегрированный в AudioEngine)
 - [x] #11 `DEBUG_ASSERT_REALTIME_SAFE`: guard на аллокации и локи в
       audio-потоке (`core/rt_guard.nim`)
 - [x] #42 кэш Nim в macOS-джобе; Windows делегирован проверенному экшену
@@ -644,6 +683,26 @@ CLI — процесс на одну команду, поэтому истори
 возвращается вместе со связями, автоматизацией и состояниями плагинов. Новая
 правка сбрасывает повтор (как в Commons); «отменять нечего» и битый файл истории
 дают код 1 с причиной, а `--dry-run` показывает действие, не трогая диск.
+
+### Headless runtime-сессия (#407)
+
+```bash
+euterpia session start demo.eproj      # демон: процесс живёт после выхода CLI
+euterpia transport play demo.eproj     # команда уходит в демон через IPC
+euterpia transport state demo.eproj    # позиция видна в ДРУГОМ запуске CLI
+euterpia transport stop demo.eproj     # стоп: позиция 0, движок жив
+euterpia session stop demo.eproj       # закрыть движок и сокет
+```
+
+CLI остаётся процессом на одну команду, но **транспорт больше не умирает вместе
+с ним**: `session start` порождает демона, который владеет `AudioEngine`, а
+`transport play/pause/stop/seek/loop/state` разговаривают с ним по Unix-socket
+(0600, `/tmp/euterpia-session-*`). Позиция идёт по стенным часам: `transport
+state` в новом процессе показывает `playing` и растущие кадры. `session stop`
+уничтожает движок (закрывает устройство, если оно было открыто) и записывает
+финальное состояние в offline-сессию — после остановки `transport state` не
+показывает устаревшее «играет». Схема ответа — та же `euterpia.transport.v1`,
+что у offline-транспорта, поэтому клиенту не нужно различать два режима.
 
 ### Настройки окружения (#258)
 
@@ -787,13 +846,18 @@ unit-, integration- и realtime-тестов:
 
 ```text
 --mm:orc --threads:on
--fno-strict-aliasing -fno-math-errno
+-fno-math-errno
 -O3 + -DNDEBUG        (release/danger)
 ```
 
 `-ffast-math` **не используется никогда**: он разрешает компилятору считать
 NaN/Inf невозможными, что срезает защитные проверки в DSP и делает результат
 зависимым от порядка векторизации. Для ядра DAW детерминизм важнее скорости.
+
+`-fno-strict-aliasing` тоже не используется (issue #400): аудиоарены — это
+`ptr UncheckedArray[float32]`, доступ идёт по объектам одного типа, а
+межтиповые передачи — через `copyMem`. Сборка с включённым strict-aliasing
+проходит unit/integration/CLI, release и ASan/UBSan.
 
 ## Realtime-контракт
 
@@ -934,6 +998,23 @@ driverIn (interleaved) ──▶ input arena (planar) ──▶ ctx.input
 Входной поток не отдаёт ноду-источник: `inputChannels == 0` (устройство
 без входов или offline-рендер) означает «тишина». Метрики `inputPeakL/R`
 считаются по сырому входу до нод.
+
+## Модель каналов: Core v0.x — стерео
+
+Ширина сигнала в ядре зафиксирована явно (issue #401): **два канала**. Один
+источник значения — `signal_types.MaxAudioChannels`; от него зависят арена
+графа (`graph_compiler`), кольцо компенсации задержки (`compiled_pipeline`),
+мастер-выход SDK (`pipeline_builder`) и офлайн-рендер (`offline_render`).
+
+`NodeDesc.maxChannels` — это обещание самой ноды, а не разрешение рантайма.
+Нода, заявившая больше двух каналов, отвергается до компиляции:
+`validateChannelModel` в `nodes/sdk/pipeline_builder` возвращает false, а
+`graph check` печатает вердикт `unsupportedChannels`. Так API больше не
+обещает N каналов, пока runtime молча делает два.
+
+Многоканальность (surround/Ambisonics) — отдельная линия #200; до неё честнее
+отказать, чем потерять каналы. Тест: `tests/unit/test_graph_check.nim`
+(встроенные ноды укладываются в модель, широкая нода отвергается).
 
 ## Xrun'ы
 

@@ -36,9 +36,9 @@ type
     inBuf: AudioBuffer
     outBuf: AudioBuffer
 
-proc initTestBuffers*(tb: var TestBuffers) =
+proc initTestBuffers*(tb: var TestBuffers; sampleRate: float32 = TestSampleRate) =
   tb.ctx = NodeProcessContext(
-    sampleRate: TestSampleRate,
+    sampleRate: sampleRate,
     blockSize: int32(TestBlockSize),
     samplePosition: 0'i64
   )
@@ -80,8 +80,12 @@ proc setOutputChannelCount*(tb: var TestBuffers; channels: int32) =
 
 proc renderNodeStereo*(factory: ptr NodeFactory; desc: ptr NodeDesc;
                        blocks: int; prepare: proc(tb: var TestBuffers) = nil;
-                       setup: proc(state: pointer) = nil): tuple[l, r: seq[float32]] =
+                       setup: proc(state: pointer) = nil;
+                       sampleRate: float32 = TestSampleRate
+                      ): tuple[l, r: seq[float32]] =
   ## Как renderNode, но оба канала — нужно для панорамы и стерео-эффектов.
+  ## `sampleRate` — частота контекста: нужна тестам на нестандартных частотах
+  ## (96 kHz у delay, 44.1 kHz у инструментов, #393).
   let state = factory.create(desc, nil)
   if state.isNil:
     raise newException(ValueError, "createState вернул nil")
@@ -91,7 +95,7 @@ proc renderNodeStereo*(factory: ptr NodeFactory; desc: ptr NodeDesc;
       setup(state)
 
     var tb: TestBuffers
-    tb.initTestBuffers()
+    tb.initTestBuffers(sampleRate)
 
     result.l = newSeq[float32](blocks * TestBlockSize)
     result.r = newSeq[float32](blocks * TestBlockSize)
@@ -115,14 +119,15 @@ proc renderNodeStereo*(factory: ptr NodeFactory; desc: ptr NodeDesc;
 
 proc renderNode*(factory: ptr NodeFactory; desc: ptr NodeDesc;
                  blocks: int; prepare: proc(tb: var TestBuffers) = nil;
-                 setup: proc(state: pointer) = nil): seq[float32] =
+                 setup: proc(state: pointer) = nil;
+                 sampleRate: float32 = TestSampleRate): seq[float32] =
   ## Прогоняет ноду через blocks блоков по TestBlockSize.
   ##
   ## prepare вызывается перед каждым блоком (в нём обычно кладут вход),
   ## setup — один раз сразу после создания состояния (в них ставят параметры).
   ##
   ## Возвращает левый канал выхода целиком.
-  renderNodeStereo(factory, desc, blocks, prepare, setup).l
+  renderNodeStereo(factory, desc, blocks, prepare, setup, sampleRate).l
 
 # ----------------------------------------------------------------------------
 # Измерения сигнала

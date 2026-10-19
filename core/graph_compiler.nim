@@ -4,6 +4,20 @@ import signal_types, node_interface, compiled_pipeline, aligned_mem
 
 {.push raises: [].}
 
+const
+  MaxSubgraphDepth* = 32
+    ## Максимальная вложенность субграфов (issue #404). Рекурсивный
+    ## flattening не должен зависеть от глубины проекта: иначе враждебный
+    ## файл роняет компилятор stack overflow.
+  MaxFlattenedNodes* = 4096
+    ## Предел числа ЛИСТЬЕВ после flattening. Субграфы могут скрывать
+    ## сколько угодно узлов, поэтому проверяется уже результат.
+  MaxGraphConnections* = 16_384
+    ## Предел числа связей после разрешения портов субграфов.
+  MaxPdcBufferSamples* = 8_000_000
+    ## Бюджет памяти PDC-колец в СЛОТАХ float32 (~32 МБ). Сумма считается
+    ## ДО аллокации: повреждённый граф не должен приводить к OOM.
+
 # ============================================================================
 # CORE TYPES
 # ============================================================================
@@ -20,6 +34,15 @@ type
     intrinsic*: uint32     
     compensation*: uint32  
 
+  SubgraphPort* = object
+    ## Отображение внешнего порта субграфа на порт внутренней ноды
+    ## (issue #403). `localNodeId`/`localPortIdx` живут в пространстве
+    ## имён ДАННОГО субграфа, а не в глобальном.
+    name*: string
+    localNodeId*: int
+    localPortIdx*: int
+    sigType*: SignalType
+
   EditorNode* = object
     id*: int               
     name*: string
@@ -33,6 +56,8 @@ type
     isSubgraph*: bool
     subgraphNodes*: seq[EditorNode]
     subgraphConnections*: seq[EditorConnection]
+    subgraphInputs*: seq[SubgraphPort]
+    subgraphOutputs*: seq[SubgraphPort]
 
   NodeGraph* = object
     nodes*: Table[int, EditorNode]
@@ -58,6 +83,23 @@ type
     cekDuplicateConnection   ## одна и та же связь задана дважды
     cekNegativePortIdx       ## отрицательный индекс порта
     cekMasterInvalid         ## мастер ненайдён / не может быть мастером
+    cekInvalidSubgraphPort
+      ## Связь через границу субграфа не разрешилась: нет объявленного порта,
+      ## порт указывает на несуществующую ноду или вид сигнала не совпал
+      ## (issue #403). Молча выбросить связь нельзя — это тихая потеря звука.
+    cekSubgraphDepthExceeded
+      ## Вложенность субграфов больше `MaxSubgraphDepth` (issue #404).
+    cekNodeLimitExceeded
+      ## После flattening больше `MaxFlattenedNodes` листьев (issue #404).
+    cekConnectionLimitExceeded
+      ## После разрешения портов больше `MaxGraphConnections` связей (#404).
+    cekLatencyOverflow
+      ## Суммарная latency цепи вышла за `MaxLatencyFrames` (issue #405).
+      ## Переполнение `uint32` дало бы «отрицательную» компенсацию.
+    cekPdcLimitExceeded
+      ## Суммарный размер PDC-колец больше `MaxPdcBufferSamples` (issue #404):
+      ## компилятор отказывает до аллокации, а не падает по OOM.
+
 
   ## Ошибка компиляции с адресом поломки (issue #391).
   ##
@@ -76,6 +118,16 @@ type
       pipeline*: ptr CompiledPipeline
     of false:
       error*: CompileError
+
+proc takePipeline*(cr: var CompileResult): OwnedPipeline =
+  ## Забрать пайплайн из результата компиляции во владеющую ручку (issue #402).
+  ##
+  ## После вызова `cr.pipeline == nil`: владелец один — возвращённый
+  ## `OwnedPipeline`. Так результат компиляции не может быть освобождён
+  ## дважды — сценой и движком.
+  if cr.success:
+    result = ownPipeline(cr.pipeline)
+    cr.pipeline = nil
 
 # ============================================================================
 # COMPILER STATE & HELPERS
@@ -200,43 +252,179 @@ proc processDelayComp*(ctx: ptr NodeProcessContext,
         let idx = if planar: ch * stride + i else: i * int(channels) + ch
         outBuf.data[idx] = inBuf.data[idx]
 # ============================================================================
-# 1. FLATTENING 
+# 1. FLATTENING
 # ============================================================================
-proc flattenNode(node: EditorNode,
-                 parentId: int,
-                 allocator: var IdAllocator,
-                 idRemap: var Table[int, int],
-                 outNodes: var Table[int, EditorNode],
-                 outConnections: var seq[EditorConnection]) =
-  let safeId = allocator.nextId()
-  idRemap[node.id] = safeId
-  
-  var newNode = node
-  newNode.id = safeId
-  newNode.isSubgraph = false
-  newNode.subgraphNodes = @[]
-  newNode.subgraphConnections = @[]
-  
-  outNodes[safeId] = newNode
+#
+# Issue #403: раньше весь граф использовал ОДНУ таблицу `idRemap`, ключом в
+# которой был локальный id ноды. Два вложенных субграфа с одинаковыми
+# локальными id затирали друг друга, а `parentId` вообще не участвовал в
+# пространстве имён. Полноценной модели портов субграфа тоже не было:
+# внешняя связь указывала на контейнер, а не на внутреннюю ноду.
+#
+# Теперь:
+#   * ключ пространства имён — `(scopeId, localId)`, где `scopeId` — это
+#     глобальный id КОНТЕЙНЕРА (0 — корень графа). Путь вложенности входит в
+#     ключ, поэтому одинаковые локальные id в разных субграфах не collide;
+#   * субграф — контейнер, а не DSP-нода: в плоский граф попадают только
+#     листья, а его внешние порты отображаются на внутренние через
+#     `subgraphInputs`/`subgraphOutputs`;
+#   * связь через границу разрешается рекурсивно (вложенный субграф может
+#     пробрасывать порт дальше), а неразрешимая связь — ошибка компиляции
+#     `cekInvalidSubgraphPort`, а не тихо выброшенная связь.
 
-  if node.isSubgraph:
-    for subNode in node.subgraphNodes:
-      flattenNode(subNode, node.id, allocator, idRemap, outNodes, outConnections)
-    
-    for subConn in node.subgraphConnections:
-      outConnections.add(EditorConnection(
-        srcNodeId: idRemap.getOrDefault(subConn.srcNodeId, subConn.srcNodeId),
-        srcPortIdx: subConn.srcPortIdx,
-        dstNodeId: idRemap.getOrDefault(subConn.dstNodeId, subConn.dstNodeId),
-        dstPortIdx: subConn.dstPortIdx,
-        sigType: subConn.sigType
-      ))
+type
+  ScopeKey = tuple[scopeId: int, localId: int]
+  ResolvedEndpoint = tuple[globalId: int, portIdx: int, ok: bool]
 
-proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator): NodeGraph =
+proc findLocalNode(nodes: seq[EditorNode]; id: int; node: var EditorNode): bool =
+  for candidate in nodes:
+    if candidate.id == id:
+      node = candidate
+      return true
+  false
+
+proc mapSubgraphPort(container: EditorNode; portIdx: int; isOutput: bool;
+                     sigType: SignalType; port: var SubgraphPort): bool =
+  ## Внешний порт контейнера -> внутренняя нода/порт.
+  let ports =
+    if isOutput: container.subgraphOutputs else: container.subgraphInputs
+  if portIdx < 0 or portIdx >= ports.len:
+    return false
+  let candidate = ports[portIdx]
+  # Вид сигнала — часть контракта порта: audio-связь не может «войти» в
+  # event-порт субграфа и наоборот.
+  if candidate.sigType != sigType:
+    return false
+  port = candidate
+  true
+
+proc resolveEndpoint(
+  scope: seq[EditorNode];
+  scopeId: int;
+  localId, portIdx: int;
+  isOutput: bool;
+  sigType: SignalType;
+  idRemap: Table[ScopeKey, int];
+  scopeIds: Table[ScopeKey, int];
+  error: var CompileErrorKind
+): ResolvedEndpoint =
+  ## Разрешить конец связи в глобальный id листа, проходя порты субграфов.
+  result = (0, 0, false)
+  var node: EditorNode
+  if not findLocalNode(scope, localId, node):
+    error = cekInvalidSubgraphPort
+    return
+
+  let key = (scopeId, localId)
+
+  if not node.isSubgraph:
+    if portIdx < 0 or not idRemap.hasKey(key):
+      error = cekInvalidSubgraphPort
+      return
+    result = (idRemap.getOrDefault(key, 0), portIdx, true)
+    return
+
+  var port: SubgraphPort
+  if not mapSubgraphPort(node, portIdx, isOutput, sigType, port):
+    error = cekInvalidSubgraphPort
+    return
+
+  let childScope = scopeIds.getOrDefault(key, -1)
+  if childScope < 0:
+    error = cekInvalidSubgraphPort
+    return
+
+  result = resolveEndpoint(node.subgraphNodes, childScope, port.localNodeId,
+                           port.localPortIdx, isOutput, sigType,
+                           idRemap, scopeIds, error)
+
+proc flattenContainer(
+  container: EditorNode;
+  scopeId: int;
+  depth: int;
+  allocator: var IdAllocator;
+  idRemap: var Table[ScopeKey, int];
+  scopeIds: var Table[ScopeKey, int];
+  outNodes: var Table[int, EditorNode];
+  outConnections: var seq[EditorConnection];
+  error: var CompileErrorKind
+) =
+  ## Развернуть один контейнер: его листья — в `outNodes`, внутренние связи —
+  ## в `outConnections`. Сам контейнер шагом пайплайна не становится.
+  if error != cekNone:
+    return
+
+  if depth > MaxSubgraphDepth:
+    error = cekSubgraphDepthExceeded
+    return
+
+  var seen = initTable[int, bool]()
+  for child in container.subgraphNodes:
+    if seen.hasKey(child.id):
+      # Два ребёнка с одним локальным id делают выбор состояния
+      # неоднозначным: это ошибка модели, а не «последний победил».
+      error = cekInvalidSubgraphPort
+      return
+    seen[child.id] = true
+
+  for child in container.subgraphNodes:
+    let key = (scopeId, child.id)
+    if child.isSubgraph:
+      let childScope = allocator.nextId()
+      scopeIds[key] = childScope
+      flattenContainer(child, childScope, depth + 1, allocator, idRemap,
+                       scopeIds, outNodes, outConnections, error)
+      if error != cekNone:
+        return
+    else:
+      if outNodes.len >= MaxFlattenedNodes:
+        error = cekNodeLimitExceeded
+        return
+      let safeId = allocator.nextId()
+      idRemap[key] = safeId
+      var leaf = child
+      leaf.id = safeId
+      leaf.isSubgraph = false
+      leaf.subgraphNodes = @[]
+      leaf.subgraphConnections = @[]
+      leaf.subgraphInputs = @[]
+      leaf.subgraphOutputs = @[]
+      outNodes[safeId] = leaf
+
+  for subConn in container.subgraphConnections:
+    let src = resolveEndpoint(container.subgraphNodes, scopeId,
+                              subConn.srcNodeId, subConn.srcPortIdx,
+                              isOutput = true, sigType = subConn.sigType,
+                              idRemap = idRemap, scopeIds = scopeIds,
+                              error = error)
+    if not src.ok:
+      return
+    let dst = resolveEndpoint(container.subgraphNodes, scopeId,
+                              subConn.dstNodeId, subConn.dstPortIdx,
+                              isOutput = false, sigType = subConn.sigType,
+                              idRemap = idRemap, scopeIds = scopeIds,
+                              error = error)
+    if not dst.ok:
+      return
+    if outConnections.len >= MaxGraphConnections:
+      error = cekConnectionLimitExceeded
+      return
+    outConnections.add(EditorConnection(
+      srcNodeId: src.globalId,
+      srcPortIdx: src.portIdx,
+      dstNodeId: dst.globalId,
+      dstPortIdx: dst.portIdx,
+      sigType: subConn.sigType
+    ))
+
+proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator;
+                   error: var CompileErrorKind): NodeGraph =
+  ## Плоский граф: только листья, связи разрешены через порты субграфов.
+  ## `error` != cekNone означает, что модель субграфов некорректна; результат
+  ## в этом случае частичный и компилировать его нельзя.
+  error = cekNone
   result.nodes = initTable[int, EditorNode]()
   result.connections = @[]
-  
-  var idRemap = initTable[int, int]()
 
   # Обход нод по отсортированным id (issue #391, EUT-NEW-036): `for id, node
   # in g.nodes` шёл в произвольном порядке Table, из-за чего `idRemap` (а с ним
@@ -246,22 +434,33 @@ proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator): NodeGraph =
   for id in g.nodes.keys: flatIds.add id
   flatIds.sort()
 
+  var root: EditorNode
+  root.id = 0
+  root.isSubgraph = true
   for id in flatIds:
-    let node = g.nodes.getOrDefault(id, EditorNode())
-    flattenNode(node, 0, allocator, idRemap, result.nodes, result.connections)
+    root.subgraphNodes.add g.nodes.getOrDefault(id, EditorNode())
+  root.subgraphConnections = g.connections
 
-  for c in g.connections:
-    result.connections.add(EditorConnection(
-      srcNodeId: idRemap.getOrDefault(c.srcNodeId, c.srcNodeId),
-      srcPortIdx: c.srcPortIdx,
-      dstNodeId: idRemap.getOrDefault(c.dstNodeId, c.dstNodeId),
-      dstPortIdx: c.dstPortIdx,
-      sigType: c.sigType
-    ))
+  var idRemap = initTable[ScopeKey, int]()
+  var scopeIds = initTable[ScopeKey, int]()
+
+  flattenContainer(root, 0, 0, allocator, idRemap, scopeIds,
+                   result.nodes, result.connections, error)
+
+proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator): NodeGraph =
+  ## Совместимая форма без диагностики: ошибки модели субграфов видны только
+  ## вызывающему, который передал `error`.
+  var error = cekNone
+  flattenGraph(g, allocator, error)
 
 proc flattenGraph*(g: NodeGraph, allocator: ptr IdAllocator): NodeGraph =
   if allocator != nil:
     result = flattenGraph(g, allocator[])
+
+proc flattenGraph*(g: NodeGraph, allocator: ptr IdAllocator;
+                   error: var CompileErrorKind): NodeGraph =
+  if allocator != nil:
+    result = flattenGraph(g, allocator[], error)
 
 # ============================================================================
 # 2. TOPOLOGICAL SORT 
@@ -327,35 +526,45 @@ proc topologicalSort*(g: NodeGraph, adj: AdjacencyList, sortedIds: var seq[int])
 # остаются абсолютно стабильными, так как массив никогда не переаллоцируется и не
 # перемещается. Право владения массивом передается 1:1 в pipeline.delayStates в конце
 # сборки. Освобождение памяти контролируется функцией destroyPipeline.
-proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int], compiler: var GraphCompiler) =
-  var nodeTotalLatency = initTable[int, uint32]()
+proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int],
+                compiler: var GraphCompiler): CompileErrorKind =
+  var nodeTotalLatency = initTable[int, uint64]()
   
   for id in sortedIds:
-    var maxParentLatency: uint32 = 0
+    var maxParentLatency: uint64 = 0
     for srcId in adj.incoming.getOrDefault(id, @[]):
-      let pLat = nodeTotalLatency.getOrDefault(srcId, 0'u32)
+      let pLat = nodeTotalLatency.getOrDefault(srcId, 0'u64)
       if pLat > maxParentLatency:
         maxParentLatency = pLat
     
     if g.nodes.hasKey(id):
       let node = g.nodes.getOrDefault(id, EditorNode())
-      let currentLatency = maxParentLatency + node.latency.reported + node.latency.intrinsic
+      let currentLatency = maxParentLatency +
+        uint64(node.latency.reported) + uint64(node.latency.intrinsic)
+      if currentLatency > uint64(MaxLatencyFrames):
+        return cekLatencyOverflow
       nodeTotalLatency[id] = currentLatency
 
-  var maxGraphLatency: uint32 = 0
+  var maxGraphLatency: uint64 = 0
   for id in sortedIds:
-    let total = nodeTotalLatency.getOrDefault(id, 0'u32)
+    let total = nodeTotalLatency.getOrDefault(id, 0'u64)
     if total > maxGraphLatency:
       maxGraphLatency = total
 
   var newConnections: seq[EditorConnection] = @[]
   var delayStateCount = 0
-  
+  var totalRingSamples: uint64 = 0
+
   for c in g.connections:
     if c.sigType == sigAudio:
-      let srcLat = nodeTotalLatency.getOrDefault(c.srcNodeId, 0'u32)
+      let srcLat = nodeTotalLatency.getOrDefault(c.srcNodeId, 0'u64)
       if srcLat < maxGraphLatency:
         inc(delayStateCount)
+        let diff = int(maxGraphLatency - srcLat)
+        let ringFrames = max(diff + 256, 1024)
+        totalRingSamples += uint64(ringFrames * DelayCompensationRingChannels)
+        if totalRingSamples > uint64(MaxPdcBufferSamples):
+          return cekPdcLimitExceeded
 
   compiler.delayStateCount = delayStateCount
   if delayStateCount > 0:
@@ -366,7 +575,7 @@ proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int], co
   var currentDelayIdx = 0
   for c in g.connections:
     if c.sigType == sigAudio:
-      let srcLat = nodeTotalLatency.getOrDefault(c.srcNodeId, 0'u32)
+      let srcLat = nodeTotalLatency.getOrDefault(c.srcNodeId, 0'u64)
       if srcLat < maxGraphLatency:
         let diff = int(maxGraphLatency - srcLat)
         # Кольцо per-frame: ёмкость в СЛОТАХ = кадры × каналы. Раньше считалось
@@ -406,6 +615,7 @@ proc applyPDC*(g: var NodeGraph, adj: var AdjacencyList, sortedIds: seq[int], co
 
   g.connections = newConnections
   adj = initAdjacencyList(g)
+  cekNone
 
 # ============================================================================
 # 4. BUFFER ALLOCATION & LIFETIME ANALYSIS 
@@ -531,28 +741,33 @@ proc validateGraph*(srcGraph: NodeGraph): CompileError =
                                eventOutCount: 0, eventInCount: 0)
     let srcNode = srcGraph.nodes.getOrDefault(c.srcNodeId, emptyNode)
     let dstNode = srcGraph.nodes.getOrDefault(c.dstNodeId, emptyNode)
-    case c.sigType
-    of sigAudio:
-      if c.srcPortIdx >= int(srcNode.audioOutCount):
-        return CompileError(kind: cekUnknownSrcPort, nodeId: c.srcNodeId,
-          portIdx: c.srcPortIdx, connection: i)
-      if c.dstPortIdx >= int(dstNode.audioInCount):
-        return CompileError(kind: cekUnknownDstPort, nodeId: c.dstNodeId,
-          portIdx: c.dstPortIdx, connection: i)
-    of sigControl:
-      if c.srcPortIdx >= int(srcNode.ctrlOutCount):
-        return CompileError(kind: cekUnknownSrcPort, nodeId: c.srcNodeId,
-          portIdx: c.srcPortIdx, connection: i)
-      if c.dstPortIdx >= int(dstNode.ctrlInCount):
-        return CompileError(kind: cekUnknownDstPort, nodeId: c.dstNodeId,
-          portIdx: c.dstPortIdx, connection: i)
-    of sigEvent:
-      if c.srcPortIdx >= int(srcNode.eventOutCount):
-        return CompileError(kind: cekUnknownSrcPort, nodeId: c.srcNodeId,
-          portIdx: c.srcPortIdx, connection: i)
-      if c.dstPortIdx >= int(dstNode.eventInCount):
-        return CompileError(kind: cekUnknownDstPort, nodeId: c.dstNodeId,
-          portIdx: c.dstPortIdx, connection: i)
+    if srcNode.isSubgraph or dstNode.isSubgraph:
+      # Внешние порты субграфа объявлены subgraphInputs/subgraphOutputs,
+      # а не счётчиками audioInCount: их разрешает flattenGraph (#403).
+      discard
+    else:
+      case c.sigType
+      of sigAudio:
+        if c.srcPortIdx >= int(srcNode.audioOutCount):
+          return CompileError(kind: cekUnknownSrcPort, nodeId: c.srcNodeId,
+            portIdx: c.srcPortIdx, connection: i)
+        if c.dstPortIdx >= int(dstNode.audioInCount):
+          return CompileError(kind: cekUnknownDstPort, nodeId: c.dstNodeId,
+            portIdx: c.dstPortIdx, connection: i)
+      of sigControl:
+        if c.srcPortIdx >= int(srcNode.ctrlOutCount):
+          return CompileError(kind: cekUnknownSrcPort, nodeId: c.srcNodeId,
+            portIdx: c.srcPortIdx, connection: i)
+        if c.dstPortIdx >= int(dstNode.ctrlInCount):
+          return CompileError(kind: cekUnknownDstPort, nodeId: c.dstNodeId,
+            portIdx: c.dstPortIdx, connection: i)
+      of sigEvent:
+        if c.srcPortIdx >= int(srcNode.eventOutCount):
+          return CompileError(kind: cekUnknownSrcPort, nodeId: c.srcNodeId,
+            portIdx: c.srcPortIdx, connection: i)
+        if c.dstPortIdx >= int(dstNode.eventInCount):
+          return CompileError(kind: cekUnknownDstPort, nodeId: c.dstNodeId,
+            portIdx: c.dstPortIdx, connection: i)
 
     # 4. sigType должен быть известным классом (sigAudio/sigControl/sigEvent).
     #    Мусор из файла (`sigType: 99`) не должен доходить до аудиобуферов,
@@ -587,7 +802,10 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   if vErr.kind != cekNone:
     return CompileResult(success: false, error: vErr)
   
-  var g = flattenGraph(srcGraph, compiler.allocator)
+  var flattenError = cekNone
+  var g = flattenGraph(srcGraph, compiler.allocator, flattenError)
+  if flattenError != cekNone:
+    return CompileResult(success: false, error: CompileError(kind: flattenError))
   var adj = initAdjacencyList(g)
   
   var order: seq[int]
@@ -596,7 +814,14 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
     return CompileResult(success: false,
       error: CompileError(kind: cekCycleDetected, portIdx: -1, connection: -1))
 
-  applyPDC(g, adj, order, compiler)
+  let pdcError = applyPDC(g, adj, order, compiler)
+  if pdcError != cekNone:
+    if compiler.delayStates != nil:
+      for i in 0 ..< compiler.delayStateCount:
+        if compiler.delayStates[i].buffer != nil:
+          deallocShared(compiler.delayStates[i].buffer)
+      deallocShared(compiler.delayStates)
+    return CompileResult(success: false, error: CompileError(kind: pdcError))
   
   if not topologicalSort(g, adj, order):
     if compiler.delayStates != nil:
@@ -655,12 +880,13 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   # с чем было соединить. Теперь память под сэмплы выделяется ровно
   # один раз, на холодной стороне, и раздаётся буферам пула.
   #
-  # Формат — planar stereo (channels = 2, stride = arenaFrames).
-  # Planar выбран потому, что DSP-ядра обрабатывают каналы независимо:
-  # так циклы в C получаются линейными, а не шагающими через stride.
-  # Ноды, ожидающие interleaved, определяют раскладку по stride/channels.
+  # Формат — planar stereo (issue #401: ширина одна на всё ядро —
+  # `MaxAudioChannels`). Planar выбран потому, что DSP-ядра обрабатывают
+  # каналы независимо: так циклы в C получаются линейными, а не шагающими
+  # через stride. Ноды, ожидающие interleaved, определяют раскладку по
+  # stride/channels.
   let arenaFrames = int32(signal_types.MaxBlockSize)
-  let arenaChannels = 2
+  let arenaChannels = signal_types.MaxAudioChannels
   let samplesPerBuffer = int(arenaFrames) * arenaChannels
 
   p.arenaFrames = arenaFrames
@@ -675,6 +901,7 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
       p.audioBufferPool[i].frames = arenaFrames
       p.audioBufferPool[i].channels = int32(arenaChannels)
       p.audioBufferPool[i].stride = arenaFrames
+      p.audioBufferPool[i].layout = alPlanar
   
   p.ctrlPoolCount = maxCtrl
   p.ctrlPool = cast[ptr UncheckedArray[float32]](allocShared0(sizeof(float32) * maxCtrl))

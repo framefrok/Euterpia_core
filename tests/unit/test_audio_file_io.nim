@@ -10,7 +10,7 @@
 #   - отсутствующий файл -> IOError;
 #   - getInfo отдаёт корректные метаданные.
 
-import std/[unittest, os, math]
+import std/[unittest, os, math, strutils]
 import audio_file_io
 import audio_buffer
 import wav_codec
@@ -80,6 +80,79 @@ suite "audio_file_io: round-trip":
     for f in 0 ..< 128:
       check abs(got[f * 2] - 0.25f) < 1e-5f
       check abs(got[f * 2 + 1] + 0.25f) < 1e-5f
+
+
+# =============================================================================
+# #209: 32-битный PCM, INFO-чанк, TPDF-dither
+# =============================================================================
+
+suite "audio_file_io: сдача (#209)":
+  test "32-bit PCM round-trip точен до шага квантования":
+    let path = getTempDir() / "euterpia_afio_32i.wav"
+    var src = newSeq[float32](128)
+    for i in 0 ..< 128:
+      src[i] = float32(sin(float64(i) * 0.1))
+    writeWav(path, info(32, 1, false), src)
+    defer: removeFile(path)
+    let (got, gotInfo) = loadAudioFile(path)
+    check gotInfo.bitsPerSample == 32
+    check gotInfo.numFrames == 128
+    for i in 0 ..< 128:
+      check abs(got[i] - src[i]) < 1e-8f
+
+  test "INFO-чанк пишется и не мешает чтению":
+    let path = getTempDir() / "euterpia_afio_info.wav"
+    var wi = info(16, 2, false)
+    wi.metadata = WavMetadata(title: "T", artist: "A", genre: "G",
+                              comment: "C", software: "EUTERPIA")
+    let src = sineSeq(64, 2, 440.0f)
+    writeWav(path, wi, src)
+    defer: removeFile(path)
+
+    let raw = readFile(path)
+    check raw.find("LIST") >= 0
+    check raw.find("INFO") >= 0
+    check raw.find("INAM") >= 0
+    check raw.find("IART") >= 0
+    check raw.find("\0T\0") >= 0
+    check raw.find("\0A\0") >= 0
+
+    let (got, gotInfo) = loadAudioFile(path)
+    check gotInfo.numFrames == 64
+    check got.len == 128
+
+  test "dither: TPDF разбивает ступеньку, но не слышен":
+    let plain = getTempDir() / "euterpia_afio_nodither.wav"
+    let dith = getTempDir() / "euterpia_afio_dither.wav"
+    let dith2 = getTempDir() / "euterpia_afio_dither2.wav"
+    defer:
+      for p in [plain, dith, dith2]:
+        if fileExists(p): removeFile(p)
+
+    # 1/3 шага 16-бит: без dither всё округлится в 0.
+    let value = 0.3f / 32768.0f
+    var src = newSeq[float32](1024)
+    for i in 0 ..< 1024: src[i] = value
+
+    var wi = info(16, 1, false)
+    writeWav(plain, wi, src)
+    wi.dither = true
+    writeWav(dith, wi, src)
+    writeWav(dith2, wi, src)
+
+    let (a, _) = loadAudioFile(plain)
+    let (b, _) = loadAudioFile(dith)
+    var changed = 0
+    var maxAbs = 0.0f
+    for i in 0 ..< 1024:
+      maxAbs = max(maxAbs, abs(b[i]))
+      if abs(b[i] - a[i]) > 0.0f:
+        inc changed
+    check changed > 0
+    # ±1 шаг квантования: шум не должен «вылезать» за пределы сигнала.
+    check maxAbs < 2.5f / 32768.0f
+    # Детерминизм: один и тот же вход и настройки — те же байты (#102).
+    check readFile(dith) == readFile(dith2)
 
 suite "audio_file_io: диспетчер форматов и ошибки":
   test "openDecoder отвергает неподдерживаемое расширение":

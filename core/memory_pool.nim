@@ -438,6 +438,7 @@ proc initInlineMonoAudioBuffer(p: pointer, frames: int32) {.inline.} =
   buf.channels = 1'i32
   buf.frames = clamp(frames, 1'i32, int32(MaxBlockSize))
   buf.stride = 1'i32
+  buf.layout = alPlanar
   # Обнуление — не здесь, а у потребителя через clearAudioBuffer или при синтезе.
 
 proc initAudioBufferPool*(

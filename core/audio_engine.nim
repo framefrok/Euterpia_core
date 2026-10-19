@@ -45,9 +45,10 @@ const
   MaxPendingParams = 256
 
   ## Верхняя граница входного тракта. Ядро работает с моно/стерео входом;
-  ## всё, что шире, микшируется до первых каналов. Такой же предел
-  ## используют стерео-ноды (maxChannels = 2 в descriptor'ах).
-  MaxInputChannels* = 2
+  ## всё, что шире, микшируется до первых каналов. Значение — то же, что
+  ## `MaxAudioChannels` (issue #401): вход и выход не могут расходиться по
+  ## ширине, иначе runtime молча терял бы каналы.
+  MaxInputChannels* = signal_types.MaxAudioChannels
 
   # Разрешение PPQ (тиков на четверть) теперь живёт в `transport`
   # (`PpqTicksPerQuarter`) — единый источник для RT-контекста и UI (#387).
@@ -187,6 +188,12 @@ proc isPipelineRuntimeReady(p: ptr CompiledPipeline): bool {.inline, rt.} =
   ## 2. Либо пошаговое исполнение с процедурой привязки мастер-буфера
   ##    к выходу драйвера (bindMasterProc != nil).
   if p == nil:
+    return true
+  # Пустой пайплайн (0 шагов, без обработчиков) — законный результат
+  # компиляции ПУСТОГО графа: рендер даёт тишину, а не падение. Отличать его
+  # от «битого» нужно по отсутствию шагов: шаг без точки входа — уже ошибка.
+  if p.renderProc == nil and p.bindMasterProc == nil and
+     p.stepCount == 0 and p.steps.isNil:
     return true
   result = (p.renderProc != nil) or (p.bindMasterProc != nil and (p.stepCount == 0 or p.steps != nil))
 
@@ -432,7 +439,8 @@ proc createAudioEngine*(
     data: result.inputArena,
     channels: 0,
     frames: 0,
-    stride: int32(signal_types.MaxBlockSize)
+    stride: int32(signal_types.MaxBlockSize),
+    layout: alPlanar
   )
   result.inputDeviceChannels = 0
   result.inputStatusFlags.store(0'u32, moRelaxed)
@@ -534,6 +542,11 @@ proc applyCommands(engine: ptr AudioEngine) {.rt.} =
       # представления одного состояния разошлись бы.
       engine.transport.state = tsStopped
       engine.transport.frame = 0
+      # Control-plane читает позицию через `currentFrame` (frameSnapshot):
+      # без немедленной публикации после stop/seek он видел бы позицию
+      # последнего блока, то есть «стоп на 48000». Публикуем здесь, а не
+      # ждём следующего рендера (issue #407).
+      engine.frameSnapshot.store(0'i64, moRelease)
 
     of cmdTransportSetLoop:
       # Цикл приезжает командой через очередь, а не пишется в runtime с
@@ -564,6 +577,9 @@ proc applyCommands(engine: ptr AudioEngine) {.rt.} =
 
         engine.transport.frame =
           int64(seconds * float64(engine.transport.sampleRate))
+        # Позиция видна control-plane сразу после команды, не дожидаясь
+        # следующего блока (issue #407).
+        engine.frameSnapshot.store(engine.transport.frame, moRelease)
 
     of cmdSetParam, cmdSetParamNormalized:
       if engine.activePipeline != nil:
@@ -625,10 +641,14 @@ proc setupContext(
   ctx: var NodeProcessContext;
   offline: bool;
   lastBlock: bool;
-  transportActive: bool
+  transportActive: bool;
+  frames: int32
 ) {.rt.} =
   ctx.sampleRate = engine.transport.sampleRate
-  ctx.blockSize = engine.blockSize
+  # Фактическая длина блока: у частичного (неполного) блока это остаток,
+  # а не размер буфера (#395) -- ноды обязаны считать ровно frames кадров,
+  # иначе хвост рендера обработал бы лишние сэмплы.
+  ctx.blockSize = frames
   ctx.samplePosition = engine.transport.frame
 
   if engine.transport.sampleRate > 0.0f:
@@ -993,12 +1013,20 @@ proc renderBlockInternal(
   inputChannels: int32;
   offline: bool;
   lastBlock: bool;
-  forceAdvance: bool
+  forceAdvance: bool;
+  renderFrames: int32 = 0'i32
 ) {.rt.} =
   if engine == nil or driverOut == nil:
     return
 
-  let frames = engine.blockSize
+  # renderFrames > 0 — частичный блок (#395): считается ровно остаток,
+  # транспорт продвигается на остаток, метрики — по остатку. 0 — обычный
+  # полный блок (realtime-путь не меняется).
+  let frames =
+    if renderFrames > 0 and renderFrames < engine.blockSize:
+      renderFrames
+    else:
+      engine.blockSize
 
   if frames <= 0:
     return
@@ -1034,7 +1062,7 @@ proc renderBlockInternal(
 
     if transportActive and engine.activePipeline != nil:
       var ctx: NodeProcessContext
-      setupContext(engine, ctx, offline, lastBlock, transportActive)
+      setupContext(engine, ctx, offline, lastBlock, transportActive, frames)
       # Публикация входа в граф (issue #3).
       ctx.input = addr engine.inputBuffer
       ctx.inputChannels = engine.inputBuffer.channels
@@ -1171,7 +1199,12 @@ proc renderOffline*(
       done += engine.blockSize.int64
 
     else:
-      # Финальный неполный блок.
+      # Финальный неполный блок: считается НАСТОЯЩЕ частично (#395),
+      # renderFrames = remaining. Раньше здесь рендерился полный блок в
+      # scratch, копировался остаток, а транспорт откатывался
+      # (`frame -= overshoot`) -- откат шёл ПОСЛЕ loop-wrap и в координатах
+      # уже обёрнутой позиции, из-за чего при цикле итоговая позиция была
+      # неверной. Теперь граф и транспорт видят ровно remaining кадров.
       renderBlockInternal(
         engine,
         nil,
@@ -1179,7 +1212,8 @@ proc renderOffline*(
         0'i32,
         offline = true,
         lastBlock = true,
-        forceAdvance = true
+        forceAdvance = true,
+        renderFrames = int32(remaining)
       )
 
       var i: int64 = 0
@@ -1192,12 +1226,6 @@ proc renderOffline*(
         outputBuffer[outIdx + 1] = scratch[inIdx + 1]
 
         inc i
-
-      # renderBlockInternal продвинул транспорт на полный блок,
-      # а нам нужен только остаток.
-      let overshoot = engine.blockSize.int64 - remaining
-      engine.transport.frame -= overshoot
-      engine.frameSnapshot.store(engine.transport.frame, moRelease)
 
       done = totalFrames
 
@@ -1405,21 +1433,77 @@ proc postSetParamNormalized*(
   )
 
 
-proc postGraphUpdate*(
+proc applyParamNow*(
   engine: ptr AudioEngine;
-  p: ptr CompiledPipeline
+  nodeId: int32;
+  paramId: uint32;
+  value: float32
 ): bool =
-  ## Публикация нового графа в RT (MANIFEST §10). Control-path.
+  ## Синхронное применение параметра в активный пайплайн (#395). Control-path.
   ##
-  ## Backpressure (issue #385): если незакрытых смен графа уже
-  ## `MaxRetireBacklog`, публикация отклоняется. Это держит хранилище
-  ## утилизации (SPSC + localRetire) ниже ёмкости, поэтому RT-путь НИКОГДА не
-  ## доходит до освобождения памяти. Хост обязан периодически звать
-  ## `pollReclamation`, чтобы очередь разбиралась.
+  ## В отличие от `postSetParam`, команда НЕ идёт через realtime-очередь
+  ## (ёмкость 1024): батч automation-параметров в начале чанка переполнял
+  ## очередь, и `push` молча отдавал false — рендер терял автоматизацию и
+  ## становился недетерминированным. Здесь вызов идёт напрямую в
+  ## `applyParamProc` пайплайна — тот же путь, что и у разобранной команды,
+  ## но без стадии очереди, поэтому потеря невозможна при любом числе
+  ## параметров.
+  ##
+  ## Контракт потоков: предназначен для офлайн-рендера (один поток, аудио-
+  ## потока нет). В живом realtime используйте `postSetParam`: там синхронный
+  ## вызов гонялся бы с аудиопотоком за состоянием нод.
+  ##
+  ## До активации пайплайна параметр копится в `pendingParams` (как и раньше
+  ## при разборе очереди) и применяется при активации графа.
   if engine == nil:
     return false
 
+  let cmd = EngineCommand(
+    kind: cmdSetParam,
+    nodeId: nodeId,
+    paramId: paramId,
+    value: value
+  )
+
+  if engine.activePipeline != nil:
+    applyParamCommand(engine.activePipeline, cmd)
+    return true
+
+  if engine.pendingParamCount < MaxPendingParams.int32:
+    engine.pendingParams[engine.pendingParamCount] = cmd
+    inc engine.pendingParamCount
+    return true
+
+  false
+
+
+proc flushQueuedCommands*(engine: ptr AudioEngine) =
+  ## Разобрать очередь команд синхронно с control-path (#395).
+  ##
+  ## Нужен офлайн-рендеру, чтобы граф, темп и play активировались ДО первого
+  ## блока: тогда параметры automation идут через `applyParamNow` напрямую в
+  ## пайплайн, минуя очередь. В realtime вызывать НЕЛЬЗЯ: очередь разбирает
+  ## сам audio-поток, а здесь был бы доступ к его состоянию извне (гонка).
+  if engine == nil:
+    return
+  applyCommands(engine)
+
+
+proc publishPipeline(
+  engine: ptr AudioEngine;
+  p: ptr CompiledPipeline
+): bool =
+  ## Низкоуровневая публикация указателя (владение уже передано сюда).
+  ## `p == nil` — очистка графа; `postGraphUpdate` пустую ручку не принимает,
+  ## для очистки есть `postGraphClear`.
+  if engine == nil:
+    if p != nil:
+      destroyPipeline(p)
+    return false
+
   if engine.retireBacklog.load(moAcquire) >= MaxRetireBacklog.int32:
+    if p != nil:
+      destroyPipeline(p)
     return false
 
   # Полная проверка структуры пайплайна ДО публикации (issue #391,
@@ -1433,6 +1517,8 @@ proc postGraphUpdate*(
   let id = engine.sharedPool.acquireBlock()
 
   if id < 0:
+    if p != nil:
+      destroyPipeline(p)
     return false
 
   # Резервируем слот утилизации ДО публикации: если команда создаст утилизацию,
@@ -1451,10 +1537,40 @@ proc postGraphUpdate*(
   if engine.toAudio.push(cmd):
     return true
 
-  # Публикация не удалась — возвращаем резерв.
+  # Публикация не удалась — возвращаем резерв и освобождаем пайплайн.
   discard engine.retireBacklog.fetchAdd(-1'i32, moRelaxed)
   engine.sharedPool.releaseBlock(id)
+  if p != nil:
+    destroyPipeline(p)
   return false
+
+proc postGraphUpdate*(
+  engine: ptr AudioEngine;
+  owned: sink OwnedPipeline
+): bool =
+  ## Публикация нового графа в RT (MANIFEST §10). Control-path.
+  ##
+  ## Владение ПЕРЕХОДИТ движку: параметр — `sink OwnedPipeline` (issue #402).
+  ## После успешной публикации вызывающий не может освободить пайплайн
+  ## повторно — у него больше нет владения. При отказе движок освобождает
+  ## пайплайн сам, поэтому утечки тоже нет.
+  ##
+  ## Backpressure (issue #385): если незакрытых смен графа уже
+  ## `MaxRetireBacklog`, публикация отклоняется. Это держит хранилище
+  ## утилизации (SPSC + localRetire) ниже ёмкости, поэтому RT-путь НИКОГДА не
+  ## доходит до освобождения памяти. Хост обязан периодически звать
+  ## `pollReclamation`, чтобы очередь разбиралась.
+  if owned.isEmpty:
+    # Ручка уже пуста: пайплайн передан раньше (или не создан). Повторная
+    # публикация «того же» пайплайна невозможна — это и есть защита от
+    # double-free на уровне API (#402).
+    return false
+  publishPipeline(engine, releasePipeline(owned))
+
+proc postGraphClear*(engine: ptr AudioEngine): bool =
+  ## Снять активный граф (публикация `nil`). Отдельная команда, потому что
+  ## пустая `OwnedPipeline` означает «владения нет», а не «очистить граф».
+  publishPipeline(engine, nil)
 
 
 proc postSharedCommand*(

@@ -1,7 +1,7 @@
 # tests/integration_test.nim
 #
 # Интеграционный тест ЯДРА EUTERPIA.
-# Требует компиляции с --threads:on (из-за dsp_scheduler.nim и audio_recorder.nim).
+# Требует компиляции с --threads:on (из-за audio_recorder.nim).
 #
 # Сборка:
 #   nim c --threads:on -r tests/integration_test.nim
@@ -20,11 +20,8 @@ import ../core/transport
 import ../core/sequencer
 import ../core/project
 import ../core/memory_pool
-import ../core/dsp_scheduler
 import ../core/audio_recorder
 import ../core/audio_buffer
-import ../core/param_registry
-import ../core/audio_params
 import ../core/wav_codec
 
 from ../core/ipc_bus import
@@ -61,19 +58,6 @@ proc testPassThroughProc(
   while i < n:
     outBuf.data[i] = inBuf.data[i]
     inc i
-
-proc dummySchedulerTask(
-    ctx: ptr NodeProcessContext,
-    audio: ptr NodeAudioPorts,
-    ctrl: ptr NodeControlPorts,
-    events: ptr NodeEventPorts,
-    userData: pointer
-) {.cdecl, raises: [], gcsafe.} =
-  discard ctx
-  discard audio
-  discard ctrl
-  discard events
-  discard userData
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -264,31 +248,9 @@ proc runCoreIntegrationTest() =
   echo "   StreamingAudioBuffer OK"
 
   # ========================================================================
-  # [6] Param Registry
+  # [6] Graph Compiler
   # ========================================================================
-  echo "\n[6] Testing Param Registry..."
-
-  var reg = initParamRegistry(64'u32)
-  let b1 = reg.bindParam(1'u32, 100'u32)
-  doAssert b1.isValid(), "binding must be valid"
-
-  let b1_again = reg.bindParam(1'u32, 100'u32)
-  doAssert b1.slot == b1_again.slot
-
-  var lookedUp: ParamBinding
-  doAssert lookupParam(addr reg, 1'u32, 100'u32, lookedUp)
-  doAssert lookedUp.slot == b1.slot
-
-  reg.releaseParam(1'u32, 100'u32)
-  doAssert not lookupParam(addr reg, 1'u32, 100'u32, lookedUp)
-
-  deinitParamRegistry(reg)
-  echo "   ParamRegistry OK"
-
-  # ========================================================================
-  # [7] Graph Compiler
-  # ========================================================================
-  echo "\n[7] Testing Graph Compiler..."
+  echo "\n[6] Testing Graph Compiler..."
 
   var g: NodeGraph
   let node1 = EditorNode(
@@ -328,9 +290,9 @@ proc runCoreIntegrationTest() =
   echo "   Graph compiler OK"
 
   # ========================================================================
-  # [8] Sequencer
+  # [7] Sequencer
   # ========================================================================
-  echo "\n[8] Testing Sequencer..."
+  echo "\n[7] Testing Sequencer..."
 
   var sqTrans = initTransport(48000.0f)
   var seq = initSequencer(addr sqTrans)
@@ -366,9 +328,9 @@ proc runCoreIntegrationTest() =
   echo "   Sequencer OK"
 
   # ========================================================================
-  # [9] Project save/load
+  # [8] Project save/load
   # ========================================================================
-  echo "\n[9] Testing Project save/load..."
+  echo "\n[8] Testing Project save/load..."
 
   var proj: ProjectFormat
   proj.format = ProjectFormatName
@@ -419,9 +381,9 @@ proc runCoreIntegrationTest() =
   echo "   Project OK"
 
   # ========================================================================
-  # [10] WAV codec
+  # [9] WAV codec
   # ========================================================================
-  echo "\n[10] Testing WAV codec..."
+  echo "\n[9] Testing WAV codec..."
 
   let wavPath = "core_test.wav"
   let info = AudioFileInfo(
@@ -463,9 +425,9 @@ proc runCoreIntegrationTest() =
   echo "   WAV codec OK"
 
   # ========================================================================
-  # [11] Audio Engine
+  # [10] Audio Engine
   # ========================================================================
-  echo "\n[11] Testing Audio Engine..."
+  echo "\n[10] Testing Audio Engine..."
 
   let engine = createAudioEngine(sampleRate = 48000.0f, blockSize = 128)
   doAssert engine != nil, "createAudioEngine returned nil"
@@ -504,37 +466,9 @@ proc runCoreIntegrationTest() =
   echo "   Audio Engine OK"
 
   # ========================================================================
-  # [12] DSP Scheduler
+  # [11] Audio Recorder
   # ========================================================================
-  echo "\n[12] Testing DSP Scheduler..."
-
-  var descs: seq[TaskDesc] = @[]
-  for i in 0 ..< 3:
-    var task: DspTask
-    task.process = dummySchedulerTask
-    task.nodeId = int32(i)
-    var desc = TaskDesc(task: task)
-    if i > 0:
-      desc.reads.add audioResource(int32(i - 1), 0)
-    desc.writes.add audioResource(int32(i), 0)
-    descs.add desc
-
-  var sched: DspScheduler
-  let schedOk = initScheduler(sched, descs, workerCount = 2)
-  doAssert schedOk, "initScheduler failed"
-  echo "   Scheduler initialized (2 workers)"
-
-  var ctx = NodeProcessContext(sampleRate: 48000.0f, blockSize: 128)
-  for _ in 0 ..< 16:
-    sched.renderBlock(addr ctx)
-  echo "   Rendered 16 blocks"
-  deinitScheduler(sched)
-  echo "   DSP Scheduler OK"
-
-  # ========================================================================
-  # [13] Audio Recorder
-  # ========================================================================
-  echo "\n[13] Testing Audio Recorder..."
+  echo "\n[11] Testing Audio Recorder..."
 
   let recDir = "core_test_recordings"
   var recorder = initAudioRecorder(

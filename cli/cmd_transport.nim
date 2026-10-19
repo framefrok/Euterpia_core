@@ -32,6 +32,8 @@ import cmd_project
 import control/query
 import control/document
 import control_bridge
+import session_ipc
+import runtime_session
 
 const
   TransportSessionSuffix = ".transport.json"
@@ -180,6 +182,62 @@ proc stateLines(t: var Transport): seq[string] =
     result.add "цикл: выкл"
 
 # =============================================================================
+# Живая сессия (#407): команда уходит демону, состояние — из его ответа
+# =============================================================================
+
+type
+  TransportScan = object
+    ok: bool
+    rep: Report
+    subcommand: string
+    rest: seq[string]
+    projectPath: string
+    unit: string
+
+proc liveStateLines(state: JsonNode): seq[string] =
+  ## Человекочитаемый вид состояния ЖИВОЙ сессии. Источник — ответ демона,
+  ## а не локальный `Transport`: иначе CLI показывал бы своё представление,
+  ## а не то, что реально исполняет AudioEngine.
+  if state == nil or state.kind != JObject:
+    return @["сессия не вернула состояние"]
+  let pos = state{"position"}
+  result.add "состояние: " & state{"state"}.getStr("unknown")
+  result.add "позиция: " & $pos{"bar"}.getInt(1) & "." &
+             $pos{"beat"}.getInt(1) & "." & $pos{"tick"}.getInt(0)
+  result.add "секунды: " & $pos{"seconds"}.getFloat(0.0)
+  result.add "кадры: " & $pos{"frames"}.getBiggestInt()
+  result.add "темп: " & $state{"tempo"}.getFloat(0.0) & " BPM"
+  let meter = state{"meter"}
+  result.add "размер: " & $meter{"numerator"}.getInt(4) & "/" &
+             $meter{"denominator"}.getInt(4)
+  let loop = state{"loop"}
+  if loop{"enabled"}.getBool(false):
+    result.add "цикл: вкл (" & $loop{"startFrames"}.getBiggestInt() & ".." &
+               $loop{"endFrames"}.getBiggestInt() & ")"
+  else:
+    result.add "цикл: выкл"
+
+proc liveStateBody(response: JsonNode; path: string; info: SessionInfo): JsonNode =
+  result = response{"state"}
+  if result == nil or result.kind != JObject:
+    result = %*{"schema": TransportSessionSchema, "state": "stopped"}
+  result["running"] = %true
+  result["pid"] = %info.pid
+  result["socket"] = %info.socketPath
+  if path.len > 0:
+    result["path"] = %path
+
+proc syncLiveEngine(info: SessionInfo; request: JsonNode): string =
+  ## Best-effort синхронизация документа с живым движком. Документ уже
+  ## изменён — отказ сессии не отменяет правку, но обязан быть виден.
+  if not info.running:
+    return ""
+  let response = rpcCall(info.socketPath, request)
+  if response.ok: ""
+  else: "живая сессия не приняла изменение: " & response.error
+
+
+# =============================================================================
 # Разбор позиции
 # =============================================================================
 
@@ -234,18 +292,87 @@ proc parsePosition(t: var Transport; text, unit: string): PositionParse =
   else:
     PositionParse(ok: false, message: "неизвестная единица позиции: " & unit)
 
+
+proc runLiveTransport(ctx: var Ctx; sc: TransportScan; t: var Transport;
+                      path: string; info: SessionInfo): Report =
+  ## Выполнить runtime-команду через демон. `t` нужен только для перевода
+  ## BBT/секунд в кадры; состояние читается из ответа сессии.
+  # Темп/размер живой сессии — источник для разбора позиции: если проект
+  # изменили после старта, BBT должен считаться по фактическому темпу.
+  if info.state != nil and info.state.kind == JObject:
+    t.setTempo(info.state{"tempo"}.getFloat(float64(t.tempo.load(moRelaxed))))
+    let meter = info.state{"meter"}
+    let num = meter{"numerator"}.getInt(4)
+    let den = meter{"denominator"}.getInt(4)
+    if num > 0 and den > 0:
+      t.timeSignature = TimeSignature(numerator: num.int32,
+                                      denominator: den.int32)
+
+  let name = sc.subcommand
+  var request = %*{"api": RuntimeSessionApiVersion,
+                   "command": "transport." & name}
+
+  case name
+  of "play", "pause", "stop", "state", "position":
+    discard
+  of "seek":
+    if sc.rest.len != 1:
+      return usageError("seek: ожидается одна позиция",
+        "например: euterpia transport seek 4.2.120  (или --unit seconds/frames)")
+    let parsed = parsePosition(t, sc.rest[0], sc.unit)
+    if not parsed.ok:
+      return usageError(parsed.message, "единицы: " & PositionUnits.join(", "))
+    request["frames"] = %parsed.frames
+  of "loop":
+    if sc.rest.len == 0:
+      return usageError("loop: ожидается `on`, `off` или `set`",
+        "например: euterpia transport loop set 4.1.0 8.1.0")
+    case sc.rest[0]
+    of "on":
+      request["enabled"] = %true
+    of "off":
+      request["enabled"] = %false
+    of "set":
+      if sc.rest.len != 3:
+        return usageError("loop set: ожидается начало и конец",
+          "например: euterpia transport loop set 4.1.0 8.1.0")
+      let start = parsePosition(t, sc.rest[1], sc.unit)
+      if not start.ok: return usageError(start.message)
+      let stop = parsePosition(t, sc.rest[2], sc.unit)
+      if not stop.ok: return usageError(stop.message)
+      if stop.frames <= start.frames:
+        return usageError("loop set: конец должен быть больше начала",
+          "границы в кадрах: " & $start.frames & " и " & $stop.frames)
+      request["enabled"] = %true
+      request["startFrame"] = %start.frames
+      request["endFrame"] = %stop.frames
+    else:
+      return usageError("loop: неизвестная подкоманда «" & sc.rest[0] & "»",
+        "подкоманды: on, off, set")
+  else:
+    return usageError("transport: неизвестная подкоманда «" & name & "»")
+
+  if ctx.dryRun:
+    return okReport(body = %*{"dryRun": true, "command": name,
+                              "socket": info.socketPath},
+      lines = @["было бы отправлено в сессию: " & name])
+
+  let response = rpcCall(info.socketPath, request)
+  if not response.ok:
+    return envError("живая сессия не ответила: " & response.error,
+      "проверьте `euterpia session status`; offline-путь: `session stop`")
+
+  # Offline-сессия — зеркало последнего живого состояния: после остановки
+  # демона `transport state` покажет stopped/позицию, а не устаревшее «играет».
+  discard saveOfflineSnapshot(path, response.response{"snapshot"})
+
+  var lines = liveStateLines(response.response{"state"})
+  lines.add "сессия: pid " & $info.pid
+  okReport(body = liveStateBody(response.response, path, info), lines = lines)
+
 # =============================================================================
 # Разбор аргументов
 # =============================================================================
-
-type
-  TransportScan = object
-    ok: bool
-    rep: Report
-    subcommand: string
-    rest: seq[string]
-    projectPath: string
-    unit: string
 
 proc scanArgs(args: seq[string]): TransportScan =
   result.unit = "bbt"
@@ -370,6 +497,14 @@ proc runTransport*(ctx: var Ctx; args: seq[string]): Report =
     hasProject = true
 
   var t = seedTransport(sampleRate, hasProject, doc)
+
+  # issue #407: если runtime-сессия жива, runtime-команды идут в неё, а не
+  # только в offline-файл. Это и есть «сессия живёт между вызовами CLI».
+  let live = loadSessionInfo(path)
+  if live.running and sc.subcommand in ["play", "pause", "stop", "seek",
+                                        "position", "state", "loop"]:
+    return runLiveTransport(ctx, sc, t, path, live)
+
   let sessionPath = sessionPathFor(path)
   let loadedSession = loadSession(t, sessionPath)
   if not loadedSession.ok:
@@ -391,10 +526,15 @@ proc runTransport*(ctx: var Ctx; args: seq[string]): Report =
       # Значение читается через Query API (DTO), а не из `ProjectFormat`:
       # тот же источник, что у `transport state` (#336, §63).
       t.setTempo(queryMetadata(openDocument(path, reloaded.proj)).tempo)
+    let liveError = syncLiveEngine(live,
+      %*{"api": RuntimeSessionApiVersion, "command": "engine.tempo",
+         "tempo": t.tempo.load(moRelaxed)})
     var body = stateBody(t, path)
     body["change"] = set.body
     var lines = set.lines
     lines.add stateLines(t)
+    if live.running:
+      lines.add(if liveError.len > 0: liveError else: "живая сессия: темп применён")
     return okReport(body = body, lines = lines)
 
   of "meter":
@@ -411,10 +551,16 @@ proc runTransport*(ctx: var Ctx; args: seq[string]): Report =
       let meta = queryMetadata(openDocument(path, reloaded.proj))
       t.timeSignature = TimeSignature(
         numerator: meta.tsNumerator, denominator: meta.tsDenominator)
+    let liveError = syncLiveEngine(live,
+      %*{"api": RuntimeSessionApiVersion, "command": "engine.meter",
+         "numerator": t.timeSignature.numerator,
+         "denominator": t.timeSignature.denominator})
     var body = stateBody(t, path)
     body["change"] = set.body
     var lines = set.lines
     lines.add stateLines(t)
+    if live.running:
+      lines.add(if liveError.len > 0: liveError else: "живая сессия: размер применён")
     return okReport(body = body, lines = lines)
 
   of "play":

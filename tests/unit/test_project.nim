@@ -13,6 +13,7 @@
 
 import std/[unittest, os, strutils, tables]
 import project
+import signal_types
 
 proc makeProject(): ProjectFormat =
   result.format = ProjectFormatName
@@ -388,15 +389,17 @@ suite "project: сужение типов отвергается (#390)":
     check r.error.message.contains "pitch"
     check r.error.message.contains "300"
 
-  test "отрицательная latency не превращается в 4294967295":
+  test "отрицательная latency становится маркером превышения, а не 4294967295":
     let path = getTempDir() / "euterpia_latency_neg.json"
     writeFile(path, """{"format":"euterpia-project","version":1,
       "graph":{"nodes":[{"id":1,"nodeType":"fx.gain","latencyReported":-1}]}}""")
     defer: removeFile(path)
     let r = loadProject(path)
-    check not r.success
-    check r.error.kind == pekInvalidFormat
-    check r.error.message.contains "latencyReported"
+    # #405: значение вне диапазона не заворачивается в uint32 (было бы
+    # 4294967295), а помечается «заведомо больше предела»; компилятор затем
+    # честно отказывает `cekLatencyOverflow`.
+    check r.success
+    check r.value.graph.nodes[0].latencyReported == MaxLatencyFrames + 1'u32
 
   test "velocity: 256 и channel: -1 тоже отвергаются":
     let path = getTempDir() / "euterpia_velocity_256.json"
@@ -450,4 +453,83 @@ suite "project: сужение типов отвергается (#390)":
     check r.success
     check r.value.metadata.timeSignature.numerator == 4
     check r.value.metadata.timeSignature.denominator == 4
+# #403: порты субграфа переживают save/load
+# =============================================================================
+
+suite "project: порты субграфа (#403)":
+  test "subgraphInputs/subgraphOutputs сохраняются и читаются":
+    let path = getTempDir() / "euterpia_proj_subgraph.json"
+    var original = makeProject()
+
+    var sub = NodeFormat(
+      id: 10, nodeType: "core.subgraph", name: "Chain",
+      isSubgraph: true, audioInCount: 1, audioOutCount: 1
+    )
+    sub.subgraphNodes = @[
+      NodeFormat(id: 100, nodeType: "fx.gain", name: "in"),
+      NodeFormat(id: 101, nodeType: "fx.gain", name: "out")
+    ]
+    sub.subgraphInputs = @[
+      SubgraphPortFormat(name: "in", localNodeId: 100, localPortIdx: 0,
+                         sigType: ord(sigAudio))
+    ]
+    sub.subgraphOutputs = @[
+      SubgraphPortFormat(name: "out", localNodeId: 101, localPortIdx: 0,
+                         sigType: ord(sigAudio))
+    ]
+    original.graph.nodes.add sub
+
+    let saved = saveProject(original, path)
+    check saved.success
+    defer: removeFile(path)
+
+    let loaded = loadProject(path)
+    check loaded.success
+
+    var found = false
+    for node in loaded.value.graph.nodes:
+      if node.id == 10:
+        found = true
+        check node.isSubgraph
+        check node.subgraphNodes.len == 2
+        check node.subgraphInputs.len == 1
+        check node.subgraphInputs[0].localNodeId == 100
+        check node.subgraphInputs[0].localPortIdx == 0
+        check node.subgraphInputs[0].sigType == ord(sigAudio)
+        check node.subgraphOutputs.len == 1
+        check node.subgraphOutputs[0].localNodeId == 101
+    check found
+
+
+# =============================================================================
+# #405: latency из файла не заворачивается в uint32
+# =============================================================================
+
+suite "project: latency и предел (#405)":
+  test "огромная/отрицательная latency превращается в маркер превышения":
+    let path = getTempDir() / "euterpia_proj_latency.json"
+    writeFile(path, """{"format":"euterpia-project","version":1,
+      "metadata":{"name":"L","sampleRate":48000,"tempo":120},
+      "graph":{"nodes":[
+        {"id":1,"nodeType":"fx.gain","latencyReported":-1,
+         "latencyIntrinsic":999999999999},
+        {"id":2,"nodeType":"fx.gain","latencyReported":128}],
+        "connections":[]}}""")
+    defer: removeFile(path)
+
+    let loaded = loadProject(path)
+    check loaded.success
+
+    var node1: NodeFormat
+    var node2: NodeFormat
+    for node in loaded.value.graph.nodes:
+      if node.id == 1: node1 = node
+      if node.id == 2: node2 = node
+
+    # Оба «плохих» значения — маркер MaxLatencyFrames+1, а не 0 и не
+    # случайное маленькое число после uint32-обрезки.
+    check node1.latencyReported == MaxLatencyFrames + 1'u32
+    check node1.latencyIntrinsic == MaxLatencyFrames + 1'u32
+    # Нормальное значение не меняется.
+    check node2.latencyReported == 128'u32
 

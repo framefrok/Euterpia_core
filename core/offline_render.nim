@@ -19,10 +19,13 @@
 # Автоматизация:
 #   параметры нод — это то, что в проекте лежит отдельными дорожками
 #   (`AutomationLaneFormat`). Здесь они применяются на границах ЧАНКОВ через
-#   обычный `postSetParam`: тот же путь, что у живой автоматизации в
-#   реальном времени. Чанк — четверть секунды, поэтому «на слух»
-#   интерполяция неотличима от пошаговой по блокам, а команд в очереди
-#   в тысячи раз меньше.
+#   `applyParamNow` — прямой вызов в пайплайн БЕЗ realtime-очереди (#395):
+#   батч из десятков/тысяч параметров в начале чанка переполнял бы очередь
+#   (ёмкость 1024) и молча терялся, а офлайн-рендер обязан быть lossless и
+#   детерминированным. До первого блока очередь команд (граф, темп, play)
+#   разбирается явно через `flushQueuedCommands`, чтобы пайплайн уже был
+#   активен. Чанк — четверть секунды, поэтому «на слух» интерполяция
+#   неотличима от пошаговой по блокам.
 #
 # Формат вывода — WAV (PCM 16 или 24 бита), стерео: ровно то, что умеет
 # `wav_codec`. MP3/OGG в ядре не пишутся — см. `OfflineFormatsSupported`.
@@ -90,8 +93,10 @@ type
     blockSize*: int32
     totalFrames*: int64
     bitsPerSample*: int32
-      ## 16 или 24. 16 — умолчание: файл вдвое меньше, а разница на
-      ## материале с суммой инструментов на слух не критична.
+      ## 16, 24 или 32. 16 — умолчание: файл вдвое меньше, а разница на
+      ## материале с суммой инструментов на слух не критична. 32 —
+      ## целочисленный PCM для промежуточного файла мастера (#209): после
+      ## него усиление не добавляет второго шума квантования.
     tempo*: float64
       ## Нужен только для автоматизации: тики переводятся в кадры той же
       ## формулой, что у транспорта.
@@ -174,24 +179,20 @@ proc automationValueAt*(lane: OfflineAutomationLane; tick: float64): float32 =
 
 {.pop.}
 
-proc renderToWav*(path: string; p: ptr CompiledPipeline;
+proc renderToWav*(path: string; owned: sink OwnedPipeline;
                   opts: OfflineRenderOptions): OfflineRenderReport =
   ## Считает пайплайн офлайн и пишет WAV.
   ##
-  ## ВЛАДЕНИЕ — важное: пайплайн ПЕРЕХОДИТ этой функции. Движок забирает
-  ## его себе (`postGraphUpdate`) и освобождает вместе с движком
-  ## (`destroyAudioEngine`); если передать граф не удалось, освобождаем сами.
-  ##
-  ## Раньше здесь было написано «пайплайн остаётся собственностью
-  ## вызывающего» — и это было неправдой: движок освобождал его, а сцена
-  ## потом освобождала повторно (двойное освобождение; ловится только
-  ## ASan/ASan+useMalloc, а в обычной сборке портит кучу и падает через
-  ## несколько аллокаций). Поэтому вызывающий обязан «забыть» указатель:
-  ## `scene.pipeline = nil` (или `detachPipeline(scene)`) до вызова.
+  ## ВЛАДЕНИЕ (issue #402): параметр — `sink OwnedPipeline`. Пайплайн
+  ## ПЕРЕХОДИТ функции: движок забирает его себе (`postGraphUpdate`) и
+  ## освобождает вместе с движком. Если рендер отклонил пайплайн до передачи,
+  ## его освободит деструктор `OwnedPipeline`; при отказе движка —
+  ## `postGraphUpdate` освобождает его сам. Двойного освобождения быть не
+  ## может: у вызывающего после вызова владения нет.
   result.ok = false
   result.path = path
 
-  if p.isNil:
+  if owned.isEmpty:
     result.error = "пайплайн не собран"
     return
   if opts.sampleRate <= 0:
@@ -203,16 +204,10 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
   if opts.totalFrames <= 0:
     result.error = "длина рендера должна быть положительной"
     return
-  if opts.bitsPerSample notin [16, 24]:
-    result.error = "глубина — 16 или 24 бита, получено: " & $opts.bitsPerSample
+  if opts.bitsPerSample notin [16, 24, 32]:
+    result.error = "глубина — 16, 24 или 32 бита, получено: " &
+                   $opts.bitsPerSample
     return
-
-  # Пайплайн теперь наш: движок освободит его сам. Если до передачи графа
-  # что-то не сложилось — освобождаем здесь, чтобы память не текла.
-  var handedOver = false
-  defer:
-    if not handedOver:
-      destroyPipeline(p)
 
   let tempo = if opts.tempo > 1.0: opts.tempo else: 120.0
   let samplesPerTick =
@@ -225,14 +220,18 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
   defer:
     destroyAudioEngine(engine)
 
-  if not engine.postGraphUpdate(p):
+  # Владение переходит движку. При отказе `postGraphUpdate` освобождает
+  # пайплайн сам, поэтому здесь не остаётся ветки с ручным `destroyPipeline`.
+  if not engine.postGraphUpdate(move(owned)):
     result.error = "движок не принял граф"
     return
-  handedOver = true
   discard engine.postSetTempo(tempo)
   discard engine.postPlay()
+  # Граф, темп и play активируются ДО первого блока: параметры automation
+  # в цикле ниже идут через applyParamNow напрямую в пайплайн (#395).
+  flushQueuedCommands(engine)
 
-  let channels = 2
+  let channels = signal_types.MaxAudioChannels
   let blockFrames = int64(opts.blockSize)
 
   # Чанк кратен блоку: иначе `renderOffline` тратил бы на «хвост» целый
@@ -278,13 +277,15 @@ proc renderToWav*(path: string; p: ptr CompiledPipeline;
       let framesThis = int32(min(chunkFrames, remaining))
 
       # Автоматизация применяется к началу чанка: значение на границе —
-      # именно то, с которым чанк и должен звучать.
+      # именно то, с которым чанк и должен звучать. Прямо в пайплайн, без
+      # realtime-очереди: при большом числе lanes очередь переполнялась бы
+      # и команды терялись (#395).
       if opts.automation.len > 0:
         let tick = float64(done) / samplesPerTick
         for lane in opts.automation:
           if lane.points.len == 0:
             continue
-          discard engine.postSetParam(
+          discard engine.applyParamNow(
             lane.nodeId, lane.paramId, automationValueAt(lane, tick)
           )
 

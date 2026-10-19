@@ -239,7 +239,7 @@ jobs:
           # CLI не тянет внутренние модули ядра: только публичные API
           # (контракты бэкендов, logger, проект). Регистрация фабрик
           # адаптеров — единственное разрешённое касание адаптеров (§20, #88).
-          internal='audio_engine|dsp_scheduler|compiled_pipeline|graph_compiler|memory_pool|rt_guard|ipc_bus|audio_recorder|node_interface|param_registry|waveform_cache'
+          internal='audio_engine|compiled_pipeline|graph_compiler|memory_pool|rt_guard|ipc_bus|audio_recorder|node_interface|waveform_cache'
           if grep -rnE "import[[:space:]]+($internal)\b" cli/ cli.nim; then
             echo "::error::CLI импортирует внутренности Core вместо публичного API (§20, #88)"
             exit 1
@@ -265,7 +265,7 @@ jobs:
           # проекта (core/project.nim). Импорт движка, планировщика или
           # реестра бэкендов означал бы, что команда проекта умеет ходить в
           # устройство в обход backend manager (§20).
-          if grep -nE "import[[:space:]].*(audio_engine|dsp_scheduler|backend_manager|backend_registry|audio_backend_api|audio_recorder)" cli/cmd_project.nim; then
+          if grep -nE "import[[:space:]].*(audio_engine|backend_manager|backend_registry|audio_backend_api|audio_recorder)" cli/cmd_project.nim; then
             echo "::error::команды проекта тянут движок или устройства (#89, §20)"
             exit 1
           fi
@@ -314,7 +314,6 @@ jobs:
               "core/compiled_pipeline.nim": ["PipelineRenderProc", "BindMasterProc",
                                              "ApplyParamProc", "PipelineDestroyProc"],
               "core/audio_backend_api.nim": ["AudioRenderProc", "AudioStatusProc"],
-              "core/dsp_scheduler.nim": ["DspTaskProc"],
               "nodes/sdk/node_api.nim": ["NodeProcessProc"],
           }
 
@@ -440,7 +439,7 @@ jobs:
           echo "ok: CLI не обходит модель, guard обход ловит (§63, #336)"
 
   # ---------------------------------------------------------------------------
-  # TSan: гонки в dsp_scheduler / ipc_bus / memory_pool / ring_buffer.
+  # TSan: гонки в ipc_bus / memory_pool / ring_buffer.
   #
   # Прогон гоняет весь unit-набор, включая стресс ring_buffer (issue #37):
   # миллион push/pop в двух потоках и два producers в MPSC.

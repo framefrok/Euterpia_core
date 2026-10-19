@@ -135,8 +135,9 @@ proc eutHostCreate(sampleRate, blockSize: cint): pointer
     return nil
 
   # Пайплайн переходит движку: освободит его `destroyAudioEngine`.
-  if not engine.postGraphUpdate(cr.pipeline):
-    destroyPipeline(cr.pipeline)
+  # `ownPipeline` — явное принятие владения (#402); при отказе движок
+  # освобождает пайплайн сам, поэтому ручного destroy здесь больше нет.
+  if not engine.postGraphUpdate(ownPipeline(cr.pipeline)):
     eutHostDestroy(cast[pointer](host))
     return nil
 

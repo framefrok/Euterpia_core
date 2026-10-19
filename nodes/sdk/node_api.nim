@@ -133,6 +133,15 @@ type
 
   NodeResetProc* = proc(state: pointer) {.cdecl, raises: [], gcsafe.}
 
+  NodePrepareProc* = proc(state: pointer; sampleRate: float32)
+      {.cdecl, raises: [], gcsafe.}
+    ## Подготовка состояния под фактическую частоту сессии (#393).
+    ## Вызывается на ХОЛОДНОЙ стороне сразу после create (загрузка сцены,
+    ## валидация графа), до того как состояние уйдёт в audio thread. Хук
+    ## опционален (nil у нод, которым частота не важна): инструменты здесь
+    ## пересчитывают огибающие и частоты через `*InitAt`, чтобы первый же
+    ## блок в audio thread не делал reinit на горячей стороне.
+
   ## Фабрика типа ноды. Указатель на неё статичен: столько же,
   ## сколько живёт сам тип ноды в реестре.
   NodeFactory* {.bycopy.} = object
@@ -142,6 +151,7 @@ type
     setParam*: NodeSetParamProc
     getParam*: NodeGetParamProc
     reset*: NodeResetProc
+    prepare*: NodePrepareProc
 
 # ==============================================================================
 # Работа с фиксированными строками descriptor'а
@@ -151,18 +161,80 @@ type
 # скрытое владение памятью и нестабильный ABI.
 # ==============================================================================
 
+proc utf8SequenceLength(dst: openArray[char]; pos, limit: int): int =
+  ## Длина корректной UTF-8-последовательности в `dst[pos ..< limit]` или 0.
+  ##
+  ## Проверяется не только число continuation-байт, но и запрещённые
+  ## диапазоны Unicode: overlong-формы, суррогаты и кодовые точки > U+10FFFF
+  ## формально «похожи» на UTF-8, но декодер их отвергает.
+  if pos < 0 or pos >= limit:
+    return 0
+  let b0 = byte(dst[pos])
+  if b0 < 0x80'u8:
+    return 1
+
+  var need = 0
+  var b1Lo = 0x80'u8
+  var b1Hi = 0xBF'u8
+  case b0
+  of 0xC2'u8 .. 0xDF'u8:
+    need = 2
+  of 0xE0'u8:
+    need = 3
+    b1Lo = 0xA0'u8          # overlong
+  of 0xE1'u8 .. 0xEC'u8, 0xEE'u8 .. 0xEF'u8:
+    need = 3
+  of 0xED'u8:
+    need = 3
+    b1Hi = 0x9F'u8          # суррогаты U+D800..U+DFFF
+  of 0xF0'u8:
+    need = 4
+    b1Lo = 0x90'u8          # overlong
+  of 0xF1'u8 .. 0xF3'u8:
+    need = 4
+  of 0xF4'u8:
+    need = 4
+    b1Hi = 0x8F'u8          # > U+10FFFF
+  else:
+    return 0                # continuation-байт в начале или 0xC0/0xC1/0xF5+
+
+  if pos + need > limit:
+    return 0                # последовательность обрезана
+
+  let b1 = byte(dst[pos + 1])
+  if b1 < b1Lo or b1 > b1Hi:
+    return 0
+  var k = 2
+  while k < need:
+    let b = byte(dst[pos + k])
+    if (b and 0xC0'u8) != 0x80'u8:
+      return 0
+    inc k
+  need
+
 proc setFixed*[N: static[int]](dst: var array[N, char]; src: string) =
-  ## Записывает строку в фиксированный буфер.
-  ## Обрезание идёт по границе символа, чтобы не порвать многобайтовый UTF-8.
-  var i = 0
-  while i < N - 1 and i < src.len:
-    dst[i] = src[i]
-    inc i
-  # откатываемся назад, если последний записанный байт — продолжение
-  # многобайтовой последовательности (старший байт UTF-8: 11xxxxxx)
-  while i > 0 and (ord(dst[i - 1]) and 0xC0) == 0x80:
-    dec i
-  dst[i] = '\0'
+  ## Записывает строку в фиксированный буфер по границе UTF-8-символа.
+  ##
+  ## Обрезка не оставляет «висячий» lead-байт (issue #398): копирование
+  ## останавливается на последней ЦЕЛОЙ последовательности, поэтому
+  ## `readFixed` всегда возвращает валидный UTF-8. Невалидный вход тоже
+  ## обрезается на первом плохом байте, а не протекает в descriptor.
+  var copied = 0
+  while copied < N - 1 and copied < src.len:
+    dst[copied] = src[copied]
+    inc copied
+
+  var valid = 0
+  var pos = 0
+  while pos < copied:
+    let n = utf8SequenceLength(dst, pos, copied)
+    if n == 0:
+      break
+    pos += n
+    valid = pos
+
+  if N > 0:
+    dst[valid] = '\0'
 
 proc readFixed*[N: static[int]](src: array[N, char]): string =
   var i = 0

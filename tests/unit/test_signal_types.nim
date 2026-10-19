@@ -112,10 +112,54 @@ suite "signal_types":
     ev.subFrame = 0.1f
     check pushEvent(addr q, ev)
 
-    sortEvents(addr q)
+    # issue #397: порядок поддерживает сама очередь, sortEvents не нужен.
     check q.events[0].frameOffset == 2
     check q.events[1].frameOffset == 10
     check q.events[1].subFrame < q.events[2].subFrame
+
+    # Повторная сортировка идемпотентна (совместимость).
+    sortEvents(addr q)
+    check q.events[0].frameOffset == 2
+    check q.events[1].subFrame < q.events[2].subFrame
+
+  test "EventQueue: pushEvent держит порядок без sortEvents (#397)":
+    ## События добавляются в произвольном порядке и обязаны читаться
+    ## по возрастанию `frameOffset` без единого вызова `sortEvents` у
+    ## потребителя. Это и есть критерий приёмки issue #397.
+    var q: EventQueue
+    clearEvents(addr q)
+    let offsets = [100'u32, 3'u32, 64'u32, 0'u32, 37'u32, 3'u32]
+    for idx, off in offsets:
+      var ev = RealtimeEvent(kind: evNoteOn)
+      ev.frameOffset = off
+      ev.data[0] = float32(idx)   # маркер порядка вставки
+      check pushEvent(addr q, ev)
+
+    check q.count == offsets.len.int32
+    for i in 1 ..< q.count:
+      check q.events[i - 1].frameOffset <= q.events[i].frameOffset
+    # Равные кадры сохраняют порядок вставки (устойчивость).
+    check q.events[1].data[0] == 1.0f
+    check q.events[2].data[0] == 5.0f
+
+    # findEventAtFrame работает по гарантированному порядку.
+    check findEventAtFrame(addr q, 0'u32) == 0
+    check findEventAtFrame(addr q, 40'u32) == 4
+    check findEventAtFrame(addr q, 1000'u32) == -1
+
+  test "EventQueue: finalizeEvents отбрасывает хвост и сохраняет порядок (#397)":
+    var q: EventQueue
+    clearEvents(addr q)
+    for off in [200'u32, 5'u32, 127'u32, 128'u32, 1'u32]:
+      var ev = RealtimeEvent(kind: evNoteOn)
+      ev.frameOffset = off
+      discard pushEvent(addr q, ev)
+
+    check finalizeEvents(addr q, 128'u32) == 3
+    check q.count == 3
+    check q.events[0].frameOffset == 1
+    check q.events[1].frameOffset == 5
+    check q.events[2].frameOffset == 127
 
   test "EventQueue: clipEvents отбрасывает события за пределами блока":
     var q: EventQueue

@@ -53,6 +53,13 @@ type
     gvDuplicateConnection ## одна и та же связь задана дважды
     gvNegativePortIdx    ## отрицательный индекс порта
     gvMasterInvalid      ## мастер-нода не может быть мастером
+    gvUnsupportedChannels ## нода обещает больше каналов, чем умеет Core (#401)
+    gvInvalidSubgraphPort ## связь через границу субграфа не разрешилась (#403)
+    gvSubgraphDepth      ## вложенность субграфов больше предела (#404)
+    gvNodeLimit          ## после flattening слишком много нод (#404)
+    gvConnectionLimit    ## после разрешения портов слишком много связей (#404)
+    gvLatencyOverflow    ## сумма latency вышла за предел (#405)
+    gvPdcLimit           ## суммарный размер PDC-колец больше бюджета (#404)
 
   GraphVerdict* = object
     kind*: GraphVerdictKind
@@ -83,6 +90,13 @@ proc verdictName*(k: GraphVerdictKind): string =
   of gvDuplicateConnection: "duplicateConnection"
   of gvNegativePortIdx: "negativePortIdx"
   of gvMasterInvalid: "masterInvalid"
+  of gvUnsupportedChannels: "unsupportedChannels"
+  of gvInvalidSubgraphPort: "invalidSubgraphPort"
+  of gvSubgraphDepth: "subgraphDepth"
+  of gvNodeLimit: "nodeLimit"
+  of gvConnectionLimit: "connectionLimit"
+  of gvLatencyOverflow: "latencyOverflow"
+  of gvPdcLimit: "pdcLimit"
 
 proc describe*(v: GraphVerdict): string =
   ## Человекочитаемое объяснение вердикта: причина и что она означает.
@@ -121,15 +135,44 @@ proc describe*(v: GraphVerdict): string =
   of gvMasterInvalid:
     "мастер-нода " & $v.nodeId & " не может быть мастером: нет аудиовыхода " &
     "или есть исходящие связи"
+  of gvUnsupportedChannels:
+    "нода " & v.nodeType & " заявляет больше каналов, чем поддерживает " &
+    "стерео-модель Core (" & $signal_types.MaxAudioChannels & ")"
+  of gvInvalidSubgraphPort:
+    "связь через границу субграфа не разрешилась: проверьте subgraphInputs/" &
+    "subgraphOutputs и локальные id"
+  of gvSubgraphDepth:
+    "вложенность субграфов больше " & $MaxSubgraphDepth & ": разверните вручную"
+  of gvNodeLimit:
+    "после flattening больше " & $MaxFlattenedNodes &
+    " нод: граф слишком велик"
+  of gvConnectionLimit:
+    "после разрешения портов больше " & $MaxGraphConnections &
+    " связей: граф слишком велик"
+  of gvLatencyOverflow:
+    "суммарная latency цепи больше " & $MaxLatencyFrames & " кадров: " &
+    "проверьте latency нод/плагинов"
+  of gvPdcLimit:
+    "PDC требует больше " & $MaxPdcBufferSamples &
+    " сэмплов памяти: уменьшите задержки или число ветвей"
 
 proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
-                  conns: seq[GraphConnSpec]): GraphVerdict =
+                  conns: seq[GraphConnSpec];
+                  sampleRate: float32 = 48000.0f): GraphVerdict =
   ## Компилирует граф, собранный из описаний, и освобождает всё созданное.
   ##
+  ## `reg` обязан жить до возврата: верификатор различает указатели на
+  ## записи реестра (`entry`) только внутри вызова и освобождает состояния
+  ## до выхода. Выносить `entry` за пределы вызова (как поле объекта) нельзя:
+  ## seq реестра может быть освобождён раньше — ASan ловит
+  ## heap-use-after-free при выходе из процесса (#395).
   ## Проверяется ровно то, что проверяла бы загрузка проекта: тип ноды
   ## известен, состояние создаётся, связи образуют ациклический граф.
   ## Значения параметров здесь не применяются: неверное значение — это
   ## проверка данных (`param`/`project validate`), а не структуры графа.
+  ##
+  ## `sampleRate` уходит в instantiateNode, чтобы состояние получило хук
+  ## prepare под частоту сессии — ровно то же, что сделала бы загрузка (#393).
   var g: NodeGraph
   var created: seq[tuple[entry: ptr NodeTypeEntry, state: pointer]] = @[]
   var cr: CompileResult
@@ -151,9 +194,14 @@ proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
     let entry = reg.findNodeType(spec.nodeType)
     if entry.isNil:
       return GraphVerdict(kind: gvUnknownType, nodeType: spec.nodeType)
+    if entry.desc != nil and
+       entry.desc.maxChannels > signal_types.MaxAudioChannels:
+      # issue #401: стерео — это контракт рантайма, а не пожелание ноды.
+      # Отказ виден здесь, до компиляции и до рендера.
+      return GraphVerdict(kind: gvUnsupportedChannels, nodeType: spec.nodeType)
 
     var node: EditorNode
-    if not reg.instantiateNode(spec.nodeType, spec.id, node):
+    if not reg.instantiateNode(spec.nodeType, spec.id, node, sampleRate):
       return GraphVerdict(kind: gvInstantiateFailed, nodeType: spec.nodeType)
     created.add (entry, node.userData)
     g.nodes[spec.id] = node
@@ -203,6 +251,18 @@ proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
       GraphVerdict(kind: gvNegativePortIdx, nodeId: e.nodeId, portIdx: e.portIdx)
     of cekMasterInvalid:
       GraphVerdict(kind: gvMasterInvalid, nodeId: e.nodeId, portIdx: -1)
+    of cekInvalidSubgraphPort:
+      GraphVerdict(kind: gvInvalidSubgraphPort, nodeId: e.nodeId, portIdx: -1)
+    of cekSubgraphDepthExceeded:
+      GraphVerdict(kind: gvSubgraphDepth, nodeId: e.nodeId, portIdx: -1)
+    of cekNodeLimitExceeded:
+      GraphVerdict(kind: gvNodeLimit, nodeId: e.nodeId, portIdx: -1)
+    of cekConnectionLimitExceeded:
+      GraphVerdict(kind: gvConnectionLimit, nodeId: e.nodeId, portIdx: -1)
+    of cekLatencyOverflow:
+      GraphVerdict(kind: gvLatencyOverflow, nodeId: e.nodeId, portIdx: -1)
+    of cekPdcLimitExceeded:
+      GraphVerdict(kind: gvPdcLimit, nodeId: e.nodeId, portIdx: -1)
 
   verdictFor(cr.error)
 

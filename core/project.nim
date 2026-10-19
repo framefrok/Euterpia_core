@@ -1,5 +1,6 @@
 # project.nim
 import std/[algorithm, json, tables, os]
+import signal_types
 
 {.push raises: [].}
 
@@ -71,6 +72,22 @@ type
     created*: string
     modified*: string
 
+  SubgraphPortFormat* = object
+    ## Портообразующая связь субграфа (issue #403).
+    ##
+    ## Субграф — это КОНТЕЙНЕР, а не DSP-нода: у него нет processProc, а его
+    ## внешние порты должны быть отображены на порты внутренних нод. Без
+    ## такой модели flattening не мог связать внешнюю связь с внутренней.
+    ##
+    ## `localNodeId` — id ноды ВНУТРИ этого субграфа (локальное пространство),
+    ## `localPortIdx` — порт этой ноды того же вида `sigType`, что и внешний
+    ## порт. Индекс в `subgraphInputs`/`subgraphOutputs` — это номер внешнего
+    ## порта субграфа.
+    name*: string
+    localNodeId*: int
+    localPortIdx*: int
+    sigType*: int             # Ordinal of SignalType
+
   NodeFormat* = object
     id*: int
     nodeType*: string         # ID для NodeFactory (например, "fx.gain")
@@ -87,6 +104,10 @@ type
     parameters*: Table[string, float32] # Состояние для восстановления nodeData
     subgraphNodes*: seq[NodeFormat]
     subgraphConnections*: seq[ConnectionFormat]
+    subgraphInputs*: seq[SubgraphPortFormat]
+      ## Внешний вход k -> внутренняя нода/порт. Только для `isSubgraph`.
+    subgraphOutputs*: seq[SubgraphPortFormat]
+      ## Внутренняя нода/порт -> внешний выход k. Только для `isSubgraph`.
 
   ConnectionFormat* = object
     srcNodeId*: int
@@ -257,6 +278,22 @@ proc toJson*(p: ProjectFormat): JsonNode =
       })
     result["subgraphConnections"] = subConns
 
+    var subIns = newJArray()
+    for port in n.subgraphInputs:
+      subIns.add(%*{
+        "name": port.name, "localNodeId": port.localNodeId,
+        "localPortIdx": port.localPortIdx, "sigType": port.sigType
+      })
+    result["subgraphInputs"] = subIns
+
+    var subOuts = newJArray()
+    for port in n.subgraphOutputs:
+      subOuts.add(%*{
+        "name": port.name, "localNodeId": port.localNodeId,
+        "localPortIdx": port.localPortIdx, "sigType": port.sigType
+      })
+    result["subgraphOutputs"] = subOuts
+
   for node in p.graph.nodes:
     nodesJson.add(nodeToJson(node))
   graphJson["nodes"] = nodesJson
@@ -364,6 +401,22 @@ proc safeInt(n: JsonNode, key: string, def: int = 0): int =
   let val = n{key}
   if val != nil and val.kind == JInt: int(val.num) else: def
 
+proc latencyValue(n: JsonNode; key: string): uint32 =
+  ## Latency из файла с насыщением на пределе (issue #405).
+  ##
+  ## `uint32(-1)` или гигантское число из повреждённого проекта раньше
+  ## заворачивались в «маленькую» задержку. Теперь любое значение вне
+  ## `0 .. MaxLatencyFrames` превращается в предел, и компилятор честно
+  ## отказывает `cekLatencyOverflow`, а не компенсирует мусор.
+  let value = safeInt(n, key)
+  if value == 0:
+    return 0'u32
+  if value < 0 or uint64(value) > uint64(MaxLatencyFrames):
+    # Маркер «заведомо больше предела»: компилятор вернёт
+    # `cekLatencyOverflow`, а не примет мусор за валидную задержку.
+    return MaxLatencyFrames + 1'u32
+  uint32(value)
+
 proc safeFloat(n: JsonNode, key: string, def: float = 0.0): float =
   let val = n{key}
   if val != nil:
@@ -413,8 +466,8 @@ proc parseNode(n: JsonNode, err: var string): NodeFormat =
   result.ctrlOutCount = safeInt(n, "ctrlOutCount")
   result.eventInCount = safeInt(n, "eventInCount")
   result.eventOutCount = safeInt(n, "eventOutCount")
-  result.latencyReported = uint32(narrowInt(n, "latencyReported", 0, int64(high(uint32)), 0, err))
-  result.latencyIntrinsic = uint32(narrowInt(n, "latencyIntrinsic", 0, int64(high(uint32)), 0, err))
+  result.latencyReported = latencyValue(n, "latencyReported")
+  result.latencyIntrinsic = latencyValue(n, "latencyIntrinsic")
   result.isSubgraph = safeBool(n, "isSubgraph")
   
   let paramsNode = n{"parameters"}
@@ -437,6 +490,28 @@ proc parseNode(n: JsonNode, err: var string): NodeFormat =
         srcNodeId: safeInt(sc, "srcNodeId"), srcPortIdx: safeInt(sc, "srcPortIdx"),
         dstNodeId: safeInt(sc, "dstNodeId"), dstPortIdx: safeInt(sc, "dstPortIdx"),
         sigType: safeInt(sc, "sigType")
+      ))
+
+  let subInsNode = n{"subgraphInputs"}
+  if subInsNode != nil and subInsNode.kind == JArray:
+    for port in subInsNode:
+      if not isJObject(port): continue
+      result.subgraphInputs.add(SubgraphPortFormat(
+        name: safeStr(port, "name"),
+        localNodeId: safeInt(port, "localNodeId"),
+        localPortIdx: safeInt(port, "localPortIdx"),
+        sigType: safeInt(port, "sigType")
+      ))
+
+  let subOutsNode = n{"subgraphOutputs"}
+  if subOutsNode != nil and subOutsNode.kind == JArray:
+    for port in subOutsNode:
+      if not isJObject(port): continue
+      result.subgraphOutputs.add(SubgraphPortFormat(
+        name: safeStr(port, "name"),
+        localNodeId: safeInt(port, "localNodeId"),
+        localPortIdx: safeInt(port, "localPortIdx"),
+        sigType: safeInt(port, "sigType")
       ))
 
 # ============================================================================

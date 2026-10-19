@@ -30,6 +30,7 @@
 import std/[algorithm, json, os, strutils, tables, times]
 
 import project
+import signal_types
 import handles
 import context
 import checks
@@ -947,6 +948,34 @@ proc validateMetadata(meta: MetadataInfo): Section =
               "denominator": meta.tsDenominator,
               "problems": %problems})
 
+type
+  PortCounts = object
+    ## Счётчики портов ноды по namespace. audio/control/event — ТРИ разных
+    ## пространства индексов от 0 (issue #399), поэтому сумма счётчиков для
+    ## проверки порта непригодна.
+    audioIn, audioOut: int
+    ctrlIn, ctrlOut: int
+    eventIn, eventOut: int
+
+proc portCapacity(counts: PortCounts; sigType: int; isOutput: bool): int =
+  ## Сколько портов этого вида у ноды. -1 — вид сигнала вне SignalType.
+  case sigType
+  of ord(sigAudio):
+    if isOutput: counts.audioOut else: counts.audioIn
+  of ord(sigControl):
+    if isOutput: counts.ctrlOut else: counts.ctrlIn
+  of ord(sigEvent):
+    if isOutput: counts.eventOut else: counts.eventIn
+  else:
+    -1
+
+proc signalName(sigType: int): string =
+  case sigType
+  of ord(sigAudio): "audio"
+  of ord(sigControl): "control"
+  of ord(sigEvent): "event"
+  else: "sigType=" & $sigType
+
 proc validateGraph(doc: Document): Section =
   ## Секция «graph». Провал — только однозначная несогласованность: повтор
   ## id или связь с несуществующей нодой. Диапазон портов и самосоединение —
@@ -960,14 +989,16 @@ proc validateGraph(doc: Document): Section =
 
   var seen: seq[int] = @[]
   var duplicates: seq[int] = @[]
-  var outPorts = initTable[int, int]()
-  var inPorts = initTable[int, int]()
+  var nodePorts = initTable[int, PortCounts]()
   for node in nodes:
     if node.id in seen and node.id notin duplicates:
       duplicates.add node.id
     seen.add node.id
-    outPorts[node.id] = node.audioOut + node.ctrlOut + node.eventOut
-    inPorts[node.id] = node.audioIn + node.ctrlIn + node.eventIn
+    nodePorts[node.id] = PortCounts(
+      audioIn: node.audioIn, audioOut: node.audioOut,
+      ctrlIn: node.ctrlIn, ctrlOut: node.ctrlOut,
+      eventIn: node.eventIn, eventOut: node.eventOut
+    )
 
   var duplicateLines: seq[string] = @["нод: " & $nodes.len]
   if duplicates.len > 0:
@@ -982,39 +1013,58 @@ proc validateGraph(doc: Document): Section =
   let conns = doc.queryConnections()
   var dangling: seq[string] = @[]
   var outOfRange: seq[string] = @[]
+  var badSignal: seq[string] = @[]
   var selfLoops: seq[string] = @[]
   for conn in conns:
-    if conn.srcNodeId notin outPorts or conn.dstNodeId notin outPorts:
+    if conn.srcNodeId notin nodePorts or conn.dstNodeId notin nodePorts:
       dangling.add $conn.srcNodeId & "→" & $conn.dstNodeId
       continue
-    if conn.srcPortIdx < 0 or conn.srcPortIdx >= outPorts[conn.srcNodeId]:
-      outOfRange.add $conn.srcNodeId & ":" & $conn.srcPortIdx
-    if conn.dstPortIdx < 0 or conn.dstPortIdx >= inPorts[conn.dstNodeId]:
-      outOfRange.add $conn.dstNodeId & ":" & $conn.dstPortIdx
+
+    let srcCapacity = portCapacity(nodePorts[conn.srcNodeId], conn.sigType,
+                                   isOutput = true)
+    let dstCapacity = portCapacity(nodePorts[conn.dstNodeId], conn.sigType,
+                                   isOutput = false)
+    if srcCapacity < 0 or dstCapacity < 0:
+      badSignal.add $conn.srcNodeId & "→" & $conn.dstNodeId &
+                   " (" & signalName(conn.sigType) & ")"
+    else:
+      if conn.srcPortIdx < 0 or conn.srcPortIdx >= srcCapacity:
+        outOfRange.add $conn.srcNodeId & ":" & $conn.srcPortIdx &
+                       " (" & signalName(conn.sigType) & " out, всего " &
+                       $srcCapacity & ")"
+      if conn.dstPortIdx < 0 or conn.dstPortIdx >= dstCapacity:
+        outOfRange.add $conn.dstNodeId & ":" & $conn.dstPortIdx &
+                       " (" & signalName(conn.sigType) & " in, всего " &
+                       $dstCapacity & ")"
     if conn.srcNodeId == conn.dstNodeId and conn.srcPortIdx == conn.dstPortIdx:
       selfLoops.add $conn.srcNodeId & ":" & $conn.srcPortIdx
 
   var connLines: seq[string] = @["связей: " & $conns.len]
   for item in dangling:
     connLines.add "нет такой ноды: " & item
+  for item in badSignal:
+    connLines.add "неизвестный вид сигнала: " & item
   for item in outOfRange:
-    connLines.add "порт вне диапазона: " & item
+    connLines.add "порт вне диапазона своего вида: " & item
   for item in selfLoops:
     connLines.add "самосоединение: " & item
   result.checks.add mkCheck("connections",
-    "связи ссылаются на существующие ноды и порты",
-    (if dangling.len > 0: csFail
-     elif outOfRange.len > 0 or selfLoops.len > 0: csWarn
+    "связи ссылаются на существующие ноды и порты своего вида сигнала",
+    (if dangling.len > 0 or badSignal.len > 0 or outOfRange.len > 0:
+       csFail
      else: csOk),
     lines = connLines,
     advice = (if dangling.len > 0:
                 "связь с несуществующей нодой не скомпилируется: проверьте граф (#90)"
-              elif outOfRange.len > 0 or selfLoops.len > 0:
-                "проверьте порты: в старых файлах счётчиков портов могло не быть"
+              elif badSignal.len > 0:
+                "sigType должен быть audio/control/event: проверьте файл проекта"
+              elif outOfRange.len > 0:
+                "audio/control/event — разные namespace: индекс порта не может " &
+                "выходить за счётчик СВОЕГО вида (#399)"
               else: ""),
     body = %*{"connections": conns.len,
-              "dangling": %dangling, "outOfRange": %outOfRange,
-              "selfLoops": %selfLoops})
+              "dangling": %dangling, "badSignal": %badSignal,
+              "outOfRange": %outOfRange, "selfLoops": %selfLoops})
 
 proc validateSequencer(doc: Document): Section =
   ## Секция «sequencer»: треки, клипы, ноты, автоматизация (issue #373 —
