@@ -1409,7 +1409,13 @@ proc runGraphCheck(ctx: var Ctx; scan: ArgScan): Report =
                 of gvUnknownType, gvInstantiateFailed:
                   "euterpia node types — какие типы доступны этой сборке"
                 of gvAllocationFailed:
-                  "граф слишком велик для этой сборки: разбейте его на подграфы"),
+                  "граф слишком велик для этой сборки: разбейте его на подграфы"
+                of gvUnsupportedChannels:
+                  "Core v0.x — стерео: уберите ноду с maxChannels > 2 или " &
+                  "дождитесь многоканальной линии (#200)"
+                of gvInvalidSubgraphPort:
+                  "проверьте subgraphInputs/subgraphOutputs и локальные id " &
+                  "внутри субграфа"),
       body = compileFacts)
   sections.add Section(id: "compile", title: "graph: компиляция",
                        checks: @[compileCheck])

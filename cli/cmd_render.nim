@@ -543,11 +543,11 @@ proc runRender*(ctx: var Ctx; args: seq[string]): Report =
     opts.onProgress = printer.callback
 
   # Пайплайн переходит рендеру: движок внутри `renderToWav` забирает граф и
-  # освобождает его вместе с движком. Иначе `destroyScene` (defer выше)
-  # освободил бы тот же пайплайн второй раз — двойное освобождение.
-  let pipeline = detachPipeline(scene)
+  # освобождает его вместе с движком. `detachPipeline` отдаёт move-only
+  # `OwnedPipeline` (#402), поэтому повторно освободить его невозможно.
+  var pipeline = detachPipeline(scene)
 
-  let rendered = renderToWav(scan.outPath, pipeline, opts)
+  let rendered = renderToWav(scan.outPath, move(pipeline), opts)
   if not rendered.ok:
     # Недописанная строка индикатора осталась бы висеть поверх отчёта —
     # стираем её перед выходом с ошибкой.

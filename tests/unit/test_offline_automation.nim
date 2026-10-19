@@ -17,6 +17,7 @@
 
 import std/[unittest, tables]
 import graph_compiler
+import compiled_pipeline
 import sdk/node_api
 import sdk/node_registry
 import sdk/pipeline_builder
@@ -61,7 +62,7 @@ proc mkGainRig(): GainRig =
 
   result.engine = createAudioEngine(EngineSr, EngineBlock)
   doAssert result.engine != nil
-  doAssert result.engine.postGraphUpdate(cr.pipeline)
+  doAssert result.engine.postGraphUpdate(ownPipeline(cr.pipeline))
 
 proc freeRig(rig: var GainRig) =
   # Порядок обязателен: движок сначала освобождает пайплайн (и биндинг),

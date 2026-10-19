@@ -42,6 +42,8 @@ type
     gvAllocationFailed   ## не хватило памяти на пайплайн
     gvUnknownType        ## тип ноды не зарегистрирован
     gvInstantiateFailed  ## состояние ноды не создалось (или повтор id)
+    gvUnsupportedChannels ## нода обещает больше каналов, чем умеет Core (#401)
+    gvInvalidSubgraphPort ## связь через границу субграфа не разрешилась (#403)
 
   GraphVerdict* = object
     kind*: GraphVerdictKind
@@ -60,6 +62,8 @@ proc verdictName*(k: GraphVerdictKind): string =
   of gvAllocationFailed: "allocationFailed"
   of gvUnknownType: "unknownType"
   of gvInstantiateFailed: "instantiateFailed"
+  of gvUnsupportedChannels: "unsupportedChannels"
+  of gvInvalidSubgraphPort: "invalidSubgraphPort"
 
 proc describe*(v: GraphVerdict): string =
   ## Человекочитаемое объяснение вердикта: причина и что она означает.
@@ -76,6 +80,12 @@ proc describe*(v: GraphVerdict): string =
     "тип ноды не зарегистрирован: " & v.nodeType
   of gvInstantiateFailed:
     "нода " & v.nodeType & " не создалась (повтор id или отказ фабрики)"
+  of gvUnsupportedChannels:
+    "нода " & v.nodeType & " заявляет больше каналов, чем поддерживает " &
+    "стерео-модель Core (" & $signal_types.MaxAudioChannels & ")"
+  of gvInvalidSubgraphPort:
+    "связь через границу субграфа не разрешилась: проверьте subgraphInputs/" &
+    "subgraphOutputs и локальные id"
 
 proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
                   conns: seq[GraphConnSpec];
@@ -115,6 +125,11 @@ proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
     let entry = reg.findNodeType(spec.nodeType)
     if entry.isNil:
       return GraphVerdict(kind: gvUnknownType, nodeType: spec.nodeType)
+    if entry.desc != nil and
+       entry.desc.maxChannels > signal_types.MaxAudioChannels:
+      # issue #401: стерео — это контракт рантайма, а не пожелание ноды.
+      # Отказ виден здесь, до компиляции и до рендера.
+      return GraphVerdict(kind: gvUnsupportedChannels, nodeType: spec.nodeType)
 
     var node: EditorNode
     if not reg.instantiateNode(spec.nodeType, spec.id, node, sampleRate):
@@ -144,5 +159,6 @@ proc verifyGraph*(reg: NodeRegistry; nodes: seq[GraphNodeSpec];
   of cekCycleDetected: GraphVerdict(kind: gvCycle)
   of cekPdcCycleDetected: GraphVerdict(kind: gvPdcCycle)
   of cekAllocationFailed: GraphVerdict(kind: gvAllocationFailed)
+  of cekInvalidSubgraphPort: GraphVerdict(kind: gvInvalidSubgraphPort)
 
 {.pop.}

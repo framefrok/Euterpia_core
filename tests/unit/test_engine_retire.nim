@@ -59,14 +59,14 @@ suite "audio_engine: утилизация пайплайнов (#73, #385)":
 
     for i in 0 ..< attempts:
       let p = mkPipeline()
-      if engine.postGraphUpdate(p):
+      if engine.postGraphUpdate(ownPipeline(p)):
         inc accepted
         # Применяем команду: один блок. pollReclamation НЕ зовём.
         engine.renderBlock(nil, 0'i32, pout)
       else:
         inc rejected
-        # Публикация не состоялась — владелец освобождает пайплайн сам.
-        destroyPipeline(p)
+        # issue #402: при отказе движок освобождает пайплайн сам —
+        # повторно его освобождать нельзя.
 
     # Порог достигнут: часть публикаций отклонена (это и есть backpressure).
     check rejected > 0

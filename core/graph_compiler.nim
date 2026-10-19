@@ -20,6 +20,15 @@ type
     intrinsic*: uint32     
     compensation*: uint32  
 
+  SubgraphPort* = object
+    ## Отображение внешнего порта субграфа на порт внутренней ноды
+    ## (issue #403). `localNodeId`/`localPortIdx` живут в пространстве
+    ## имён ДАННОГО субграфа, а не в глобальном.
+    name*: string
+    localNodeId*: int
+    localPortIdx*: int
+    sigType*: SignalType
+
   EditorNode* = object
     id*: int               
     name*: string
@@ -33,6 +42,8 @@ type
     isSubgraph*: bool
     subgraphNodes*: seq[EditorNode]
     subgraphConnections*: seq[EditorConnection]
+    subgraphInputs*: seq[SubgraphPort]
+    subgraphOutputs*: seq[SubgraphPort]
 
   NodeGraph* = object
     nodes*: Table[int, EditorNode]
@@ -43,6 +54,10 @@ type
     cekCycleDetected
     cekPdcCycleDetected
     cekAllocationFailed
+    cekInvalidSubgraphPort
+      ## Связь через границу субграфа не разрешилась: нет объявленного порта,
+      ## порт указывает на несуществующую ноду или вид сигнала не совпал
+      ## (issue #403). Молча выбросить связь нельзя — это тихая потеря звука.
 
   CompileResult* = object
     case success*: bool
@@ -50,6 +65,16 @@ type
       pipeline*: ptr CompiledPipeline
     of false:
       error*: CompileErrorKind
+
+proc takePipeline*(cr: var CompileResult): OwnedPipeline =
+  ## Забрать пайплайн из результата компиляции во владеющую ручку (issue #402).
+  ##
+  ## После вызова `cr.pipeline == nil`: владелец один — возвращённый
+  ## `OwnedPipeline`. Так результат компиляции не может быть освобождён
+  ## дважды — сценой и движком.
+  if cr.success:
+    result = ownPipeline(cr.pipeline)
+    cr.pipeline = nil
 
 # ============================================================================
 # COMPILER STATE & HELPERS
@@ -174,59 +199,196 @@ proc processDelayComp*(ctx: ptr NodeProcessContext,
         let idx = if planar: ch * stride + i else: i * int(channels) + ch
         outBuf.data[idx] = inBuf.data[idx]
 # ============================================================================
-# 1. FLATTENING 
+# 1. FLATTENING
 # ============================================================================
-proc flattenNode(node: EditorNode,
-                 parentId: int,
-                 allocator: var IdAllocator,
-                 idRemap: var Table[int, int],
-                 outNodes: var Table[int, EditorNode],
-                 outConnections: var seq[EditorConnection]) =
-  let safeId = allocator.nextId()
-  idRemap[node.id] = safeId
-  
-  var newNode = node
-  newNode.id = safeId
-  newNode.isSubgraph = false
-  newNode.subgraphNodes = @[]
-  newNode.subgraphConnections = @[]
-  
-  outNodes[safeId] = newNode
+#
+# Issue #403: раньше весь граф использовал ОДНУ таблицу `idRemap`, ключом в
+# которой был локальный id ноды. Два вложенных субграфа с одинаковыми
+# локальными id затирали друг друга, а `parentId` вообще не участвовал в
+# пространстве имён. Полноценной модели портов субграфа тоже не было:
+# внешняя связь указывала на контейнер, а не на внутреннюю ноду.
+#
+# Теперь:
+#   * ключ пространства имён — `(scopeId, localId)`, где `scopeId` — это
+#     глобальный id КОНТЕЙНЕРА (0 — корень графа). Путь вложенности входит в
+#     ключ, поэтому одинаковые локальные id в разных субграфах не collide;
+#   * субграф — контейнер, а не DSP-нода: в плоский граф попадают только
+#     листья, а его внешние порты отображаются на внутренние через
+#     `subgraphInputs`/`subgraphOutputs`;
+#   * связь через границу разрешается рекурсивно (вложенный субграф может
+#     пробрасывать порт дальше), а неразрешимая связь — ошибка компиляции
+#     `cekInvalidSubgraphPort`, а не тихо выброшенная связь.
 
-  if node.isSubgraph:
-    for subNode in node.subgraphNodes:
-      flattenNode(subNode, node.id, allocator, idRemap, outNodes, outConnections)
-    
-    for subConn in node.subgraphConnections:
-      outConnections.add(EditorConnection(
-        srcNodeId: idRemap.getOrDefault(subConn.srcNodeId, subConn.srcNodeId),
-        srcPortIdx: subConn.srcPortIdx,
-        dstNodeId: idRemap.getOrDefault(subConn.dstNodeId, subConn.dstNodeId),
-        dstPortIdx: subConn.dstPortIdx,
-        sigType: subConn.sigType
-      ))
+type
+  ScopeKey = tuple[scopeId: int, localId: int]
+  ResolvedEndpoint = tuple[globalId: int, portIdx: int, ok: bool]
 
-proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator): NodeGraph =
+proc findLocalNode(nodes: seq[EditorNode]; id: int; node: var EditorNode): bool =
+  for candidate in nodes:
+    if candidate.id == id:
+      node = candidate
+      return true
+  false
+
+proc mapSubgraphPort(container: EditorNode; portIdx: int; isOutput: bool;
+                     sigType: SignalType; port: var SubgraphPort): bool =
+  ## Внешний порт контейнера -> внутренняя нода/порт.
+  let ports =
+    if isOutput: container.subgraphOutputs else: container.subgraphInputs
+  if portIdx < 0 or portIdx >= ports.len:
+    return false
+  let candidate = ports[portIdx]
+  # Вид сигнала — часть контракта порта: audio-связь не может «войти» в
+  # event-порт субграфа и наоборот.
+  if candidate.sigType != sigType:
+    return false
+  port = candidate
+  true
+
+proc resolveEndpoint(
+  scope: seq[EditorNode];
+  scopeId: int;
+  localId, portIdx: int;
+  isOutput: bool;
+  sigType: SignalType;
+  idRemap: Table[ScopeKey, int];
+  scopeIds: Table[ScopeKey, int];
+  error: var CompileErrorKind
+): ResolvedEndpoint =
+  ## Разрешить конец связи в глобальный id листа, проходя порты субграфов.
+  result = (0, 0, false)
+  var node: EditorNode
+  if not findLocalNode(scope, localId, node):
+    error = cekInvalidSubgraphPort
+    return
+
+  let key = (scopeId, localId)
+
+  if not node.isSubgraph:
+    if portIdx < 0 or not idRemap.hasKey(key):
+      error = cekInvalidSubgraphPort
+      return
+    result = (idRemap.getOrDefault(key, 0), portIdx, true)
+    return
+
+  var port: SubgraphPort
+  if not mapSubgraphPort(node, portIdx, isOutput, sigType, port):
+    error = cekInvalidSubgraphPort
+    return
+
+  let childScope = scopeIds.getOrDefault(key, -1)
+  if childScope < 0:
+    error = cekInvalidSubgraphPort
+    return
+
+  result = resolveEndpoint(node.subgraphNodes, childScope, port.localNodeId,
+                           port.localPortIdx, isOutput, sigType,
+                           idRemap, scopeIds, error)
+
+proc flattenContainer(
+  container: EditorNode;
+  scopeId: int;
+  allocator: var IdAllocator;
+  idRemap: var Table[ScopeKey, int];
+  scopeIds: var Table[ScopeKey, int];
+  outNodes: var Table[int, EditorNode];
+  outConnections: var seq[EditorConnection];
+  error: var CompileErrorKind
+) =
+  ## Развернуть один контейнер: его листья — в `outNodes`, внутренние связи —
+  ## в `outConnections`. Сам контейнер шагом пайплайна не становится.
+  if error != cekNone:
+    return
+
+  var seen = initTable[int, bool]()
+  for child in container.subgraphNodes:
+    if seen.hasKey(child.id):
+      # Два ребёнка с одним локальным id делают выбор состояния
+      # неоднозначным: это ошибка модели, а не «последний победил».
+      error = cekInvalidSubgraphPort
+      return
+    seen[child.id] = true
+
+  for child in container.subgraphNodes:
+    let key = (scopeId, child.id)
+    if child.isSubgraph:
+      let childScope = allocator.nextId()
+      scopeIds[key] = childScope
+      flattenContainer(child, childScope, allocator, idRemap, scopeIds,
+                       outNodes, outConnections, error)
+      if error != cekNone:
+        return
+    else:
+      let safeId = allocator.nextId()
+      idRemap[key] = safeId
+      var leaf = child
+      leaf.id = safeId
+      leaf.isSubgraph = false
+      leaf.subgraphNodes = @[]
+      leaf.subgraphConnections = @[]
+      leaf.subgraphInputs = @[]
+      leaf.subgraphOutputs = @[]
+      outNodes[safeId] = leaf
+
+  for subConn in container.subgraphConnections:
+    let src = resolveEndpoint(container.subgraphNodes, scopeId,
+                              subConn.srcNodeId, subConn.srcPortIdx,
+                              isOutput = true, sigType = subConn.sigType,
+                              idRemap = idRemap, scopeIds = scopeIds,
+                              error = error)
+    if not src.ok:
+      return
+    let dst = resolveEndpoint(container.subgraphNodes, scopeId,
+                              subConn.dstNodeId, subConn.dstPortIdx,
+                              isOutput = false, sigType = subConn.sigType,
+                              idRemap = idRemap, scopeIds = scopeIds,
+                              error = error)
+    if not dst.ok:
+      return
+    outConnections.add(EditorConnection(
+      srcNodeId: src.globalId,
+      srcPortIdx: src.portIdx,
+      dstNodeId: dst.globalId,
+      dstPortIdx: dst.portIdx,
+      sigType: subConn.sigType
+    ))
+
+proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator;
+                   error: var CompileErrorKind): NodeGraph =
+  ## Плоский граф: только листья, связи разрешены через порты субграфов.
+  ## `error` != cekNone означает, что модель субграфов некорректна; результат
+  ## в этом случае частичный и компилировать его нельзя.
+  error = cekNone
   result.nodes = initTable[int, EditorNode]()
   result.connections = @[]
-  
-  var idRemap = initTable[int, int]()
 
-  for id, node in g.nodes:
-    flattenNode(node, 0, allocator, idRemap, result.nodes, result.connections)
+  var root: EditorNode
+  root.id = 0
+  root.isSubgraph = true
+  for _, node in g.nodes:
+    root.subgraphNodes.add node
+  root.subgraphConnections = g.connections
 
-  for c in g.connections:
-    result.connections.add(EditorConnection(
-      srcNodeId: idRemap.getOrDefault(c.srcNodeId, c.srcNodeId),
-      srcPortIdx: c.srcPortIdx,
-      dstNodeId: idRemap.getOrDefault(c.dstNodeId, c.dstNodeId),
-      dstPortIdx: c.dstPortIdx,
-      sigType: c.sigType
-    ))
+  var idRemap = initTable[ScopeKey, int]()
+  var scopeIds = initTable[ScopeKey, int]()
+
+  flattenContainer(root, 0, allocator, idRemap, scopeIds,
+                   result.nodes, result.connections, error)
+
+proc flattenGraph*(g: NodeGraph, allocator: var IdAllocator): NodeGraph =
+  ## Совместимая форма без диагностики: ошибки модели субграфов видны только
+  ## вызывающему, который передал `error`.
+  var error = cekNone
+  flattenGraph(g, allocator, error)
 
 proc flattenGraph*(g: NodeGraph, allocator: ptr IdAllocator): NodeGraph =
   if allocator != nil:
     result = flattenGraph(g, allocator[])
+
+proc flattenGraph*(g: NodeGraph, allocator: ptr IdAllocator;
+                   error: var CompileErrorKind): NodeGraph =
+  if allocator != nil:
+    result = flattenGraph(g, allocator[], error)
 
 # ============================================================================
 # 2. TOPOLOGICAL SORT 
@@ -416,8 +578,13 @@ proc initGraphCompiler*(): GraphCompiler =
 
 proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   var compiler = initGraphCompiler()
-  
-  var g = flattenGraph(srcGraph, compiler.allocator)
+
+  var flattenError = cekNone
+  var g = flattenGraph(srcGraph, compiler.allocator, flattenError)
+  if flattenError != cekNone:
+    # Модель субграфов некорректна: компилировать частичный граф нельзя.
+    return CompileResult(success: false, error: flattenError)
+
   var adj = initAdjacencyList(g)
   
   var order: seq[int]
@@ -482,12 +649,13 @@ proc compileGraph*(srcGraph: NodeGraph): CompileResult =
   # с чем было соединить. Теперь память под сэмплы выделяется ровно
   # один раз, на холодной стороне, и раздаётся буферам пула.
   #
-  # Формат — planar stereo (channels = 2, stride = arenaFrames).
-  # Planar выбран потому, что DSP-ядра обрабатывают каналы независимо:
-  # так циклы в C получаются линейными, а не шагающими через stride.
-  # Ноды, ожидающие interleaved, определяют раскладку по stride/channels.
+  # Формат — planar stereo (issue #401: ширина одна на всё ядро —
+  # `MaxAudioChannels`). Planar выбран потому, что DSP-ядра обрабатывают
+  # каналы независимо: так циклы в C получаются линейными, а не шагающими
+  # через stride. Ноды, ожидающие interleaved, определяют раскладку по
+  # stride/channels.
   let arenaFrames = int32(signal_types.MaxBlockSize)
-  let arenaChannels = 2
+  let arenaChannels = signal_types.MaxAudioChannels
   let samplesPerBuffer = int(arenaFrames) * arenaChannels
 
   p.arenaFrames = arenaFrames

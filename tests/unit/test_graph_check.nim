@@ -4,13 +4,14 @@
 # (issue #90). Проверяются вердикты, а не внутренности: CLI печатает именно
 # их, поэтому контракт — это вид вердикта и отсутствие утечек после возврата.
 
-import std/unittest
+import std/[unittest, tables]
 import signal_types
 import node_interface
 import graph_compiler
 import sdk/node_api
 import sdk/node_registry
 import sdk/graph_check
+import sdk/pipeline_builder
 import builtin/builtin_registry
 
 proc registry(): NodeRegistry =
@@ -166,4 +167,57 @@ suite "SDK: prepare под частоту сессии (#393)":
     check reg.instantiateNode("euterpia.gain", 1, node, 44100.0f)
     check prepCalls == 0
     destroyNodeState(reg.findNodeType("euterpia.gain"), node.userData)
+
+# =============================================================================
+# #401: стерео-модель — контракт рантайма, а не обещание ноды
+# =============================================================================
+
+suite "SDK: модель каналов (#401)":
+  test "все встроенные ноды укладываются в MaxAudioChannels":
+    var reg = registry()
+    for entry in reg:
+      check channelsSupported(entry.desc)
+
+  test "нода с maxChannels > 2 отвергается с вердиктом unsupportedChannels":
+    ensurePrepProbe()
+    var wideDesc = NodeDesc(
+      id: fixedId("test.wide"),
+      name: fixedName("Wide"),
+      category: fixedName("test"),
+      audioOutCount: 1,
+      maxChannels: signal_types.MaxAudioChannels + 2
+    )
+    var reg = initNodeRegistry()
+    check reg.registerNodeType(addr wideDesc, addr prepProbeFactory)
+
+    let verdict = verifyGraph(reg, @[GraphNodeSpec(id: 1,
+                                                   nodeType: "test.wide")],
+                              @[])
+    check verdict.kind == gvUnsupportedChannels
+    check verdict.nodeType == "test.wide"
+    check verdictName(gvUnsupportedChannels) == "unsupportedChannels"
+    check describe(verdict).len > 0
+
+  test "validateChannelModel называет виновника и не трогает корректный граф":
+    ensurePrepProbe()
+    var wideDesc = NodeDesc(
+      id: fixedId("test.wide2"),
+      name: fixedName("Wide2"),
+      category: fixedName("test"),
+      audioOutCount: 1,
+      maxChannels: signal_types.MaxAudioChannels + 1
+    )
+    var reg = initNodeRegistry()
+    check reg.registerNodeType(addr wideDesc, addr prepProbeFactory)
+
+    var g: NodeGraph
+    g.nodes = initTable[int, EditorNode]()
+    g.nodes[1] = EditorNode(id: 1, nodeType: "test.wide2")
+    var offender = ""
+    check not validateChannelModel(reg, g, offender)
+    check offender == "test.wide2"
+
+    g.nodes[1] = EditorNode(id: 1, nodeType: "euterpia.gain")
+    check validateChannelModel(reg, g, offender)
+    check offender.len == 0
 

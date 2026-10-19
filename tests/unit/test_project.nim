@@ -13,6 +13,7 @@
 
 import std/[unittest, os, tables]
 import project
+import signal_types
 
 proc makeProject(): ProjectFormat =
   result.format = ProjectFormatName
@@ -307,4 +308,53 @@ suite "project: ошибки":
 
     check p.sequencer.automationLanes.len == 1
     check p.sequencer.automationLanes[0].points.len == 0
+
+
+# =============================================================================
+# #403: порты субграфа переживают save/load
+# =============================================================================
+
+suite "project: порты субграфа (#403)":
+  test "subgraphInputs/subgraphOutputs сохраняются и читаются":
+    let path = getTempDir() / "euterpia_proj_subgraph.json"
+    var original = makeProject()
+
+    var sub = NodeFormat(
+      id: 10, nodeType: "core.subgraph", name: "Chain",
+      isSubgraph: true, audioInCount: 1, audioOutCount: 1
+    )
+    sub.subgraphNodes = @[
+      NodeFormat(id: 100, nodeType: "fx.gain", name: "in"),
+      NodeFormat(id: 101, nodeType: "fx.gain", name: "out")
+    ]
+    sub.subgraphInputs = @[
+      SubgraphPortFormat(name: "in", localNodeId: 100, localPortIdx: 0,
+                         sigType: ord(sigAudio))
+    ]
+    sub.subgraphOutputs = @[
+      SubgraphPortFormat(name: "out", localNodeId: 101, localPortIdx: 0,
+                         sigType: ord(sigAudio))
+    ]
+    original.graph.nodes.add sub
+
+    let saved = saveProject(original, path)
+    check saved.success
+    defer: removeFile(path)
+
+    let loaded = loadProject(path)
+    check loaded.success
+
+    var found = false
+    for node in loaded.value.graph.nodes:
+      if node.id == 10:
+        found = true
+        check node.isSubgraph
+        check node.subgraphNodes.len == 2
+        check node.subgraphInputs.len == 1
+        check node.subgraphInputs[0].localNodeId == 100
+        check node.subgraphInputs[0].localPortIdx == 0
+        check node.subgraphInputs[0].sigType == ord(sigAudio)
+        check node.subgraphOutputs.len == 1
+        check node.subgraphOutputs[0].localNodeId == 101
+    check found
 

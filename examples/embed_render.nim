@@ -80,7 +80,7 @@ proc buildHostGraph(g: var HostGraph) =
   doAssert g.reg.instantiateNode("euterpia.gain", 2, g.gain)
   doAssert g.reg.instantiateNode("euterpia.mix", 3, g.mix)
 
-proc compileHostGraph(g: var HostGraph): ptr CompiledPipeline =
+proc compileHostGraph(g: var HostGraph): OwnedPipeline =
   ## Компиляция: граф связей → шаги пайплайна + привязка мастера.
   ## `3` — id ноды, чей выход идёт в аудиодрайвер.
   var graph: NodeGraph
@@ -101,7 +101,8 @@ proc compileHostGraph(g: var HostGraph): ptr CompiledPipeline =
   doAssert buildPipeline(g.reg, graph, 3, cr, binding),
     "граф не компилируется"
   doAssert cr.success and not cr.pipeline.isNil
-  cr.pipeline
+  # Владение забирается из результата компиляции одной операцией (#402).
+  takePipeline(cr)
 
 proc destroyHostGraph(g: var HostGraph) =
   ## Состояния нод движку не принадлежат — освобождаем сами.
@@ -176,11 +177,11 @@ proc renderOfflineToWav(outPath: string) =
   echo "-- шаг 3: офлайн-рендер в WAV"
   var g: HostGraph
   g.buildHostGraph()
-  let pipeline = g.compileHostGraph()
+  var pipeline = g.compileHostGraph()
 
   var opts = defaultRenderOptions(int32(SampleRate), int32(BlockSize), WavSeconds)
   opts.tempo = 100.0
-  let rep = renderToWav(outPath, pipeline, opts)
+  let rep = renderToWav(outPath, move(pipeline), opts)
   doAssert rep.ok, "рендер не удался: " & rep.error
   echo "   файл: ", rep.path, ", кадров: ", rep.frames,
        ", пик: ", formatFloat(float64(rep.peak), ffDecimal, 4),

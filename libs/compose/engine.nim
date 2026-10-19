@@ -63,12 +63,11 @@ proc renderProject*(proj: ProjectFormat; wavPath: string; tempo: float64;
     else: autoProgress(totalSeconds, int32(sr))
 
   # Владение пайплайном переходит рендеру: движок внутри `renderToWav`
-  # забирает граф себе и освобождает его вместе с движком. Без этой
-  # «забывчивости» `destroyScene` ниже освободил бы тот же пайплайн второй
-  # раз — двойное освобождение, которое портит кучу.
-  let pipeline = detachPipeline(scene)
+  # забирает граф себе и освобождает его вместе с движком. `detachPipeline`
+  # отдаёт move-only `OwnedPipeline` (#402), так что второго владельца нет.
+  var pipeline = detachPipeline(scene)
   opts.onProgress = printer
-  let rep = renderToWav(wavPath, pipeline, opts)
+  let rep = renderToWav(wavPath, move(pipeline), opts)
   result.ok = rep.ok
   result.error = rep.error
   result.path = rep.path
