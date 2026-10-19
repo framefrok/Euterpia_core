@@ -23,13 +23,41 @@ DSP-воркеров, transport, node SDK, встроенные DSP-ноды и 
 | DSP-ноды | ✅ 10 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise) + **17 инструментов** (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`, `strings`, `bell`, `harp`, `harpsichord`, `recorder`, `brass`, `timpani`, `choir`, `ukulele`, `accordion`, `harmonica`) + нотный секвенсор `notes`, плеер секвенсора `sequencer` и плеер аудиоклипов `clip`; всего 30 типов, полный каталог с параметрами — [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md); C-ядра с SIMD-дисплеями (#274, #301, #303, #321) |
 | Кодеки | ✅ WAV 16/24/32-бит, FLAC, MP3, OGG Vorbis (чтение), AIFF/AIFC (чтение и запись), Standard MIDI File (#10) |
 | Тесты | ✅ 300+ unit-проверок + интеграционный набор; Core/Commons/инструменты покрыты (#57, #274, #290) |
-| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258) и транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; живой `play` на устройстве, запись и плагины — впереди; справочник команд и JSON-схем — **[docs/cli.md](docs/cli.md)** |
+| CLI | 🟡 линия v0.3 (#86): каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate` (#89), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись и плагины — впереди; справочник команд и JSON-схем — **[docs/cli.md](docs/cli.md)** |
 | Инспектор аудио | 🟡 пассивный анализ WAV: клиппинг, DC, щелчки, провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость; отчёт с локализацией (#290); позже — помощник в v0.7 (#178) |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
 | Надёжность и диагностика | 🟡 план линии v0.5 — библиотека тестов ядра (golden, Node Contract Suite, fault injection, санитайзеры) и «отказ вместо краха»: модель ошибок, чёрный ящик, crash guard, containment нод и плагинов, изоляция скана (#115) |
 | Текущее ядро (долг) | ✅ v0.2 закрыта: планировщик (#9), realtime-guard (#11), macOS CI (#42), CI-долг (#249/#252/#254/#255); остаточный долг #5 — в плане |
 | Фундамент под GUI | 🟡 линия v0.4 (после CLI): снапшоты/события, telemetry нод, компонентные ноды, состояние редактора, модель клипа, роли узлов (#142) |
 | GUI (Editor) | 🟡 v0.4 — каркас, скелет и решение по графическому стеку (#152, #235); v0.6 — NotesGrid/DrumGrid, canvas, микшер, контролы в ноде и свой вид ноды, «объединить в клип», автоматизация и сайдчейн, монтаж, warp, онбординг; v0.7 — Camelot, NoteHelper, эффекты и инструменты, партитура (#178); AI-функции вне объёма |
+
+## Сдача материала: громкость, dither, стемы
+
+Готовый микс превращается в пакет для площадки одной командой:
+
+```bash
+euterpia master demo.eproj --target -14 --dir delivery --stems
+```
+
+`master` рендерит проект (или берёт готовый WAV/FLAC), измеряет громкость по
+BS.1770/EBU R128 (интегрированная LUFS, short-term, LRA, true peak ×4
+oversampling), приводит её к цели и держит потолок true peak lookahead-
+лимитером. Для 16 бит по умолчанию включён **TPDF-dither** — детерминированный,
+поэтому повторная сдача даёт те же байты. Метаданные (title/artist/genre/…)
+пишутся в RIFF `LIST/INFO`, а `--stems` добавляет по файлу на дорожку и
+`<имя>.manifest.json` с SHA-1 каждого файла: сумма стемов совпадает с мастером,
+потому что к ним применяется то же покадровое усиление, что и к миксу.
+
+| Что | Значение по умолчанию | Ключ |
+|---|---|---|
+| целевая громкость | -14 LUFS | `--target` |
+| потолок true peak | -1.0 dBTP | `--ceiling` |
+| глубина | 16 бит (24 — сдача, 32 — промежуточный) | `--bits` |
+| dither | включён для 16 бит | `--dither` / `--no-dither` |
+
+FLAC-энкодера в ядре нет (FLAC читается, но не пишется): `master` честно
+отказывает вместо «почти lossless». Подробности — `euterpia help master` и
+[docs/cli.md](docs/cli.md).
 
 ## Инспектор аудио и эталонная пьеса
 

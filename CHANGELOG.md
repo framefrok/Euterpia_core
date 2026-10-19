@@ -8,9 +8,38 @@
 Версия пакета — единственная константа `euterpia_version.nim`, поэтому
 `euterpia --version`, поле `version` пакета и имя тега совпадают.
 
-## [Unreleased]
+## [0.3.3] — Функциональность P1 (v0.3.3)
 
 ### Добавлено
+- **Нода `euterpia.sequencer`** (issue #87): клипы и дорожки проекта играет
+  `SequencerRuntime.processBlock` — без переупаковки в паттерны
+  `euterpia.notes`. Позиция блока считается из `ctx.samplePosition` и темпа,
+  смещение корректируется на долю тика, поэтому атаки sample-accurate;
+  `setCompiledSequencer` привязывает компиляцию на control-path, переполнение
+  очереди считается (`droppedEvents`), loop-клипы и mute дорожек работают
+  ([#87](https://github.com/framefrok/Euterpia_core/issues/87)).
+- **`euterpia device list` и `euterpia play`** (issue #92): живое
+  воспроизведение проекта через `backend_manager` (miniaudio) с метриками
+  `peak/RMS/xruns/graphVersion/BBT`, NDJSON-потоком в `--json`, ограничением
+  `--seconds` и корректным завершением по SIGINT/SIGTERM. Без устройства —
+  код 2 и понятное сообщение, а не паника
+  ([#92](https://github.com/framefrok/Euterpia_core/issues/92)).
+- **Неблокирующее автосохранение** (issue #147): `core/autosave` держит
+  writer thread и очередь «версия → снимок», пишет атомарно
+  (`.tmp` + rename), ротирует каталог, ведёт маркер незакрытой сессии и
+  восстанавливает последний валидный снимок. Политика — интервал ИЛИ число
+  правок; снимок не перезаписывает файл пользователя, битый снимок не
+  блокирует старт ([#147](https://github.com/framefrok/Euterpia_core/issues/147)).
+- **`euterpia master` — сдача материала** (issue #209): LUFS
+  (интегрированная/short-term), LRA и true peak ×4 oversampling по
+  BS.1770/EBU R128; нормализация к цели с lookahead-лимитером; `--stems` по
+  дорожкам с покадровым усилением мастера (сумма стемов сходится к мастеру);
+  метаданные RIFF `LIST/INFO`; манифест с SHA-1 файлов; отчёт о том, что
+  получилось ([#209](https://github.com/framefrok/Euterpia_core/issues/209)).
+- **TPDF-dither и 32-битный PCM** (issue #209): детерминированный dither при
+  записи в 16/24 бита, `render --bits 32` — промежуточный файл мастера без
+  второго шума квантования, `render --solo-track` — стем дорожки
+  ([#209](https://github.com/framefrok/Euterpia_core/issues/209)).
 - **Headless runtime-сессия** (`euterpia session start|stop|status`, issue
   #407): долгоживущий процесс-демон владеет `AudioEngine`, CLI общается с ним
   по Unix-socket. `transport play` в одном запуске виден `transport state` в
@@ -67,9 +96,9 @@
   ([#406](https://github.com/framefrok/Euterpia_core/issues/406)).
 
 
-Версия пакета — `0.3.2` (релиз). Шаг линии **v0.3.2** («критическое и
-архитектурное») закрыт (см. `docs/versions.md` §1 — версия растёт на последнем
-закрытом шаге).
+Версия пакета — `0.3.3` (релиз). Шаг линии **v0.3.3** («функциональность
+P1») закрыт (см. `docs/versions.md` §1 — версия растёт на последнем закрытом
+шаге).
 
 ### Добавлено
 - `import` — **импорт аудиофайла в проект** как audio-клипа трека (issue #107):
