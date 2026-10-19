@@ -60,6 +60,12 @@ type
     projFrames*: int32
       ## Сколько кадров проекта мост отдаёт движку за один callback (верхняя
       ## граница: фактически может быть меньше на прайминге).
+    projStride: int32
+      ## Шаг канала во временных буферах проекта: `projFrames + 32` (запас
+      ## на дробную фазу ресемплера). Не путать с `projFrames` — движку
+      ## отдаётся не больше `projFrames` кадров.
+    devStride: int32
+      ## То же для буферов устройства.
     projCap: int32
     devCap: int32
     projHead: int32
@@ -114,6 +120,8 @@ proc initLiveSrcBridge*(
   bridge.projFrames = projFrames
   bridge.deviceRate = deviceRate
   bridge.projectRate = projectRate
+  bridge.projStride = projFrames + 32
+  bridge.devStride = deviceFrames + 32
   bridge.projCap = projFrames * LiveBridgeQueueBlocks
   bridge.devCap = deviceFrames * LiveBridgeQueueBlocks
 
@@ -121,11 +129,23 @@ proc initLiveSrcBridge*(
   #   devIn, projIn, projInIL, projOutIL, projOut : 2 * frames
   #   devOut                                      : 2 * devFrames
   #   projQueue, devQueue                         : 2 * cap
-  let perProj = int(LiveBridgeMaxChannels) * int(projFrames)
-  let perDev = int(LiveBridgeMaxChannels) * int(deviceFrames)
+  # Temp-буферы SRC шире, чем блок: конвертер вправе отдать на несколько
+  # кадров больше отношения из-за дробной фазы (запрос maxOut = frames+32).
+  # Раньше буфер был ровно `frames`, и ASan ловил запись за его границей.
+  let projTempFrames = projFrames + 32
+  let devTempFrames = deviceFrames + 32
+  let perProjTemp = int(LiveBridgeMaxChannels) * int(projTempFrames)
+  let perDevTemp = int(LiveBridgeMaxChannels) * int(devTempFrames)
+  let perProj = perProjTemp
+  let perDev = perDevTemp
   let perProjQueue = int(LiveBridgeMaxChannels) * int(bridge.projCap)
   let perDevQueue = int(LiveBridgeMaxChannels) * int(bridge.devCap)
-  let total = 5 * perProj + perDev + perProjQueue + perDevQueue
+  # Раскладка выше — ЧЕТЫРЕ буфера проекта (projIn, projInIL, projOutIL,
+  # projOut) и ДВА буфера устройства (devIn, devOut). Прежняя формула
+  # `5*perProj + perDev` не совпадала с раскладкой и при проекте реже
+  # устройства (projFrames < deviceFrames) выделяла меньше памяти — ASan
+  # ловил запись за концом арены в `queuePush`.
+  let total = 4 * perProj + 2 * perDev + perProjQueue + perDevQueue
   let raw = allocShared0(sizeof(float32) * total)
   if raw.isNil:
     return false
@@ -206,6 +226,7 @@ proc queuePush(dst: ptr UncheckedArray[float32]; cap: int32;
       dropped += uint32(frames - i)
       return
     let idx = (head + count) mod cap
+
     for ch in 0 ..< int(LiveBridgeMaxChannels):
       dst[ch * int(cap) + int(idx)] = src[ch * int(stride) + int(i)]
     inc count
@@ -269,17 +290,17 @@ proc bridgeProcess*(
 
   # --- вход устройства: interleaved -> planar ----------------------------
   if not driverIn.isNil and inputChannels > 0:
-    deinterleave2(driverIn, deviceFrames, bridge.devIn, bridge.devFrames)
+    deinterleave2(driverIn, deviceFrames, bridge.devIn, bridge.devStride)
   else:
-    clearPlanar(bridge.devIn, bridge.devFrames, deviceFrames)
+    clearPlanar(bridge.devIn, bridge.devStride, deviceFrames)
 
   # --- SRC: устройство -> проект ----------------------------------------
   let convertedIn = srcProcess(
     bridge.api, bridge.toProject,
-    bridge.devIn, bridge.devFrames, deviceFrames,
-    bridge.projIn, bridge.projFrames, bridge.projFrames + 16)
+    bridge.devIn, bridge.devStride, deviceFrames,
+    bridge.projIn, bridge.projStride, bridge.projFrames + 32)
   queuePush(bridge.projQueue, bridge.projCap, bridge.projHead,
-            bridge.projCount, bridge.projIn, bridge.projFrames,
+            bridge.projCount, bridge.projIn, bridge.projStride,
             convertedIn, bridge.droppedFrames)
 
   # --- движок: сколько кадров проекта готово ------------------------------
@@ -288,8 +309,8 @@ proc bridgeProcess*(
   if bridge.projCount > 0:
     let rendered = min(bridge.projCount, bridge.projFrames)
     queuePop(bridge.projQueue, bridge.projCap, bridge.projHead,
-             bridge.projCount, bridge.projIn, bridge.projFrames, rendered)
-    interleave2(bridge.projIn, bridge.projFrames, rendered, bridge.projInIL)
+             bridge.projCount, bridge.projIn, bridge.projStride, rendered)
+    interleave2(bridge.projIn, bridge.projStride, rendered, bridge.projInIL)
     var zero = 0
     while zero < int(rendered) * 2:
       bridge.projOutIL[zero] = 0.0f
@@ -301,23 +322,23 @@ proc bridgeProcess*(
       bridge.projOutIL,
       rendered)
     deinterleave2(bridge.projOutIL, rendered, bridge.projOut,
-                  bridge.projFrames)
+                  bridge.projStride)
 
     # --- SRC: проект -> устройство --------------------------------------
     let convertedOut = srcProcess(
       bridge.api, bridge.toDevice,
-      bridge.projOut, bridge.projFrames, rendered,
-      bridge.devOut, bridge.devFrames, bridge.devFrames + 16)
+      bridge.projOut, bridge.projStride, rendered,
+      bridge.devOut, bridge.devStride, bridge.devFrames + 32)
     queuePush(bridge.devQueue, bridge.devCap, bridge.devHead,
-              bridge.devCount, bridge.devOut, bridge.devFrames,
+              bridge.devCount, bridge.devOut, bridge.devStride,
               convertedOut, bridge.droppedFrames)
 
   # --- выход устройства: planar -> interleaved ---------------------------
   let have = min(bridge.devCount, deviceFrames)
   if have > 0:
     queuePop(bridge.devQueue, bridge.devCap, bridge.devHead,
-             bridge.devCount, bridge.devOut, bridge.devFrames, have)
-    interleave2(bridge.devOut, bridge.devFrames, have, driverOut)
+             bridge.devCount, bridge.devOut, bridge.devStride, have)
+    interleave2(bridge.devOut, bridge.devStride, have, driverOut)
   var i = int(have) * 2
   while i < int(deviceFrames) * 2:
     driverOut[i] = 0.0f
