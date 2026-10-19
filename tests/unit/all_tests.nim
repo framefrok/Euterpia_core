@@ -18,6 +18,7 @@ import test_offline_automation
 import test_native_abi
 import test_ring_buffer
 import test_midi_api
+import test_src
 import test_midi_smf
 import test_midi_export
 import test_scene_ownership
@@ -44,6 +45,7 @@ import test_graph_compiler
 import test_pipeline_ownership
 import test_runtime_session
 import test_live_session
+import test_live_resampler
 import test_pdc
 import test_rt_guard
 import test_engine_retire

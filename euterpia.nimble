@@ -63,6 +63,8 @@ proc checkAdapters() =
   # {.compile.}), поэтому проверка быстрая; сборка+прогон — задача
   # `miniaudioSmoke`.
   exec "nim check --hints:off adapters/miniaudio/audio_backend_miniaudio.nim"
+  # Ресемплинг (issue #8): реализация за core/src_api.
+  exec "nim check --hints:off adapters/resample/stream_resampler.nim"
 
 # Флаги потоков и memory manager задаются в config.nims, чтобы они
 # были одинаковыми при любой точке входа (unit, integration, CLI).

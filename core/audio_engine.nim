@@ -1117,6 +1117,36 @@ proc renderBlockInternal(
     engine.frameSnapshot.store(engine.transport.frame, moRelease)
 
 
+proc renderBlockFrames*(
+  engine: ptr AudioEngine;
+  driverIn: ptr UncheckedArray[float32];
+  inputChannels: int32;
+  driverOut: ptr UncheckedArray[float32];
+  frames: int32
+) {.cdecl, rt.} =
+  ## Realtime-вход с ЯВНЫМ числом кадров (issue #8).
+  ##
+  ## Нужен мосту «частота устройства ≠ частота проекта»: после ресемплинга
+  ## число кадров проекта на callback не равно блоку устройства, а движок
+  ## обязан продвинуть транспорт ровно на это число.
+  ##
+  ## `frames` больше `engine.blockSize` не обслуживается (буферы графа
+  ## рассчитаны на блок), меньше — законный частичный блок (#395).
+  if engine == nil or driverOut == nil or frames <= 0 or
+     frames > engine.blockSize:
+    return
+  renderBlockInternal(
+    engine,
+    driverIn,
+    driverOut,
+    inputChannels,
+    offline = false,
+    lastBlock = false,
+    forceAdvance = false,
+    renderFrames = frames
+  )
+
+
 proc renderBlock*(
   engine: ptr AudioEngine;
   driverIn: ptr UncheckedArray[float32];

@@ -42,6 +42,8 @@ import audio_backend_api
 import backend_manager
 import backend_registry
 import live_session
+import src_api
+import stream_resampler
 import transport
 import signal_types
 import logger
@@ -183,7 +185,10 @@ const
       opt("--file", "проект, если он не задан позиционно", value = "проект.eproj"),
       opt("--backend", "аудио-бэкенд: miniaudio", value = "имя"),
       opt("--device", "индекс или имя устройства вывода", value = "N|имя"),
-      opt("--sample-rate", "частота дискретизации; без ключа — из проекта", value = "Гц"),
+      opt("--sample-rate", "частота ПРОЕКТА; без ключа — из проекта", value = "Гц"),
+      opt("--device-rate", "частота УСТРОЙСТВА; без ключа — родная частота устройства", value = "Гц"),
+      opt("--src", "ресемплинг между устройством и проектом: auto|on|off", value = "auto|on|off",
+          default = "auto"),
       opt("--block", "размер блока", value = "кадры", default = $DefaultBlock),
       opt("--seconds", "играть N секунд; без ключа — до SIGINT", value = "секунды"),
       opt("--master", "id ноды, подключённой к мастеру", value = "id ноды"),
@@ -193,8 +198,12 @@ const
       field("path", "проект"),
       field("backend", "открытый бэкенд"),
       field("device", "индекс устройства вывода"),
-      field("sampleRate", "частота сеанса"),
-      field("blockSize", "размер блока"),
+      field("sampleRate", "частота проекта"),
+      field("deviceSampleRate", "частота устройства"),
+      field("resampling", "мост частот включён (устройство ≠ проект)"),
+      field("resamplerLatency", "задержка моста, кадров устройства"),
+      field("blockSize", "размер блока драйвера"),
+      field("engineBlockSize", "размер блока движка (может отличаться при SRC)"),
       field("seconds", "сколько длился сеанс"),
       field("frames", "отрендерено кадров"),
       field("xruns", "xrun'ы за сеанс"),
@@ -226,6 +235,8 @@ type
     deviceName: string
     haveDevice: bool
     sampleRate: int
+    deviceRate: int
+    srcMode: string
     blockSize: int
     seconds: float64
     haveSeconds: bool
@@ -260,6 +271,7 @@ proc floatArg(text, key: string; high: float64): tuple[ok: bool; value: float64;
 proc scanArgs(args: seq[string]; isDevice: bool): LiveScan =
   result.blockSize = DefaultBlock
   result.master = -1
+  result.srcMode = "auto"
   var positionals: seq[string] = @[]
   var i = 0
   while i < args.len:
@@ -296,6 +308,25 @@ proc scanArgs(args: seq[string]; isDevice: bool): LiveScan =
       if not parsed.ok:
         return LiveScan(ok: false, rep: usageError(parsed.message))
       result.sampleRate = parsed.value
+    of "--device-rate":
+      inc i
+      if i >= args.len:
+        return LiveScan(ok: false,
+          rep: usageError("--device-rate: нужно значение в Гц"))
+      let parsed = intArg(args[i], "--device-rate", 1, 1_000_000)
+      if not parsed.ok:
+        return LiveScan(ok: false, rep: usageError(parsed.message))
+      result.deviceRate = parsed.value
+    of "--src":
+      inc i
+      if i >= args.len:
+        return LiveScan(ok: false,
+          rep: usageError("--src: нужно auto, on или off"))
+      let mode = args[i].toLowerAscii()
+      if mode notin ["auto", "on", "off"]:
+        return LiveScan(ok: false,
+          rep: usageError("--src: ожидается auto|on|off, получено «" & args[i] & "»"))
+      result.srcMode = mode
     of "--block":
       inc i
       if i >= args.len:
@@ -463,6 +494,18 @@ proc validateDevice(backend: string; device: int): string =
     if int(info.id) == device:
       return ""
   "устройства вывода #" & $device & " нет: доступно " & $infos.len
+
+proc deviceRateOf(backend: string; device: int): float64 =
+  ## Родная частота устройства вывода (0 — неизвестна). Нужна мосту SRC (#8):
+  ## проект 44.1k на устройстве 48k должен играть в темпе, а не «на полтона
+  ## ниже». Список берётся у адаптера, устройство при этом не открывается.
+  var infos: seq[AudioDeviceInfo]
+  if not listOutputs(backend, infos):
+    return 0.0
+  for info in infos:
+    if int(info.id) == device and info.defaultSampleRate > 0.0:
+      return info.defaultSampleRate
+  0.0
 
 # =============================================================================
 # Живой рендер
@@ -748,6 +791,31 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
       "список устройств: euterpia device list; без устройства работает " &
       "офлайн-рендер: euterpia render " & path)
 
+  # --- частоты: устройство ↔ проект (issue #8) ----------------------------
+  # `--device-rate` задаёт частоту драйвера явно; иначе берётся родная
+  # частота устройства. Если она отличается от частоты проекта, включается
+  # мост: движок считает в частоте проекта (темп, автоматизация, PDC),
+  # драйвер — в своей. `--src off` запрещает мост (диагностика/совместимость).
+  var deviceRate = sr
+  var srcEnabled = false
+  let nativeRate =
+    if scan.deviceRate > 0: float64(scan.deviceRate)
+    else: deviceRateOf(backend, device)
+  if scan.srcMode != "off" and nativeRate > 0.0 and
+     abs(nativeRate - float64(sr)) > 0.5:
+    if not liveRateCompatible(nativeRate, float64(sr)):
+      return usageError("частота устройства и проекта несовместимы: " &
+        $nativeRate & " Гц и " & $sr & " Гц",
+        "отношение вне 1/16..16; проверьте `euterpia device list`")
+    deviceRate = int(round(nativeRate))
+    srcEnabled = true
+  let engineBlock: int32 =
+    if srcEnabled: liveProjectBlock(int32(bs), float64(deviceRate), float64(sr))
+    else: int32(bs)
+  if engineBlock <= 0 or engineBlock > MaxBlockSize:
+    return usageError("блок движка вне диапазона: " & $engineBlock,
+      "уменьшите --block (при SRC блок движка пересчитывается)")
+
   # --- сцена --------------------------------------------------------------
   var reg = builtinRegistry()
   var scene = loadScene(reg, proj, scan.master, int32(sr), parentDir(path))
@@ -762,7 +830,7 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   # Пайплайн переходит живому сеансу; сцена остаётся владельцем состояний
   # нод и скомпилированных секвенсоров, поэтому живёт до `closeLiveSession`.
   var pipeline = detachPipeline(scene)
-  var session = initLiveSession(float32(sr), int32(bs), move(pipeline))
+  var session = initLiveSession(float32(sr), int32(engineBlock), move(pipeline))
   if not session.isActive:
     destroyScene(scene)
     return panicError("не удалось создать живой сеанс",
@@ -772,8 +840,32 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   discard session.postPlay()
   session.flushQueuedCommands()
 
+  # Мост создаётся ДО открытия устройства: его буферы и ресемплеры обязаны
+  # существовать к первому callback (в RT-пути аллокаций нет).
+  var srcApi: ptr SrcApi = nil
+  var srcLatency = 0'i32
+  var srcLog = silentLogger()
+  if srcEnabled:
+    srcApi = newSrcApi()
+    var srcReady = false
+    if not srcApi.isNil and srcInit(srcApi, addr srcLog) == seOk:
+      srcReady = session.enableLiveResampling(
+        srcApi, int32(bs), float64(deviceRate), float64(sr))
+    if not srcReady:
+      if not srcApi.isNil:
+        srcShutdown(srcApi)
+        freeSrcApi(srcApi)
+        srcApi = nil
+      discard session.postStop()
+      session.closeLiveSession()
+      destroyScene(scene)
+      return envError("ресемплинг недоступен: адаптер SRC не создан",
+        "проверьте EUTERPIA_SRC_LIB и сборку; либо `--src off` на устройстве " &
+        "с частотой проекта")
+    srcLatency = session.liveResamplingLatency()
+
   var cfg = AudioStreamConfig(
-    sampleRate: float64(sr),
+    sampleRate: float64(deviceRate),
     blockSize: int32(bs),
     inputChannels: 0,
     outputChannels: MaxAudioChannels,
@@ -796,6 +888,10 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   if openErr != bmOk:
     discard session.postStop()
     session.closeLiveSession()
+    if not srcApi.isNil:
+      srcShutdown(srcApi)
+      freeSrcApi(srcApi)
+      srcApi = nil
     destroyScene(scene)
     let reason =
       case openErr
@@ -858,6 +954,10 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   session.flushQueuedCommands()
   mgr.closeBackend()
   session.closeLiveSession()
+  if not srcApi.isNil:
+    srcShutdown(srcApi)
+    freeSrcApi(srcApi)
+    srcApi = nil
   destroyScene(scene)
 
   let elapsedMs = (getMonoTime() - started).inMilliseconds
@@ -866,7 +966,11 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
     "backend": backend,
     "device": device,
     "sampleRate": sr,
+    "deviceSampleRate": deviceRate,
+    "resampling": srcEnabled,
+    "resamplerLatency": srcLatency,
     "blockSize": bs,
+    "engineBlockSize": engineBlock,
     "seconds": float64(elapsedMs) / 1000.0,
     "frames": finalFrame,
     "xruns": totalXruns,
