@@ -1,5 +1,5 @@
 # project.nim
-import std/[algorithm, json, tables, os]
+import std/[algorithm, json, tables, os, strutils]
 import signal_types
 
 {.push raises: [].}
@@ -57,6 +57,16 @@ const
     ## Минимальная читаемая версия. v1 (проекты без аудио-ресурсов) читается
     ## без потери данных: `resources` пуст — миграция не требуется (§58/§59:
     ## версии не смешиваются, но старый файл открывается, а не отвергается).
+
+  MaxProjectSubgraphDepth* = 32
+    ## Предел вложенности субграфов при разборе/записи проекта (аудит, P0).
+    ##
+    ## Должен совпадать с `graph_compiler.MaxSubgraphDepth`: компилятор
+    ## отвергает более глубокие графы, но проверка там стоит ПОСЛЕ загрузки.
+    ## Без ограничения здесь враждебный `.eproj` с тысячами вложенных
+    ## `subgraphNodes` ронял процесс stack overflow ещё в `loadProject`.
+    ## Инвариант «значения равны» проверяет unit-тест.
+
 
 type
   TimeSignatureFormat* = object
@@ -240,7 +250,7 @@ proc toJson*(p: ProjectFormat): JsonNode =
   var graphJson = newJObject()
   var nodesJson = newJArray()
   
-  proc nodeToJson(n: NodeFormat): JsonNode =
+  proc nodeToJson(n: NodeFormat; depth = 0): JsonNode =
     result = newJObject()
     result["id"] = %n.id
     result["nodeType"] = %n.nodeType
@@ -266,7 +276,11 @@ proc toJson*(p: ProjectFormat): JsonNode =
     result["parameters"] = params
     
     var subNodes = newJArray()
-    for sn in n.subgraphNodes: subNodes.add(nodeToJson(sn))
+    # Защита от неограниченной рекурсии (аудит, P0). `saveProject` заранее
+    # отвергает слишком глубокий граф, но `toJson` публичный: здесь глубина
+    # обрезается, чтобы сериализация не могла уронить стек.
+    if depth < MaxProjectSubgraphDepth:
+      for sn in n.subgraphNodes: subNodes.add(nodeToJson(sn, depth + 1))
     result["subgraphNodes"] = subNodes
     
     var subConns = newJArray()
@@ -398,8 +412,34 @@ proc safeStr(n: JsonNode, key: string, def: string = ""): string =
   if val != nil and val.kind == JString: val.str else: def
 
 proc safeInt(n: JsonNode, key: string, def: int = 0): int =
+  ## Целое поле без проверки смыслового диапазона.
+  ##
+  ## Платформенная страховка (аудит, P0): `JsonNode.num` — `int64`, а `int`
+  ## на 32-битных сборках уже. Прямое `int(val.num)` вне диапазона давало
+  ## `RangeDefect`; теперь значение, не помещающееся в `int`, считается
+  ## отсутствующим. Смысловые границы (`int32`, `uint8`, порты) проверяет
+  ## `narrowInt`.
   let val = n{key}
-  if val != nil and val.kind == JInt: int(val.num) else: def
+  if val != nil and val.kind == JInt:
+    when sizeof(int) < sizeof(int64):
+      if val.num < int64(low(int)) or val.num > int64(high(int)):
+        return def
+    int(val.num)
+  else:
+    def
+
+proc safeSigType(n: JsonNode, key: string, err: var string): int =
+  ## Ordinal `SignalType` из файла с проверкой диапазона (аудит, P0).
+  ##
+  ## Раньше `sigType` читался без валидации: значение 99 позже превращалось
+  ## в `ControlPortKind(conn.sigType)` / `SignalType(...)` и давало
+  ## RangeDefect уже в control-слое. Теперь мусор — ошибка формата.
+  result = safeInt(n, key, 0)
+  if result < 0 or result > ord(high(SignalType)):
+    if err.len > 0: err.add("; ")
+    err.add("'" & key & "'=" & $result & " вне диапазона [0.." &
+            $ord(high(SignalType)) & "]")
+    result = 0
 
 proc latencyValue(n: JsonNode; key: string): uint32 =
   ## Latency из файла с насыщением на пределе (issue #405).
@@ -456,8 +496,15 @@ proc narrowInt(n: JsonNode, key: string, lo, hi: int64, def: int,
     return def
   return int(v)
 
-proc parseNode(n: JsonNode, err: var string): NodeFormat =
+proc parseNode(n: JsonNode, err: var string; depth = 0): NodeFormat =
+  ## Разбор ноды проекта. `depth` ограничивает вложенность субграфов:
+  ## рекурсия глубже `MaxProjectSubgraphDepth` — ошибка формата, а не
+  ## stack overflow (аудит, P0).
   result.id = safeInt(n, "id")
+  if depth > MaxProjectSubgraphDepth:
+    if err.len > 0: err.add("; ")
+    err.add("вложенность субграфов больше " & $MaxProjectSubgraphDepth)
+    return
   result.nodeType = safeStr(n, "nodeType")
   result.name = safeStr(n, "name")
   result.audioInCount = safeInt(n, "audioInCount")
@@ -480,7 +527,13 @@ proc parseNode(n: JsonNode, err: var string): NodeFormat =
   if subNodesNode != nil and subNodesNode.kind == JArray:
     for sn in subNodesNode:
       if not isJObject(sn): continue
-      result.subgraphNodes.add(parseNode(sn, err))
+      if depth < MaxProjectSubgraphDepth:
+        result.subgraphNodes.add(parseNode(sn, err, depth + 1))
+      elif err.len == 0 or not err.contains("вложенность субграфов"):
+        # Рекурсия дальше предела не идёт: файл всё равно будет отклонён,
+        # но стек остаётся целым.
+        if err.len > 0: err.add("; ")
+        err.add("вложенность субграфов больше " & $MaxProjectSubgraphDepth)
       
   let subConnsNode = n{"subgraphConnections"}
   if subConnsNode != nil and subConnsNode.kind == JArray:
@@ -489,7 +542,7 @@ proc parseNode(n: JsonNode, err: var string): NodeFormat =
       result.subgraphConnections.add(ConnectionFormat(
         srcNodeId: safeInt(sc, "srcNodeId"), srcPortIdx: safeInt(sc, "srcPortIdx"),
         dstNodeId: safeInt(sc, "dstNodeId"), dstPortIdx: safeInt(sc, "dstPortIdx"),
-        sigType: safeInt(sc, "sigType")
+        sigType: safeSigType(sc, "sigType", err)
       ))
 
   let subInsNode = n{"subgraphInputs"}
@@ -500,7 +553,7 @@ proc parseNode(n: JsonNode, err: var string): NodeFormat =
         name: safeStr(port, "name"),
         localNodeId: safeInt(port, "localNodeId"),
         localPortIdx: safeInt(port, "localPortIdx"),
-        sigType: safeInt(port, "sigType")
+        sigType: safeSigType(port, "sigType", err)
       ))
 
   let subOutsNode = n{"subgraphOutputs"}
@@ -511,12 +564,27 @@ proc parseNode(n: JsonNode, err: var string): NodeFormat =
         name: safeStr(port, "name"),
         localNodeId: safeInt(port, "localNodeId"),
         localPortIdx: safeInt(port, "localPortIdx"),
-        sigType: safeInt(port, "sigType")
+        sigType: safeSigType(port, "sigType", err)
       ))
 
 # ============================================================================
 # PUBLIC API: SAVE & LOAD
 # ============================================================================
+
+proc subgraphDepthWithinLimit(nodes: seq[NodeFormat]; depth: int): bool =
+  ## Проверка глубины ПЕРЕД сериализацией (аудит, P0).
+  ##
+  ## Рекурсия ограничена самим лимитом: на `depth > MaxProjectSubgraphDepth`
+  ## функция сразу возвращает false, поэтому стек не растёт бесконечно.
+  ## Пустой список детей глубину не увеличивает (лист на пределе допустим).
+  if nodes.len == 0:
+    return true
+  if depth > MaxProjectSubgraphDepth:
+    return false
+  for n in nodes:
+    if not subgraphDepthWithinLimit(n.subgraphNodes, depth + 1):
+      return false
+  true
 
 proc saveProject*(project: ProjectFormat, filepath: string): ProjectResult[void] =
   ## Атомарная запись проекта (issue #390): tmp-файл рядом с целью + flush +
@@ -526,6 +594,10 @@ proc saveProject*(project: ProjectFormat, filepath: string): ProjectResult[void]
   ## Имя tmp содержит PID: две параллельные записи не подменят друг другу
   ## буфер. Прежний файл сохраняется как `.bak` (best-effort: неудача бэкапа
   ## не отменяет успешную запись, это страховка, а не контракт).
+  if not subgraphDepthWithinLimit(project.graph.nodes, 0):
+    return err[void](pekInvalidFormat,
+      "вложенность субграфов больше " & $MaxProjectSubgraphDepth &
+      ": запись невозможна (загруженный проект такую глубину не примет)")
   let tmp = filepath & ".tmp-" & $getCurrentProcessId()
   var f: File
   try:
@@ -638,7 +710,7 @@ proc loadProject*(filepath: string): ProjectResult[ProjectFormat] =
         res.graph.connections.add(ConnectionFormat(
           srcNodeId: safeInt(c, "srcNodeId"), srcPortIdx: safeInt(c, "srcPortIdx"),
           dstNodeId: safeInt(c, "dstNodeId"), dstPortIdx: safeInt(c, "dstPortIdx"),
-          sigType: safeInt(c, "sigType")
+          sigType: safeSigType(c, "sigType", rangeErr)
         ))
         
   let seqNode = root{"sequencer"}

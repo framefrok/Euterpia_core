@@ -11,9 +11,10 @@
 #     невозможная запись -> pekIOError;
 #   - ProjectResult не бросает исключений наружу.
 
-import std/[unittest, os, strutils, tables]
+import std/[unittest, os, strutils, tables, json]
 import project
 import signal_types
+import graph_compiler
 
 proc makeProject(): ProjectFormat =
   result.format = ProjectFormatName
@@ -532,4 +533,68 @@ suite "project: latency и предел (#405)":
     check node1.latencyIntrinsic == MaxLatencyFrames + 1'u32
     # Нормальное значение не меняется.
     check node2.latencyReported == 128'u32
+
+# =============================================================================
+# P0-аудит: глубина субграфов и валидация sigType
+# =============================================================================
+
+proc deepNode(depth: int): NodeFormat =
+  result = NodeFormat(id: depth, nodeType: "test.node", isSubgraph: depth > 0)
+  if depth > 0:
+    result.subgraphNodes.add deepNode(depth - 1)
+
+proc deepNodeJson(depth: int): JsonNode =
+  result = %*{"id": depth, "nodeType": "test.node", "isSubgraph": depth > 0,
+              "subgraphNodes": newJArray()}
+  if depth > 0:
+    result["subgraphNodes"].add deepNodeJson(depth - 1)
+
+suite "project: пределы разбора (P0-аудит)":
+  test "предел глубины проекта совпадает с пределом компилятора":
+    # Иначе файл, который загрузчик примет, компилятор отвергнет; а глубокий
+    # файл успеет уронить стек ещё до проверки компилятора.
+    check MaxProjectSubgraphDepth == graph_compiler.MaxSubgraphDepth
+
+  test "слишком глубокая вложенность субграфов — ошибка, а не stack overflow":
+    let path = getTempDir() / "euterpia_proj_deep.json"
+    var root = newJObject()
+    root["format"] = %ProjectFormatName
+    root["version"] = %ProjectFormatVersion
+    var graph = newJObject()
+    var nodes = newJArray()
+    nodes.add deepNodeJson(MaxProjectSubgraphDepth + 5)
+    graph["nodes"] = nodes
+    root["graph"] = graph
+    writeFile(path, $root)
+    defer: removeFile(path)
+
+    let loaded = loadProject(path)
+    check not loaded.success
+    check loaded.error.kind == pekInvalidFormat
+    check loaded.error.message.contains("вложенность субграфов")
+
+  test "saveProject отвергает слишком глубокий in-memory граф":
+    var p = ProjectFormat(format: ProjectFormatName,
+                          version: ProjectFormatVersion)
+    p.graph.nodes.add deepNode(MaxProjectSubgraphDepth + 2)
+    let path = getTempDir() / "euterpia_proj_deep_save.json"
+    defer: removeFile(path)
+
+    let saved = saveProject(p, path)
+    check not saved.success
+    check saved.error.kind == pekInvalidFormat
+
+  test "sigType вне диапазона отвергается на загрузке":
+    let path = getTempDir() / "euterpia_proj_sigtype.json"
+    writeFile(path, """{"format":"euterpia-project","version":2,
+      "graph":{"nodes":[{"id":1,"nodeType":"a"},{"id":2,"nodeType":"b"}],
+      "connections":[{"srcNodeId":1,"srcPortIdx":0,"dstNodeId":2,
+                      "dstPortIdx":0,"sigType":99}]}}""")
+    defer: removeFile(path)
+
+    let loaded = loadProject(path)
+    check not loaded.success
+    check loaded.error.kind == pekInvalidFormat
+    check loaded.error.message.contains("sigType")
+
 
