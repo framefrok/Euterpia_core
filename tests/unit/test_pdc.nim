@@ -271,3 +271,26 @@ suite "PDC: компиляция графа (issue #72)":
     check cr.pipeline.delayStates == nil
     destroyPipeline(cr.pipeline)
 
+
+  test "in-place буфер: выход не затирает вход (аудит P3, #95/#411)":
+    ## Анализ времён жизни буферов вправе выдать PDC-ноде её же входной
+    ## буфер под выход: смерть входа совпадает с рождением выхода.
+    ## Прежний порядок «записать выход, потом прочитать вход» записывал в
+    ## кольцо уже нули, и ветвь с задержкой отдавала тишину навсегда.
+    var rig: PdcRig
+    rig.initRig(256, 2, delayFrames = 8)
+    rig.outBuf.data = rig.inBuf.data      # outBuf == inBuf
+    rig.ports.outputs[0] = addr rig.outBuf
+
+    for i in 0 ..< 256:
+      rig.setSample(0, i, 1.0'f32)
+      rig.setSample(1, i, -1.0'f32)
+    rig.run()
+
+    # Выход задержан на 8 кадров; сигнал не потерян.
+    check abs(rig.inData[0]) < 1.0e-6
+    check abs(rig.inData[8] - 1.0'f32) < 1.0e-6
+    check abs(rig.inData[255] - 1.0'f32) < 1.0e-6
+    let rightBase = int(rig.inBuf.stride)
+    check abs(rig.inData[rightBase + 8] + 1.0'f32) < 1.0e-6
+    check abs(rig.inData[rightBase + 255] + 1.0'f32) < 1.0e-6

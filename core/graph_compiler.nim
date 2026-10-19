@@ -251,10 +251,20 @@ proc processDelayComp*(ctx: ptr NodeProcessContext,
     if rFrame < 0: rFrame += ringFrames
     let rPos = rFrame * ringCh
 
+    # Вход читается ДО записи выхода (аудит P3, #95/#411): анализ времён
+    # жизни буферов вправе переиспользовать входной буфер PDC-ноды под её
+    # выход (смерть входа = рождение выхода), то есть `outBuf == inBuf`.
+    # Прежний порядок «сначала выход, затем чтение входа» в этом случае
+    # записывал в кольцо уже занулённые сэмплы — ветвь с задержкой отдавала
+    # тишину навсегда (проявлялось на первом же плагине с latency > 0).
+    var frameIn: array[DelayCompensationRingChannels, float32]
+    for ch in 0 ..< ringed:
+      let idx = if planar: ch * stride + i else: i * int(channels) + ch
+      frameIn[ch] = inBuf.data[idx]
     for ch in 0 ..< ringed:
       let idx = if planar: ch * stride + i else: i * int(channels) + ch
       outBuf.data[idx] = ring[rPos + ch]
-      ring[wPos + ch] = inBuf.data[idx]
+      ring[wPos + ch] = frameIn[ch]
 
     state.writePos = (state.writePos + 1) mod ringFrames
 
