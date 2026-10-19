@@ -29,6 +29,7 @@ import test_backend_registry
 import test_lazy_adapters
 import test_input_path
 import test_plugin_api
+import test_lilv_backend
 import test_eut_buffer
 import test_clap_host_extensions
 import test_clap_plugin_extensions

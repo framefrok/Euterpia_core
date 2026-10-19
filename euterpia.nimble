@@ -67,6 +67,8 @@ proc checkAdapters() =
   exec "nim check --hints:off adapters/resample/stream_resampler.nim"
   # libremidi (issue #38): фасад грузится лениво, библиотеки в CI может не быть.
   exec "nim check --hints:off adapters/libremidi/midi_backend_libremidi.nim"
+  # LV2 через Lilv (issue #39): та же ленивая загрузка.
+  exec "nim check --hints:off adapters/lilv/lilv_plugin_backend.nim"
 
 # Флаги потоков и memory manager задаются в config.nims, чтобы они
 # были одинаковыми при любой точке входа (unit, integration, CLI).
