@@ -18,6 +18,7 @@ import test_offline_automation
 import test_native_abi
 import test_ring_buffer
 import test_midi_api
+import test_ump
 import test_src
 import test_midi_smf
 import test_midi_export

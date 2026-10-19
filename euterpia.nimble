@@ -65,6 +65,8 @@ proc checkAdapters() =
   exec "nim check --hints:off adapters/miniaudio/audio_backend_miniaudio.nim"
   # Ресемплинг (issue #8): реализация за core/src_api.
   exec "nim check --hints:off adapters/resample/stream_resampler.nim"
+  # libremidi (issue #38): фасад грузится лениво, библиотеки в CI может не быть.
+  exec "nim check --hints:off adapters/libremidi/midi_backend_libremidi.nim"
 
 # Флаги потоков и memory manager задаются в config.nims, чтобы они
 # были одинаковыми при любой точке входа (unit, integration, CLI).
