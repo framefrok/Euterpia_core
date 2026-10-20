@@ -141,6 +141,19 @@ task cliDocs, "Пересобрать раздел справочника docs/c
   buildLog "cli docs"
   exec cliBin & " __reference --write docs/cli.md"
 
+task scriptScenario, "Сценарий как тест: golden-рендер по сценарию (#333, #335)":
+  ## Проверяет то, чего не видит unit-набор: `plan` не меняет файл,
+  ## транзакция не оставляет половины, два рендера дают побайтово тот же WAV,
+  ## эталон ловится по метрикам и сэмплам, NDJSON парсится построчно.
+  ##
+  ## CI запускает скрипт напрямую после `nimble cliSmoke` (бинарь уже собран),
+  ## а эта цель — для локального прогона одной командой.
+  mkDir buildDir
+  buildLog "cli build"
+  exec "nim c --hints:off --out:" & cliBin & " cli.nim"
+  buildLog "script scenario (golden render)"
+  exec "bash tools/script_scenario.sh " & cliBin
+
 # ---------------------------------------------------------------------------
 # miniaudio (#31). Здесь РЕАЛЬНО собирается и линкуется TU miniaudio
 # (adapters/miniaudio/miniaudio_impl.c) — это единственная проверка, что

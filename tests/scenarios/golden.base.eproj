@@ -1,0 +1,26 @@
+{
+  "format": "euterpia-project",
+  "version": 2,
+  "metadata": {
+    "name": "Golden",
+    "author": "",
+    "sampleRate": 48000.0,
+    "tempo": 100.0,
+    "timeSignature": {
+      "numerator": 4,
+      "denominator": 4
+    },
+    "created": "2026-10-20T04:45:26",
+    "modified": "2026-10-20T04:45:26"
+  },
+  "graph": {
+    "nodes": [],
+    "connections": []
+  },
+  "sequencer": {
+    "tracks": [],
+    "automationLanes": []
+  },
+  "pluginStates": [],
+  "resources": []
+}

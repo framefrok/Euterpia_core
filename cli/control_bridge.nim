@@ -96,13 +96,21 @@ proc frameReport*(frame: ErrorFrame): Report =
   errReport(exitCodeFor(frame.code), $frame.code, frame.message, frame.hint,
             errorCode = frameCodeValue(frame.code))
 
+proc openDocumentAt*(path: string; proj: ProjectFormat; clock: Clock): Document =
+  ## Документ с ЯВНО заданными часами. Нужен сценариям (#333): «повтор даёт
+  ## побайтово тот же документ» возможно, только если отметка изменения не
+  ## берётся из системных часов. Часы сценария возвращают отметку из самого
+  ## сценария или прежнюю отметку проекта — время выбирает данные, а не
+  ## момент запуска.
+  runContextRegistrar(proj)
+  var doc: Document
+  initDocument(doc, proj, documentIdForPath(absolutePath(path)),
+               cliNodeTypeProvider, clock)
+  doc
+
 proc openDocument*(path: string; proj: ProjectFormat): Document =
   ## Документ из загруженного проекта: идентификатор документа тот же, что у
   ## адресов (#143), описатели типов — каталог CLI, часы — `stampClock`.
   # Контекстные типы (плагины) описываются по самому проекту: без этого
   # `connect`/`param` не знали бы порты `plugin:<id>` (#95).
-  runContextRegistrar(proj)
-  var doc: Document
-  initDocument(doc, proj, documentIdForPath(absolutePath(path)),
-               cliNodeTypeProvider, stampClock)
-  doc
+  openDocumentAt(path, proj, stampClock)

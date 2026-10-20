@@ -34,6 +34,7 @@ import cmd_transport
 import cmd_session
 import cmd_live
 import cmd_history
+import cmd_script
 import euterpia_version
 
 var gCommands: seq[CommandDef]
@@ -295,6 +296,7 @@ proc setupRegistry*() =
     CommandDef(spec: UndoSpec, run: runUndo),
     CommandDef(spec: RedoSpec, run: runRedo),
     CommandDef(spec: HistorySpec, run: runHistory),
+    CommandDef(spec: ScriptSpec, run: runScript),
     CommandDef(spec: RenderSpec, run: runRender),
     CommandDef(spec: MasterSpec, run: runMaster),
     CommandDef(spec: NotationSpec, run: runNotation),

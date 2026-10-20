@@ -15,7 +15,8 @@
 # Путь к бинарю: `build/euterpia` (или `EUTERPIA_CLI` в окружении).
 # Запуск: nimble cliSmoke (собирает CLI, затем этот тест).
 
-import std/[unittest, os, osproc, strutils, json, streams, algorithm, strtabs]
+import std/[unittest, os, osproc, strutils, json, streams, algorithm, strtabs,
+            sha1]
 import euterpia_version
 # Control-слой нужен тесту как «второй клиент»: он строит тот же документ
 # мимо CLI и сравнивает результат (критерий #139 — один путь исполнения).
@@ -71,15 +72,28 @@ proc cliEnv(overrides: seq[(string, string)] = @[]): StringTableRef =
   for item in overrides:
     result[item[0]] = item[1]
 
-proc runCli(args: openArray[string];
-            env: seq[(string, string)] = @[]): RunResult =
-  let process = startProcess(cliPath, args = @args, env = cliEnv(env),
-                             options = {})
+proc finishProcess(process: Process; input: string): RunResult =
+  ## Закрыть stdin и прочитать результат. stdin закрывается ВСЕГДА: без
+  ## команды CLI читает stdin (пакетный режим, #97/#334), и оставленный
+  ## открытым пайп подвесил бы тест на чтении.
+  try:
+    if input.len > 0:
+      process.inputStream.write(input)
+    process.inputStream.close()
+  except CatchableError:
+    discard
   result.output = process.outputStream.readAll()
   result.errput = process.errorStream.readAll()
   discard process.waitForExit()
   result.code = process.peekExitCode()
   process.close()
+
+proc runCli(args: openArray[string];
+            env: seq[(string, string)] = @[];
+            input: string = ""): RunResult =
+  let process = startProcess(cliPath, args = @args, env = cliEnv(env),
+                             options = {})
+  finishProcess(process, input)
 
 proc nonEmptyLines(text: string): seq[string] =
   for line in text.splitLines():
@@ -111,18 +125,15 @@ proc machineCommandNames(): seq[string] =
 let cliAbsPath = absolutePath(cliPath)
 
 proc runCliIn(dir: string; args: openArray[string];
-              env: seq[(string, string)] = @[]): RunResult =
+              env: seq[(string, string)] = @[];
+              input: string = ""): RunResult =
   ## Запуск CLI с другим рабочим каталогом: команды проекта умеют работать
   ## с файлом по умолчанию (`project.eproj`), и это поведение проверяется
   ## только из каталога, где такого файла нет «под ногами» у теста.
   ## Путь к бинарю абсолютный: относительный сломался бы после смены каталога.
   let process = startProcess(cliAbsPath, workingDir = dir, args = @args,
                              env = cliEnv(env), options = {})
-  result.output = process.outputStream.readAll()
-  result.errput = process.errorStream.readAll()
-  discard process.waitForExit()
-  result.code = process.peekExitCode()
-  process.close()
+  finishProcess(process, input)
 
 proc diffPaths(a, b: JsonNode; prefix: string = ""): seq[string] =
   ## Пути полей, которыми два JSON различаются. Проверка «set меняет только
@@ -2213,6 +2224,20 @@ suite "CLI: спецификация команд — один источник 
                              "spec.eproj"]).code == 0
     writeFile(specDir / "spec.notes", "c4/4 d e f\n")
     writeFile(specDir / "spec.batch", "spec.eproj b1.wav --seconds 1\n")
+    # Сценарий для проверки полей `script`: базовый проект остаётся пустым
+    # (renders/plan его не пишут), а `run` получает свою копию.
+    writeFile(specDir / "spec.eus",
+      "{\"format\":\"euterpia.script\",\"version\":1," &
+      "\"project\":\"scriptbase.eproj\",\"commands\":[" &
+      "{\"kind\":\"node.create\",\"nodeType\":\"euterpia.osc\"," &
+      "\"name\":\"osc\"}," &
+      "{\"kind\":\"node.create\",\"nodeType\":\"euterpia.gain\"," &
+      "\"name\":\"out\"}," &
+      "{\"kind\":\"graph.connect\"," &
+      "\"src\":{\"nodeId\":1,\"kind\":0,\"index\":0}," &
+      "\"dst\":{\"nodeId\":2,\"kind\":0,\"index\":0}}]}")
+    check runCliIn(specDir, ["init", "scriptbase.eproj", "--force"]).code == 0
+    check runCliIn(specDir, ["init", "scriptrun.eproj", "--force"]).code == 0
     check runCliIn(specDir, ["notation", "import", "spec.notes", "--file",
                              "spec.eproj"]).code == 0
     let rendered = runCliIn(specDir, ["render", "spec.eproj", "spec.wav",
@@ -2251,6 +2276,12 @@ suite "CLI: спецификация команд — один источник 
                    @["render", "spec.eproj", "--seconds", "1", "--dry-run"],
                    @["render", "spec.eproj", "--stems", "stems", "--seconds", "1"],
                    @["render", "--batch", "spec.batch", "--out", "bout"]]),
+      ("script", @[@["script", "show", "spec.eus"],
+                  @["script", "plan", "spec.eus", "--file", "scriptbase.eproj"],
+                  @["script", "run", "spec.eus", "--file", "scriptrun.eproj"],
+                  @["script", "record", "spec-rec.eus", "spec.eproj"],
+                  @["script", "render", "spec.eus", "--file", "scriptbase.eproj",
+                    "--out", "spec-script.wav", "--seconds", "1"]]),
       ("notation", @[@["notation", "check", "spec.notes"],
                      @["notation", "import", "spec.notes", "--file",
                        "spec.eproj", "--name", "Second"]]),
@@ -3588,4 +3619,226 @@ suite "CLI: project recover и автосохранение (#110)":
       let shown = runCliIn(d, ["project", "show", "a.eproj", "--json"])
       check parseJson(shown.output)["metadata"]["tempo"].getFloat == 111.0
       check fileExists(d / "a.eproj.bak")
+
+
+# =============================================================================
+# Сценарии: команда `script`, пакетный режим и эталон рендера (#333, #334, #335)
+# =============================================================================
+#
+# Тест чёрный, как и остальные: он проверяет наблюдаемое поведение — коды
+# возврата, файлы и NDJSON. Критерии приёмки сформулированы так же
+# («plan не меняет файл», «два прогона дают одинаковые сэмплы»), поэтому
+# проверка внутренних функций здесь ничего бы не доказала.
+
+suite "CLI: сценарии — script, --script и эталон (#333, #334, #335)":
+  const
+    ScenarioPath = "tests/scenarios/golden.eus"
+    BaseProject = "tests/scenarios/golden.base.eproj"
+    BaselinePath = "tests/scenarios/golden.baseline.json"
+
+  let workDir = getTempDir() / "euterpia_cli_script"
+  # Каталог общий на suite и переживает прогон: без очистки второй запуск
+  # увидел бы сценарии и проекты предыдущего (record тогда честно откажет).
+  if dirExists(workDir):
+    removeDir(workDir)
+  createDir(workDir)
+
+  proc scriptProject(name: string): string =
+    ## Копия базового проекта: сценарий применяется к пустому документу,
+    ## поэтому тесты не должны зависеть друг от друга.
+    createDir(workDir)
+    result = workDir / name
+    copyFile(BaseProject, result)
+
+  proc fileSha(path: string): string =
+    $secureHash(readFile(path))
+
+  test "script show читает сценарий и не требует проекта":
+    let r = runCli(["script", "show", ScenarioPath])
+    check r.code == 0
+    check "node.create" in r.output
+    check "graph.connect" in r.output
+    let machine = parseJson(runCli(["--json", "script", "show", ScenarioPath]).output)
+    check machine["ok"].getBool
+    check machine["format"].getStr == "euterpia.script"
+    check machine["commandCount"].getInt == 5
+
+  test "script plan не меняет проект и детерминирован":
+    let project = scriptProject("plan.eproj")
+    let before = fileSha(project)
+    let first = runCli(["--json", "script", "plan", ScenarioPath,
+                        "--file", project])
+    check first.code == 0
+    check fileSha(project) == before
+    let body = parseJson(first.output)
+    check body["changed"].getBool
+    check body["counts"]["nodes"]["delta"].getInt == 2
+    check body["commands"].len == 5
+    # План не должен зависеть от момента запуска (#88).
+    let second = runCli(["--json", "script", "plan", ScenarioPath,
+                         "--file", project])
+    check first.output == second.output
+
+  test "script run применяет сценарий, пишет историю и отменяется целиком":
+    let project = scriptProject("run.eproj")
+    let r = runCli(["script", "run", ScenarioPath, "--file", project])
+    check r.code == 0
+    let onDisk = parseJson(readFile(project))
+    check onDisk["graph"]["nodes"].len == 2
+    check onDisk["graph"]["nodes"][0]["parameters"]["freq"].getFloat == 220.0
+    check onDisk["graph"]["nodes"][1]["parameters"]["gain"].getFloat == 0.5
+    check onDisk["graph"]["connections"].len == 1
+    check fileExists(project & ".history")
+    # Одна запись истории — весь сценарий: откат возвращает пустой проект.
+    check runCli(["undo", project]).code == 0
+    check parseJson(readFile(project))["graph"]["nodes"].len == 0
+
+  test "script run отказывается повторяться и не оставляет половины":
+    let project = scriptProject("repeat.eproj")
+    check runCli(["script", "run", ScenarioPath, "--file", project]).code == 0
+    let after = fileSha(project)
+    let again = runCli(["script", "run", ScenarioPath, "--file", project])
+    check again.code == 1
+    check "уже есть" in again.errput
+    check fileSha(project) == after
+
+  test "script record записывает историю и не перезаписывает без --force":
+    let project = scriptProject("record.eproj")
+    check runCli(["node", "add", "osc", "--file", project]).code == 0
+    check runCli(["script", "record", workDir / "rec.eus", project]).code == 0
+    let scenario = parseJson(readFile(workDir / "rec.eus"))
+    check scenario["format"].getStr == "euterpia.script"
+    check scenario["commandCount"].getInt == 1
+    check scenario["commands"][0]["kind"].getStr == "node.create"
+    # Существующий сценарий — не затирается молча: нужен --force.
+    check runCli(["script", "record", workDir / "rec.eus", project]).code == 1
+    check runCli(["script", "record", workDir / "rec.eus", project,
+                  "--force"]).code == 0
+
+  test "script render детерминирован, сверяется с эталоном и не пишет без ключа":
+    let outA = workDir / "a.wav"
+    let outB = workDir / "b.wav"
+    createDir(workDir)
+    let first = runCli(["script", "render", ScenarioPath,
+                        "--file", BaseProject, "--out", outA, "--seconds", "1",
+                        "--baseline", BaselinePath])
+    check first.code == 0
+    check "эталон: совпал" in first.output
+    let second = runCli(["script", "render", ScenarioPath,
+                         "--file", BaseProject, "--out", outB, "--seconds", "1",
+                         "--baseline", BaselinePath, "--samples"])
+    check second.code == 0
+    check readFile(outA) == readFile(outB)
+    # Эталон не переписывается молча: --dry-run обновления ничего не меняет.
+    let before = fileSha(BaselinePath)
+    let dry = runCli(["script", "render", ScenarioPath, "--file", BaseProject,
+                      "--out", outA, "--seconds", "1", "--baseline",
+                      BaselinePath, "--update-baseline", "--dry-run"])
+    check dry.code == 0
+    check fileSha(BaselinePath) == before
+
+
+  test "изменённый сценарий роняет сверку с эталоном (код 1)":
+    createDir(workDir)
+    let loud = workDir / "loud.eus"
+    writeFile(loud, readFile(ScenarioPath).replace("\"freq\": 220",
+                                                   "\"freq\": 330"))
+    let loudOut = workDir / "loud.wav"
+    let r = runCli(["--json", "script", "render", loud, "--file", BaseProject,
+                    "--out", loudOut, "--seconds", "1",
+                    "--baseline", BaselinePath, "--samples"])
+    check r.code == 1
+    let body = parseJson(r.output)
+    check not body["ok"].getBool
+    check body["error"]["kind"].getStr == "baseline"
+    check body["differences"].len > 0
+    var mentioned = false
+    for item in body["differences"]:
+      if "сценарий изменился" in item.getStr:
+        mentioned = true
+    check mentioned
+    # Обновление эталона — отдельная ЯВНАЯ команда: без неё файл не тронут.
+    let before = fileSha(BaselinePath)
+    check runCli(["script", "render", loud, "--file", BaseProject,
+                  "--out", loudOut, "--seconds", "1",
+                  "--baseline", BaselinePath]).code == 1
+    check fileSha(BaselinePath) == before
+
+  test "--script: один проект на сессию, NDJSON без человеческих вставок":
+    let project = scriptProject("batch.eproj")
+    let batch = workDir / "batch.txt"
+    writeFile(batch, "# комментарий\n" &
+                     "open " & project & "\n" &
+                     "node add oscillator --name osc\n" &
+                     "node add gain --name out\n" &
+                     "connect osc:out out:in\n" &
+                     "param set osc freq 220\n" &
+                     "status\n")
+    let r = runCli(["--json", "--script", batch])
+    check r.code == 0
+    var lines: seq[string] = @[]
+    for line in r.output.splitLines():
+      if line.len > 0:
+        lines.add line
+    # 6 команд + итог: каждая строка — самостоятельный JSON-объект.
+    check lines.len == 7
+    for line in lines:
+      check parseJson(line)["schema"].getInt == 1
+    let summary = parseJson(lines[^1])
+    check summary["executed"].getInt == 6
+    check summary["failed"].getInt == 0
+    check parseJson(readFile(project))["graph"]["nodes"].len == 2
+
+  test "--script: ошибка называет строку, --keep-going продолжает":
+    let project = scriptProject("errors.eproj")
+    let batch = workDir / "errors.txt"
+    writeFile(batch, "open " & project & "\n" &
+                     "node add oscillator --name osc\n" &
+                     "param set osc freq 999999\n" &
+                     "node add gain --name out\n")
+    let strict = runCli(["--script", batch])
+    check strict.code == 1
+    check "строка 3" in strict.output
+    # Без --keep-going четвёртая строка не выполнилась.
+    check parseJson(readFile(project))["graph"]["nodes"].len == 1
+
+    let lenient = runCli(["--json", "--script", batch, "--keep-going"])
+    check lenient.code == 1
+    let lines = nonEmptyLines(lenient.output)
+    let summary = parseJson(lines[^1])
+    check summary["executed"].getInt == 4
+    check summary["failed"].getInt == 1
+    # Строки после ошибки выполнены: к прежней ноде добавились osc и gain.
+    check parseJson(readFile(project))["graph"]["nodes"].len == 3
+
+  test "stdin без TTY исполняется и завершается сам (#97)":
+    let project = scriptProject("stdin.eproj")
+    let input = "open " & project & "\n" &
+                "node add oscillator --name osc\n"
+    let r = runCli([], input = input)
+    check r.code == 0
+    check "добавлена нода" in r.output
+    check parseJson(readFile(project))["graph"]["nodes"].len == 1
+    # И в машинном режиме: каждая строка — JSON.
+    let machine = runCli(["--json"], input = input)
+    check machine.code == 0
+    for line in nonEmptyLines(machine.output):
+      check parseJson(line)["schema"].getInt == 1
+
+  test "--script не совмещается с командой, --keep-going — только в пакете":
+    check runCli(["--script", ScenarioPath, "version"]).code == 1
+    check runCli(["version", "--keep-going"]).code == 1
+    check runCli(["--script", workDir / "nope.txt"]).code == 2
+
+  test "shell из сценария не исполняется: ; остаётся аргументом":
+    let project = scriptProject("unsafe.eproj")
+    let marker = workDir / "shell-ran"
+    if fileExists(marker):
+      removeFile(marker)
+    let batch = workDir / "unsafe.txt"
+    writeFile(batch, "open " & project & "\n" &
+                     "node add osc; touch " & marker & "\n")
+    let r = runCli(["--script", batch])
+    check r.code == 1
+    check not fileExists(marker)
 

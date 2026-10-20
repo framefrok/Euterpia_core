@@ -1,174 +1,79 @@
 # cli/main.nim
 #
-# Диспетчер CLI (issue #88): разбор argv, поиск команды в реестре, печать
-# отчёта и код возврата.
+# Точка входа CLI (issue #88, #334): какой режим выбрать и как завершиться.
 #
-# Грамматика намеренно простая и предсказуемая:
+# Три режима, и выбор между ними — правило, а не догадка:
+#
+#   euterpia <команда> …        одна команда (прежнее поведение);
+#   euterpia --script <файл>    сценарий строк-команд в ОДНОМ процессе;
+#   euterpia                    без аргументов: TTY → REPL,
+#                               перенаправленный stdin → строки-команды,
+#                               пустой stdin → справка (это ответ, не ошибка).
+#
+# Почему режимы различаются по `isatty`, а не по «есть ли аргументы»:
+#   агент и CI перенаправляют stdin; если бы CLI ждал ввода, прогон «завис»
+#   (#97). А пустой перенаправленный stdin — это не сессия, а «ничего не
+#   просили»: печатается справка, как и раньше.
+#
+# Грамматика argv намеренно простая:
 #
 #   euterpia [глобальные ключи] <команда> [аргументы команды]
 #   euterpia [глобальные ключи] <команда> [--] [аргументы]
+#   euterpia [глобальные ключи] --script <файл|-> [--keep-going]
 #
-# Глобальные ключи распознаются И до, и после имени команды (MANIFEST §21
-# показывает именно `euterpia --json node list`). Всё, что не является
-# глобальным ключом, уходит команде как есть: CLI не угадывает значения
-# ключей за команду.
-#
-# Внешних зависимостей нет: только std. `std/parseopt` здесь не подходит —
-# он не выражает «глобальные ключи вокруг команды» и не сохраняет исходный
-# вид аргументов для команды, а CLI обязан передавать их без искажений.
+# Внешних зависимостей нет: только std. `std/parseopt` здесь не подходит — он
+# не выражает «глобальные ключи вокруг команды» и не сохраняет исходный вид
+# аргументов для команды, а CLI обязан передавать их без искажений.
 
-import std/os
+import std/[os, strutils, terminal]
+
 import context
-import config
 import logger
-import registry
+import config
 import commands
+import dispatch
+import batch
 
-proc stripGlobals(
-  tokens: seq[string];
-  ctx: var Ctx
-): tuple[rest: seq[string]; wantHelp: bool] =
-  ## Вынимает глобальные ключи из хвоста argv (после имени команды) и
-  ## возвращает аргументы команды в исходном виде.
-  ##
-  ## `--` прекращает разбор ключей: дальше могут идти значения, которые
-  ## начинаются с дефиса (`__complete doctor --`, префикс `-x`).
-  var passthrough = false
-  for token in tokens:
-    if not passthrough:
-      if token == "--":
-        passthrough = true
-        continue
-      if token == "--json":
-        ctx.mode = omJson
-        ctx.modeExplicit = true
-        continue
-      if token == "--human":
-        # Ключ argv сильнее настройки `output` (#258).
-        ctx.mode = omHuman
-        ctx.modeExplicit = true
-        continue
-      if token == "--verbose" or token == "-v":
-        ctx.verbose = true
-        ctx.logLevel = llDebug
-        ctx.logLevelExplicit = true
-        continue
-      if token == "--quiet" or token == "-q":
-        ctx.quiet = true
-        ctx.logLevel = llError
-        ctx.logLevelExplicit = true
-        continue
-      if token == "--dry-run":
-        ctx.dryRun = true
-        continue
-      if token == "--help" or token == "-h":
-        result.wantHelp = true
-        continue
-    result.rest.add token
+type
+  BatchOptions = object
+    ok: bool
+    rep: Report
+    scriptPath: string
+    keepGoing: bool
+    rest: seq[string]
 
-proc dispatch(ctx: var Ctx): int =
-  setupRegistry()
-  let cmds = allCommands()
-  let argv = commandLineParams()
-
-  var command = ""
-  var tail: seq[string] = @[]
-  var wantHelp = false
-  var wantVersion = false
-
-  # Голова argv: глобальные ключи и имя команды.
+proc takeBatchOptions(argv: seq[string]): BatchOptions =
+  ## Вынимает `--script <файл|->` и `--keep-going` из argv. Остальное
+  ## возвращается как есть: разбор команд — дело `dispatch`.
   var i = 0
   while i < argv.len:
     let token = argv[i]
-    if token == "--":
-      if i + 1 < argv.len:
-        command = argv[i + 1]
-        if i + 2 < argv.len:
-          tail = argv[i + 2 .. ^1]
-      break
-    if token == "--help" or token == "-h":
-      wantHelp = true
+    if token == "--script":
+      if i + 1 >= argv.len:
+        result.rep = usageError("--script: нужен файл сценария",
+          "например: euterpia --script demo.txt")
+        return
       inc i
-      continue
-    if token == "--version":
-      wantVersion = true
-      inc i
-      continue
-    if token == "--json":
-      ctx.mode = omJson
-      ctx.modeExplicit = true
-      inc i
-      continue
-    if token == "--human":
-      # Ключ argv сильнее настройки `output` (#258).
-      ctx.mode = omHuman
-      ctx.modeExplicit = true
-      inc i
-      continue
-    if token == "--verbose" or token == "-v":
-      ctx.verbose = true
-      ctx.logLevel = llDebug
-      ctx.logLevelExplicit = true
-      inc i
-      continue
-    if token == "--quiet" or token == "-q":
-      ctx.quiet = true
-      ctx.logLevel = llError
-      ctx.logLevelExplicit = true
-      inc i
-      continue
-    if token == "--dry-run":
-      ctx.dryRun = true
-      inc i
-      continue
-    if token.len > 0 and token[0] == '-':
-      # Неизвестный ключ ДО команды: списать его на команду нельзя, она ещё
-      # не названа — значит это ошибка использования.
-      ctx.command = ""
-      let rep = usageError("неизвестный ключ: " & token, "список ключей: euterpia --help")
-      emit(ctx, rep)
-      return ord(rep.code)
-    command = token
-    if i + 1 < argv.len:
-      tail = argv[i + 1 .. ^1]
-    break
+      result.scriptPath = argv[i]
+    elif token.startsWith("--script="):
+      result.scriptPath = token["--script=".len .. ^1]
+      if result.scriptPath.len == 0:
+        result.rep = usageError("--script=: пустой путь",
+          "например: euterpia --script=demo.txt")
+        return
+    elif token == "--keep-going":
+      result.keepGoing = true
+    else:
+      result.rest.add token
+    inc i
+  result.ok = true
 
-  if command.len == 0:
-    if wantVersion:
-      ctx.command = "version"
-      let rep = runVersion(ctx, @[])
-      emit(ctx, rep)
-      return ord(rep.code)
-    if wantHelp or argv.len == 0:
-      # Запуск без аргументов ничего сделать не может, а справка — может:
-      # это не ошибка, а ответ на вопрос «что тут есть».
-      ctx.command = "help"
-      let rep = helpReport(cmds, "")
-      emit(ctx, rep)
-      return ord(rep.code)
-    ctx.command = ""
-    let rep = usageError("не указана команда")
-    emit(ctx, rep)
-    return ord(rep.code)
-
-  ctx.command = command
-  let stripped = stripGlobals(tail, ctx)
-
-  if wantHelp or stripped.wantHelp:
-    let rep = helpReport(cmds, command)
-    emit(ctx, rep)
-    return ord(rep.code)
-
-  let index = findCommand(cmds, command)
-  if index < 0:
-    let rep = usageError("неизвестная команда: " & command,
-                         "список команд: euterpia --help")
-    emit(ctx, rep)
-    return ord(rep.code)
-
-  let rep = cmds[index].run(ctx, stripped.rest)
-  emit(ctx, rep)
-  ord(rep.code)
+proc readStdinLines(): seq[string] =
+  ## Строки stdin до EOF. Чтение обязано закончиться само: агент закрывает
+  ## поток, а не нажимает Ctrl-D (#97).
+  var line = ""
+  while stdin.readLine(line):
+    result.add line
 
 proc loadSettings(ctx: var Ctx) =
   ## Настройки читаются ОДИН раз при старте и задают УМОЛЧАНИЯ; ключи argv
@@ -181,6 +86,12 @@ proc loadSettings(ctx: var Ctx) =
     if ctx.config.entry("output").value == "json": omJson else: omHuman
   ctx.logLevel = logLevelFromName(ctx.config.entry("logLevel").value)
 
+proc emitAndCode(ctx: var Ctx; rep: Report): int =
+  ## Печать и код возврата в одном месте: разойтись они не могут.
+  emit(ctx, rep)
+  ord(rep.code)
+
+
 proc main*(): int =
   ## Точка входа. Единственное место, где исключение превращается в код
   ## возврата: необработанная ошибка CLI — это баг (код 3), а не ошибка
@@ -188,9 +99,75 @@ proc main*(): int =
   var ctx = Ctx(mode: omHuman, logLevel: llWarn)
   try:
     loadSettings(ctx)
-    return dispatch(ctx)
+    let options = takeBatchOptions(commandLineParams())
+    if not options.ok:
+      return emitAndCode(ctx, options.rep)
+
+    # Глобальные ключи применяются ДО выбора режима: `--json --script demo.txt`
+    # обязан дать NDJSON, а не человеческий вывод (критерий #334).
+    let globals = stripGlobals(options.rest, ctx)
+    var commandTokens: seq[string] = @[]
+    var beforeCommand = true
+    for token in globals.rest:
+      if beforeCommand:
+        if token == "--version":
+          commandTokens.add token
+          continue
+        if token == "--":
+          beforeCommand = false
+          commandTokens.add token
+          continue
+        if token.len > 0 and token[0] == '-':
+          return emitAndCode(ctx, usageError("неизвестный ключ: " & token,
+            "список ключей: euterpia --help"))
+        beforeCommand = false
+      commandTokens.add token
+
+    if options.scriptPath.len > 0:
+      # `--script` не совмещается с командой: что из двух исполнять — вопрос
+      # без ответа, и угадывать его CLI не будет.
+      if commandTokens.len > 0:
+        return emitAndCode(ctx, usageError(
+          "--script не совмещается с командой: " & commandTokens[0],
+          "или сценарий, или команда: euterpia --script demo.txt"))
+      if options.scriptPath == "-":
+        return runBatchLines(ctx, readStdinLines(), options.keepGoing,
+                             "<stdin>")
+      if not fileExists(options.scriptPath):
+        return emitAndCode(ctx, envError(
+          "нет такого сценария: " & options.scriptPath,
+          "строка сценария — команда CLI без `euterpia`: `node add osc`"))
+      var lines: seq[string] = @[]
+      try:
+        lines = readFile(options.scriptPath).splitLines()
+      except CatchableError as e:
+        return emitAndCode(ctx, envError(
+          "не удалось прочитать сценарий: " & e.msg,
+          "проверьте права: " & options.scriptPath))
+      return runBatchLines(ctx, lines, options.keepGoing, options.scriptPath)
+
+    if options.keepGoing:
+      return emitAndCode(ctx, usageError(
+        "--keep-going имеет смысл только в пакетном режиме",
+        "используйте: euterpia --script demo.txt --keep-going"))
+
+    # Одна команда: разбор argv и исполнение — как раньше.
+    if commandTokens.len > 0:
+      return emitAndCode(ctx, executeArgv(ctx, options.rest))
+
+    # Без команды: TTY — интерактивная сессия, иначе строки stdin. Пустой
+    # stdin означает «ничего не просили» — это справка, а не пустой сеанс.
+    if globals.wantHelp:
+      return emitAndCode(ctx, executeArgv(ctx, options.rest))
+    if isatty(stdin):
+      return runRepl(ctx)
+    let lines = readStdinLines()
+    if lines.len == 0:
+      return emitAndCode(ctx, helpReport(allCommands(), ""))
+    return runBatchLines(ctx, lines, options.keepGoing, "<stdin>")
   except CatchableError as e:
     let rep = panicError("внутренняя ошибка CLI: " & e.msg,
                          "это баг: приложите вывод `euterpia --version` и команду")
     emit(ctx, rep)
     ord(rep.code)
+
