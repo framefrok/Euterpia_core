@@ -49,7 +49,7 @@ const
 
   ScriptSpec* = CommandSpec(
     name: "script",
-    summary: "сценарии: запись, план без выполнения, повтор и рендер",
+    summary: "сценарии: план, повтор, сборка с нуля и рендер",
     synopsis: "script <run|plan|show|record|render|build> <сценарий.eus> " &
       "[--file проект] [ключи]",
     subcommands: ScriptSubcommands,
