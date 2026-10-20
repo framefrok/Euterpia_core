@@ -24,7 +24,7 @@
 | DSP-ноды | ✅ 11 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise, metronome) + **17 инструментов** (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`, `strings`, `bell`, `harp`, `harpsichord`, `recorder`, `brass`, `timpani`, `choir`, `ukulele`, `accordion`, `harmonica`) + нотный секвенсор `notes`, плеер секвенсора `sequencer` и плеер аудиоклипов `clip`; всего 31 тип, полный каталог с параметрами — [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md); C-ядра с SIMD-дисплеями (#274, #301, #303, #321) |
 | Кодеки | ✅ WAV 16/24/32-бит (чтение и запись), FLAC (чтение и запись встроенным lossless-энкодером), MP3/OGG Vorbis (чтение; lossy-превью сдачи — CLI через ffmpeg/lame/oggenc), AIFF/AIFC (чтение и запись), Standard MIDI File (#10, #411) |
 | Тесты | ✅ 700+ unit-проверок (180+ suite) + интеграционный набор + 170+ CLI smoke; Core/Commons/инструменты покрыты (#57, #274, #290) |
-| CLI | 🟡 линия v0.3 (#86): шаги v0.3.5–v0.3.7 закрыты; впереди v0.3.8–v0.3.11; каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate|recover` (#89, #110), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись входа `record` (#94), MIDI-порты/монитор (#93), импорт SMF (#111), метроном и count-in (#112), автоматизация `automation` (#114), восстановление `project recover` (#110), стемы и батч `render --stems|--batch` (#108), плагины `plugin scan/info/params/save/validate` и `node add plugin:<id>` (#95, #260), живой MIDI-вход `play --midi-in/--midi-target` (#413), ресемплинг `--device-rate/--src` (#8), сдача `master --format wav|flac|ogg|mp3` (#411), сценарии `script run|plan|show|record|render` с переменными и эталоном рендера, пакетный `--script`, stdin/REPL и NDJSON (#333, #334, #335, #97); справочник команд и JSON-схемы — **[docs/cli.md](docs/cli.md)** |
+| CLI | 🟡 линия v0.3 (#86): шаги v0.3.5–v0.3.7 закрыты; впереди v0.3.8–v0.3.11; каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate|recover` (#89, #110), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись входа `record` (#94), MIDI-порты/монитор (#93), импорт SMF (#111), метроном и count-in (#112), автоматизация `automation` (#114), восстановление `project recover` (#110), стемы и батч `render --stems|--batch` (#108), плагины `plugin scan/info/params/save/validate` и `node add plugin:<id>` (#95, #260), живой MIDI-вход `play --midi-in/--midi-target` (#413), ресемплинг `--device-rate/--src` (#8), сдача `master --format wav|flac|ogg|mp3` (#411), сценарии `script run|plan|show|record|render|build` с переменными, пересборкой и эталоном рендера, пакетный `--script`, stdin/REPL и NDJSON (#333, #334, #335, #97); справочник команд и JSON-схемы — **[docs/cli.md](docs/cli.md)** |
 | Поставка | ✅ архивы Linux/Windows/macOS, `install.sh`/`install.ps1`, ассоциации `*.eproj`/`*.eut`, проверка на чистой `ubuntu:24.04` (#229) |
 | Инспектор аудио | 🟡 пассивный анализ WAV: клиппинг, DC, щелчки, провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость; отчёт с локализацией (#290); позже — помощник в v0.7 (#178) |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
@@ -389,6 +389,11 @@ CLI — полноценный интерфейс управления (MANIFEST
 - [x] #335 сценарий как тест — ✅ `script render` с эталоном (метрики, SHA-1
       файла, сценария и сэмплов), обновление только явной командой,
       golden-прогон в CI (`tools/script_scenario.sh`, `nimble scriptScenario`)
+- [x] #416 `script build` — ✅ пересборка проекта с нуля: метаданные из
+      `--base`/текущего файла, `--force` на перезапись, `.bak` и архив
+      истории (`.history.bak`), отказ при потере ресурсов/состояний
+      плагинов/автоматизации без `--allow-loss`; `init --force` архивирует
+      историю (#331)
 - [x] #105 `doctor` (самодиагностика окружения) — ✅ сделано: секции
       build/audio/midi/plugins/fs/csrc, human и `--json`, exit 0/2
 - [x] #259 автодополнение оболочки — ✅ сделано: `completion bash|zsh|fish`
@@ -721,12 +726,13 @@ CLI — процесс на одну команду, поэтому истори
 правка сбрасывает повтор (как в Commons); «отменять нечего» и битый файл истории
 дают код 1 с причиной, а `--dry-run` показывает действие, не трогая диск.
 
-### Сценарии (#333, #334, #335)
+### Сценарии (#333, #334, #335, #416)
 
 ```bash
 euterpia script show demo.eus                     # что внутри, ничего не делая
 euterpia script plan demo.eus --file demo.eproj   # что изменится (файл не тронут)
 euterpia script run  demo.eus --file demo.eproj   # применить одной транзакцией
+euterpia script build demo.eus --force            # пересобрать проект С НУЛЯ (#416)
 euterpia script record done.eus demo.eproj        # записать сделанное из истории
 euterpia script render demo.eus --out demo.wav --seconds 1 \
   --baseline demo.baseline.json --update-baseline # эталон рендера (#335)
@@ -742,6 +748,15 @@ euterpia                                          # TTY → REPL (приглаш
 одной транзакцией и оставляет запись истории, поэтому `undo` отменяет сценарий
 целиком. Сценарий не читает системное время: часы берутся из поля `stamp` или
 из прежней отметки проекта — повтор даёт побайтово тот же документ.
+
+`run` описывает правку, поэтому второй раз упирается в `already exists`.
+Пересборка «как из генератора» — отдельный глагол `build`: содержимое
+заменяется, метаданные берутся из `--base`/текущего файла, прежняя версия
+остаётся в `.bak`, история переезжает в `.history.bak` (документ заменён —
+прежний стек к нему не относится). Если проект содержит то, чего сценарий не
+выражает (ресурсы, состояния плагинов, автоматизация), сборка отказывает со
+списком: `--allow-loss` — осознанное согласие. Две сборки из одного сценария
+и одной базы дают побайтово тот же файл.
 
 Сценарий-строки (`--script`, stdin, REPL) — сессия: `open demo.eproj` один раз,
 дальше команды действуют на открытый проект; `status` показывает проект,
