@@ -674,6 +674,35 @@ proc renderProject(ctx: var Ctx; scan: RenderScan; proj: ProjectFormat;
   okReport(body = body, lines = lines)
 
 
+proc renderPreparedProject*(ctx: var Ctx; path, outPath: string;
+                            proj: ProjectFormat;
+                            seconds: float64 = 0.0;
+                            tail: float64 = DefaultTailSeconds;
+                            master: int = -1;
+                            sampleRate: int = 0;
+                            blockSize: int = 0;
+                            bits: int = DefaultBits): Report =
+  ## Рендер проекта, который уже находится в памяти: сценарий применяется к
+  ## документу и рендерится БЕЗ промежуточного файла проекта (#335).
+  ##
+  ## Это тот же путь, что у `render`: сцена, движок и WAV — одни и те же;
+  ## меняется только источник модели. Поэтому эталонный прогон сценария
+  ## проверяет настоящий рендер, а не «похожий на него».
+  ##
+  ## `path` нужен для относительных путей плагинов и ресурсов (они считаются
+  ## от проекта), `outPath` — файл результата.
+  var scan = RenderScan(path: path, outPath: outPath, haveOut: true,
+                        tail: tail, master: master, soloTrack: -1'i32,
+                        bits: bits, blockSize: blockSize,
+                        sampleRate: sampleRate,
+                        nameTemplate: "{track}_{name}.wav")
+  if seconds > 0.0:
+    scan.seconds = seconds
+    scan.haveSeconds = true
+  let meta = queryMetadata(openDocument(path, proj))
+  renderProject(ctx, scan, proj, meta)
+
+
 # =============================================================================
 # Стемы и батч (#108)
 # =============================================================================
