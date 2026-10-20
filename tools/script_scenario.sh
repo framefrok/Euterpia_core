@@ -78,6 +78,43 @@ fi
 [ "$RUN_SHA" = "$(sha "$WORK/run.eproj")" ] ||
   fail "неудачный run изменил проект"
 
+echo "— script build собирает с нуля и повторяется"
+"$CLI" script build "$SCENARIO" --file "$WORK/build-a.eproj" \
+  --base "$BASE" >/dev/null || fail "script build (a) вернул ошибку"
+"$CLI" script build "$SCENARIO" --file "$WORK/build-b.eproj" \
+  --base "$BASE" >/dev/null || fail "script build (b) вернул ошибку"
+cmp -s "$WORK/build-a.eproj" "$WORK/build-b.eproj" ||
+  fail "две сборки из одного сценария различаются"
+"$CLI" graph check "$WORK/build-a.eproj" >/dev/null ||
+  fail "собранный проект не проходит graph check"
+BUILD_SHA="$(sha "$WORK/build-a.eproj")"
+if "$CLI" script build "$SCENARIO" --file "$WORK/build-a.eproj" \
+     --base "$BASE" >/dev/null 2>&1; then
+  fail "повторный build без --force должен отказать"
+fi
+[ "$BUILD_SHA" = "$(sha "$WORK/build-a.eproj")" ] ||
+  fail "отказ build изменил проект"
+
+echo "— build архивирует историю, init --force — тоже (#416)"
+cp "$BASE" "$WORK/hist.eproj"
+"$CLI" script run "$SCENARIO" --file "$WORK/hist.eproj" >/dev/null ||
+  fail "run для проверки архива истории"
+"$CLI" script build "$SCENARIO" --file "$WORK/hist.eproj" --force >/dev/null ||
+  fail "build --force поверх истории"
+[ -f "$WORK/hist.eproj.history.bak" ] ||
+  fail "build не архивировал историю"
+if "$CLI" undo "$WORK/hist.eproj" >/dev/null 2>&1; then
+  fail "undo после build должен сказать «отменять нечего»"
+fi
+"$CLI" init "$WORK/initarch.eproj" --force >/dev/null ||
+  fail "init (свежий)"
+"$CLI" node add osc --file "$WORK/initarch.eproj" >/dev/null ||
+  fail "node add для проверки архива"
+"$CLI" init "$WORK/initarch.eproj" --force >/dev/null ||
+  fail "init --force"
+[ -f "$WORK/initarch.eproj.history.bak" ] ||
+  fail "init --force не архивировал историю"
+
 echo "— golden-рендер детерминирован"
 "$CLI" script render "$SCENARIO" --file "$BASE" --out "$WORK/a.wav" \
   --seconds 1 --baseline "$BASELINE" --samples >/dev/null 2>&1 ||
@@ -143,4 +180,4 @@ if "$CLI" --script "$WORK/unsafe.txt" >/dev/null 2>&1; then
 fi
 [ -e "$WORK/shell-ran" ] && fail "shell-команда из сценария исполнилась"
 
-echo "ok: сценарий прошёл — план, транзакция, golden-рендер и NDJSON (#333, #335)"
+echo "ok: сценарий прошёл — план, транзакция, сборка, golden-рендер и NDJSON (#333, #335, #416)"

@@ -2280,6 +2280,10 @@ suite "CLI: спецификация команд — один источник 
                   @["script", "plan", "spec.eus", "--file", "scriptbase.eproj"],
                   @["script", "run", "spec.eus", "--file", "scriptrun.eproj"],
                   @["script", "record", "spec-rec.eus", "spec.eproj"],
+                  @["script", "build", "spec.eus", "--file", "scriptbuilt.eproj",
+                    "--base", "scriptbase.eproj"],
+                  @["script", "build", "spec.eus", "--file", "scriptbuilt.eproj",
+                    "--base", "scriptbase.eproj", "--force"],
                   @["script", "render", "spec.eus", "--file", "scriptbase.eproj",
                     "--out", "spec-script.wav", "--seconds", "1"]]),
       ("notation", @[@["notation", "check", "spec.notes"],
@@ -3841,4 +3845,102 @@ suite "CLI: сценарии — script, --script и эталон (#333, #334, #
     let r = runCli(["--script", batch])
     check r.code == 1
     check not fileExists(marker)
+
+
+  test "script build собирает с нуля, повтор — побайтово тот же проект":
+    let project = workDir / "built.eproj"
+    let first = runCli(["script", "build", ScenarioPath, "--file", project,
+                        "--base", BaseProject])
+    check first.code == 0
+    check "записан:" in first.output
+    let bytes = readFile(project)
+    let onDisk = parseJson(bytes)
+    check onDisk["graph"]["nodes"].len == 2
+    check onDisk["graph"]["connections"].len == 1
+    # Содержимое — из сценария, метаданные — из --base.
+    check onDisk["metadata"]["name"].getStr == "Golden"
+
+    # Без --force существующий проект не перезаписывается.
+    let again = runCli(["script", "build", ScenarioPath, "--file", project,
+                        "--base", BaseProject])
+    check again.code == 1
+    check "уже есть" in again.errput
+    check readFile(project) == bytes
+
+    # С --force — тот же файл: сборка детерминирована.
+    let forced = runCli(["script", "build", ScenarioPath, "--file", project,
+                         "--base", BaseProject, "--force"])
+    check forced.code == 0
+    check readFile(project) == bytes
+    check fileExists(project & ".bak")
+
+  test "build архивирует историю: undo не применяет чужой стек":
+    let project = scriptProject("arch.eproj")
+    check runCli(["script", "run", ScenarioPath, "--file", project]).code == 0
+    check fileExists(project & ".history")
+    let r = runCli(["script", "build", ScenarioPath, "--file", project,
+                    "--force"])
+    check r.code == 0
+    check "история: архивирована" in r.output
+    check fileExists(project & ".history.bak")
+    let undo = runCli(["undo", project])
+    check undo.code == 1
+    check "отменять нечего" in undo.errput
+
+  test "build не теряет автоматизацию молча, --dry-run не пишет":
+    let project = scriptProject("loss.eproj")
+    # Файл уже создан копией базы — сборка требует --force.
+    check runCli(["script", "build", ScenarioPath, "--file", project,
+                  "--base", BaseProject, "--force"]).code == 0
+    check runCli(["automation", "add", project, "--node", "1",
+                  "--param", "freq", "--tick", "0", "--value", "220"]).code == 0
+    let refused = runCli(["script", "build", ScenarioPath, "--file", project,
+                          "--force", "--base", BaseProject])
+    check refused.code == 1
+    check "automationLanes" in refused.output
+    check "--allow-loss" in refused.errput
+
+    let before = readFile(project)
+    let dry = runCli(["--dry-run", "script", "build", ScenarioPath,
+                      "--file", project, "--force", "--allow-loss",
+                      "--base", BaseProject])
+    check dry.code == 0
+    check readFile(project) == before
+
+    let allowed = runCli(["script", "build", ScenarioPath, "--file", project,
+                          "--force", "--allow-loss", "--base", BaseProject])
+    check allowed.code == 0
+    check "потеряно осознанно" in allowed.output
+    check parseJson(readFile(project))["sequencer"]["automationLanes"].len == 0
+
+  test "plan --build показывает сборку и не трогает диск":
+    let project = workDir / "planbuild.eproj"
+    let r = runCli(["--json", "script", "plan", ScenarioPath, "--file", project,
+                    "--base", BaseProject, "--build"])
+    check r.code == 0
+    check not fileExists(project)
+    let body = parseJson(r.output)
+    check body["build"].getBool
+    check body["base"].getStr == BaseProject
+    check body["counts"]["nodes"]["after"].getInt == 2
+    check body["lost"].len == 0
+
+  test "run на собранном проекте подсказывает build --force":
+    let project = scriptProject("hint.eproj")
+    check runCli(["script", "build", ScenarioPath, "--file", project,
+                  "--base", BaseProject, "--force"]).code == 0
+    let again = runCli(["script", "run", ScenarioPath, "--file", project])
+    check again.code == 1
+    check "script build" in again.errput
+    check "--force" in again.errput
+
+  test "init --force архивирует историю прежнего документа (#416)":
+    let project = scriptProject("initarch.eproj")
+    check runCli(["node", "add", "osc", "--file", project]).code == 0
+    check fileExists(project & ".history")
+    let r = runCli(["init", project, "--force"])
+    check r.code == 0
+    check "история: архивирована" in r.output
+    check fileExists(project & ".history.bak")
+    check runCli(["undo", project]).code == 1
 
