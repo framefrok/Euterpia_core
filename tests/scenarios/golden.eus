@@ -1,0 +1,19 @@
+{
+  "format": "euterpia.script",
+  "version": 1,
+  "description": "эталонный рендер: осциллятор ${freq} Гц → gain ${gain}",
+  "project": "tests/scenarios/golden.base.eproj",
+  "variables": {
+    "freq": 220,
+    "gain": 0.5
+  },
+  "commands": [
+    {"kind": "node.create", "nodeType": "euterpia.osc", "name": "osc"},
+    {"kind": "node.create", "nodeType": "euterpia.gain", "name": "out"},
+    {"kind": "graph.connect",
+     "src": {"nodeId": 1, "kind": 0, "index": 0},
+     "dst": {"nodeId": 2, "kind": 0, "index": 0}},
+    {"kind": "param.set", "nodeId": 1, "paramName": "freq", "value": "${freq}"},
+    {"kind": "param.set", "nodeId": 2, "paramName": "gain", "value": "${gain}"}
+  ]
+}
