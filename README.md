@@ -881,6 +881,8 @@ euterpia --help             # поверхность команд
 - Поверхность команд и JSON-схемы — **[docs/cli.md](docs/cli.md)**.
 - Действия интерфейса и их паритет с CLI — **[docs/clients.md](docs/clients.md)**.
 - Поставка, ассоциации и чистая машина — **[docs/delivery.md](docs/delivery.md)**.
+- Продуктовая направленность и долгосрочное видение — **[docs/direction.md](docs/direction.md)**
+  (ненормативно: архитектуру задаёт [MANIFEST.md](MANIFEST.md), решения — ADR/issues).
 - История версий — **[CHANGELOG.md](CHANGELOG.md)**.
 - Сборка без установки: `nimble cli` → `build/euterpia`.
 

@@ -23,6 +23,7 @@ build/
 *.flac
 *.ogg
 *.mp3
+*.m4a
 *.mid
 rt_scratch*
 *.log
