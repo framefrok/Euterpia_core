@@ -168,6 +168,34 @@ proc writeHistory*(projectPath: string; hist: CliHistory): ErrorFrame =
                     "проверьте каталог и права: " & path)
   okFrame()
 
+proc historyArchivePath*(projectPath: string): string =
+  ## Куда переезжает история при ПЕРЕСОЗДАНИИ документа (#416): документ
+  ## заменён целиком, поэтому прежний стек к нему не относится.
+  historyPath(projectPath) & ".bak"
+
+proc archiveHistory*(projectPath: string): ErrorFrame =
+  ## Архивировать историю перед перезаписью проекта: `<проект>.history` →
+  ## `<проект>.history.bak`. Прежний архив заменяется (каждый пересбор —
+  ## новый архив), поэтому «история всех сборок» не изображается.
+  ##
+  ## Нет файла — не ошибка: истории просто ещё не было. Ошибка перемещения —
+  ## ОТКАЗ, а не «продолжим без архива»: вызывающий обязан сначала
+  ## заархивировать, потом писать документ, иначе новый проект останется с
+  ## чужим стеком отмены.
+  let path = historyPath(projectPath)
+  if not fileExists(path):
+    return okFrame()
+  let archive = historyArchivePath(projectPath)
+  try:
+    if fileExists(archive):
+      removeFile(archive)
+    moveFile(path, archive)
+  except CatchableError as e:
+    return errFrame(ecEnvironment,
+                    "не удалось архивировать историю: " & e.msg,
+                    "проверьте каталог и права: " & archive)
+  okFrame()
+
 # =============================================================================
 # Операции над стеком
 # =============================================================================

@@ -30,6 +30,21 @@ build/euterpia script render tests/scenarios/golden.eus \
 частота, пик, RMS, SHA-1 сценария), поэтому обновление видно в diff, а не
 происходит молча. `--dry-run` не пишет и эталон.
 
+## Сборка проекта (#416)
+
+Тот же сценарий собирает проект «с нуля» — это проверяется в CI рядом с
+эталоном:
+
+```bash
+build/euterpia script build tests/scenarios/golden.eus \
+  --file /tmp/golden.eproj --base tests/scenarios/golden.base.eproj
+build/euterpia graph check /tmp/golden.eproj
+```
+
+Две сборки из одной базы обязаны совпасть побайтово. Повторный `build` без
+`--force` — отказ, а не тихая перезапись; `--force` оставляет `.bak` и
+архивирует историю (`.history.bak`).
+
 ## Почему базовый проект пустой
 
 Сценарий описывает правку, а не состояние: `node.create` на уже собранном

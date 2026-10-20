@@ -624,9 +624,19 @@ proc runInit*(ctx: var Ctx; args: seq[string]): Report =
     lines.add "не записан: " & options.path & " (--dry-run)"
     return okReport(body = body, lines = lines)
 
+  # Перезапись документа делает прежнюю историю чужой (#416): стек отмены
+  # ссылается на ноды и параметры, которых в новом проекте нет. Архив — ДО
+  # записи: если он не удался, проект не трогается.
+  let hadHistory = fileExists(historyPath(options.path))
+  let archived = archiveHistory(options.path)
+  if not archived.isOk():
+    return frameReport(archived)
+
   let saved = writeAtomic(options.path, proj)
   if not saved.success:
     return saveError(saved, options.path)
+  if hadHistory:
+    lines.add "история: архивирована в " & historyArchivePath(options.path)
   lines.add "записан: " & options.path
   okReport(body = body, lines = lines)
 
