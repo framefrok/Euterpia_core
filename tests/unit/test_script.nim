@@ -253,3 +253,90 @@ suite "script: эталон рендера (#335)":
     check not frame.isOk()
     check frame.code == ecInvalidArgument
 
+
+suite "script: сборка с нуля (#416)":
+  test "baseDocument сохраняет метаданные и не тащит содержимое":
+    var tpl = emptyProject()
+    tpl.metadata.name = "Base"
+    tpl.metadata.author = "Author"
+    tpl.metadata.tempo = 100.0f
+    tpl.graph.nodes.add NodeFormat(id: 1, nodeType: "test.osc")
+    tpl.sequencer.tracks.add TrackFormat(id: 1, name: "t")
+    tpl.sequencer.automationLanes.add AutomationLaneFormat(nodeId: 1,
+                                                           paramId: 1)
+    tpl.pluginStates.add PluginStateFormat(nodeId: 1, pluginId: "p")
+    tpl.resources.add AudioResourceFormat(id: 1, path: "a.wav")
+
+    let base = baseDocument(tpl)
+    check base.format == ProjectFormatName
+    check base.metadata.name == "Base"
+    check base.metadata.author == "Author"
+    check base.metadata.tempo == 100.0f
+    check base.graph.nodes.len == 0
+    check base.graph.connections.len == 0
+    check base.sequencer.tracks.len == 0
+    check base.sequencer.automationLanes.len == 0
+    check base.pluginStates.len == 0
+    check base.resources.len == 0
+
+  test "пустой шаблон даёт текущий формат и версию":
+    let base = baseDocument(ProjectFormat())
+    check base.format == ProjectFormatName
+    check base.version == ProjectFormatVersion
+
+  test "lossReport называет ресурсы, состояния и автоматизацию":
+    var proj = emptyProject()
+    proj.resources.add AudioResourceFormat(id: 1, path: "a.wav")
+    proj.pluginStates.add PluginStateFormat(nodeId: 1, pluginId: "p")
+    proj.sequencer.automationLanes.add AutomationLaneFormat(nodeId: 1,
+                                                           paramId: 1)
+    let sc = parseOk(scenarioJson(createAndConnect()))
+    let losses = lossReport(proj, sc)
+    check losses.len == 3
+    var kinds: seq[string] = @[]
+    for item in losses:
+      kinds.add item.kind
+      check item.count == 1
+      check item.reason.len > 0
+    check "resources" in kinds
+    check "pluginStates" in kinds
+    check "automationLanes" in kinds
+
+  test "чистый проект не даёт потерь":
+    let sc = parseOk(scenarioJson(createAndConnect()))
+    check lossReport(emptyProject(), sc).len == 0
+
+  test "состояния покрыты сценарием — потерь по ним нет":
+    var proj = emptyProject()
+    proj.pluginStates.add PluginStateFormat(nodeId: 1, pluginId: "p")
+    proj.sequencer.automationLanes.add AutomationLaneFormat(nodeId: 1,
+                                                           paramId: 1)
+    let scriptWithStates = Script(
+      version: ScriptFormatVersion,
+      commands: @[restoreNodeState(
+        1'i32,
+        @[AutomationLaneFormat(nodeId: 1'i32, paramId: 1'u32)],
+        @[PluginStateFormat(nodeId: 1, pluginId: "p")])])
+    check lossReport(proj, scriptWithStates).len == 0
+
+  test "сборка на одинаковых базах детерминирована":
+    let sc = parseOk(scenarioJson(createAndConnect()))
+    var tpl = emptyProject()
+    tpl.metadata.name = "Golden"
+    var first = newDoc(baseDocument(tpl))
+    var second = newDoc(baseDocument(tpl))
+    check applyScript(first, sc, "сборка").frame.isOk()
+    check applyScript(second, sc, "сборка").frame.isOk()
+    check snapshot(first) == snapshot(second)
+    check first.proj.graph.nodes.len == 2
+    check first.proj.metadata.name == "Golden"
+
+  test "сборка не копирует содержимое шаблона даже при успехе":
+    let sc = parseOk(scenarioJson(createAndConnect()))
+    var tpl = emptyProject()
+    tpl.graph.nodes.add NodeFormat(id: 7, nodeType: "test.gain")
+    var doc = newDoc(baseDocument(tpl))
+    check applyScript(doc, sc, "сборка").frame.isOk()
+    check doc.proj.graph.nodes.len == 2
+    check doc.proj.graph.nodes[0].id == 1
+

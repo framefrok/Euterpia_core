@@ -110,6 +110,18 @@ type
       ## котором сохранены только размеры: сравнение честно скажет, что
       ## сверять нечего, а не «всё совпало».
 
+  LossItem* = object
+    ## Что текущий проект содержит, а сценарий выразить не может (#416).
+    ## Сборка «с нуля» эти сущности заменит, поэтому о потере нужно сказать
+    ## ДО записи, а не после.
+    kind*: string
+      ## `resources` | `pluginStates` | `automationLanes` — стабильные имена
+      ## для `--json`.
+    count*: int
+    reason*: string
+      ## Почему сценарий это не выражает. Текст для человека; вид — для
+      ## машины.
+
 # =============================================================================
 # Переменные сценария
 # =============================================================================
@@ -515,6 +527,63 @@ proc applyScript*(doc: var Document; script: Script;
   result.after = toJson(doc.proj)
   result.changed = $result.before != $result.after
   result.summary = diffSummary(result.before, result.after)
+
+# =============================================================================
+# Сборка проекта «с нуля» (#416)
+# =============================================================================
+#
+# Разница с `applyScript` принципиальная:
+#   `run`  — правка текущего документа (дельты поверх него);
+#   `build` — новый документ: содержимое отбрасывается, остаются метаданные.
+# Поэтому «пересобрать проект» не может быть флагом `run`: это другая
+# операция с другим ответом на вопрос «что станет с существующим файлом».
+
+proc baseDocument*(tpl: ProjectFormat): ProjectFormat =
+  ## Пустой документ с метаданными шаблона. Копируются ровно `format`,
+  ## `version` и `metadata`; граф, секвенсор, ресурсы и состояния плагинов —
+  ## НЕ копируются: иначе это была бы правка, а не сборка.
+  ##
+  ## `tpl` может быть пустым (`ProjectFormat()`): тогда формат и версия
+  ## берутся текущие, а метаданные остаются пустыми — хозяин документа
+  ## заполняет их умолчаниями `init` (CLI) или своими (Editor).
+  result.format =
+    (if tpl.format.len > 0: tpl.format else: ProjectFormatName)
+  result.version =
+    (if tpl.version > 0: tpl.version else: ProjectFormatVersion)
+  result.metadata = tpl.metadata
+
+proc lossReport*(current: ProjectFormat; script: Script): seq[LossItem] =
+  ## Что текущий проект содержит, а сценарий выразить НЕ может. Сборка эти
+  ## сущности заменит, поэтому клиент обязан спросить до записи (#416).
+  ##
+  ## Проверка смотрит на команды сценария, а не на список «что мы умеем
+  ## сегодня»: когда `node.restoreState` и `resource.load` станут допустимыми
+  ## в сценарии, отчёт сам перестанет считать их потерей.
+  var coversStates = false
+  for cmd in script.commands:
+    if cmd.kind == ccRestoreNodeState:
+      coversStates = true
+
+  if current.resources.len > 0:
+    result.add LossItem(
+      kind: "resources",
+      count: current.resources.len,
+      reason: "импортированное аудио: команда `resource.load` объявлена, но не " &
+              "реализована — сценарий не может создать ресурс")
+  if current.pluginStates.len > 0 and not coversStates:
+    result.add LossItem(
+      kind: "pluginStates",
+      count: current.pluginStates.len,
+      reason: "состояния плагинов: сценарий не выражает их (команда " &
+              "`node.restoreState` пока не принимается сценарием)")
+  if current.sequencer.automationLanes.len > 0 and not coversStates:
+    result.add LossItem(
+      kind: "automationLanes",
+      count: current.sequencer.automationLanes.len,
+      reason: "автоматизация: в control-модели нет команды для линий — " &
+              "CLI пишет их напрямую, сценарий их не создаёт")
+
+
 
 
 

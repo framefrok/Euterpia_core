@@ -30,6 +30,7 @@ import cmd_render
 import control_bridge
 import history_file
 import script
+import stamp
 import control/commands
 import control/document
 import control/query
@@ -38,7 +39,7 @@ import project
 import codec_api
 
 const
-  ScriptSubcommands* = @["run", "plan", "show", "record", "render"]
+  ScriptSubcommands* = @["run", "plan", "show", "record", "render", "build"]
     ## Подкоманды `script` — они же кандидаты автодополнения второго уровня.
 
   DefaultBaselineSuffix = ".baseline.json"
@@ -49,17 +50,19 @@ const
   ScriptSpec* = CommandSpec(
     name: "script",
     summary: "сценарии: запись, план без выполнения, повтор и рендер",
-    synopsis: "script <run|plan|show|record|render> <сценарий.eus> " &
+    synopsis: "script <run|plan|show|record|render|build> <сценарий.eus> " &
       "[--file проект] [ключи]",
     subcommands: ScriptSubcommands,
     args: @[
-      arg("<подкоманда>", "run|plan|show|record|render"),
+      arg("<подкоманда>", "run|plan|show|record|render|build"),
       arg("сценарий.eus", "файл сценария (*" & ScriptSuffix & ")"),
       arg("проект.eproj", "проект, если он не задан ключом --file"),
     ],
     options: @[
       opt("--file", "проект: " & projectSuffixesHint() &
         "; по умолчанию — из сценария или " & DefaultProjectFile,
+        value = "проект.eproj"),
+      opt("--base", "build: проект, из которого взять ТОЛЬКО метаданные",
         value = "проект.eproj"),
       opt("--var", "значение переменной сценария; можно повторять",
         value = "имя=значение"),
@@ -80,17 +83,25 @@ const
       switch("--update-baseline",
              "render: пересоздать эталон явно и показать, что изменилось"),
       switch("--samples", "render: сверять с эталоном сэмплы, а не только метрики"),
-      switch("--force", "record: перезаписать существующий сценарий"),
+      switch("--force", "record: перезаписать сценарий; build: перезаписать проект"),
+      switch("--allow-loss",
+             "build: разрешить потерю ресурсов, состояний плагинов и автоматизации"),
+      switch("--build",
+             "plan: показать сборку с нуля, а не правку текущего проекта"),
     ],
     example: "euterpia script run demo.eus --file demo.eproj",
     fields: @[
       field("scenario", "файл сценария"),
       field("path", "проект, к которому применён сценарий"),
-      field("action", "что сделала подкоманда: `run`|`plan`|`show`|`record`|`render`"),
+      field("action", "что сделала подкоманда: `run`|`plan`|`show`|`record`|`render`|`build`"),
+      field("base", "build: проект, из которого взяты метаданные"),
       field("commands", "команды сценария: вид и (у `show`) данные"),
       field("commandCount", "сколько команд в сценарии"),
       field("changed", "меняет ли сценарий документ (у `plan` — до применения)"),
       field("counts", "счётчики сущностей `before`/`after`/`delta`"),
+      field("lost", "build: что будет потеряно — `kind`, `count`, `reason`"),
+      field("backup", "build: путь к `.bak` прежней версии проекта"),
+      field("archivedHistory", "build: путь к архиву истории (`.history.bak`)"),
       field("dryRun", "диск не тронут"),
       field("rendered", "render: файл записан"),
       field("frames", "render: кадров в результате"),
@@ -101,6 +112,9 @@ const
       "сценарий — команды control-слоя в JSON (`euterpia.script`), а не строки shell: ничего не исполняется через оболочку",
       "`script run` применяет сценарий ОДНОЙ транзакцией: отказ не оставляет половины изменений",
       "`script plan` не меняет ни файл, ни документ: команды гоняются на копии",
+      "`script build` собирает проект С НУЛЯ: содержимое заменяется, метаданные берутся из `--base`/текущего файла",
+      "существующий проект перезаписывается только с `--force`; прежняя версия остаётся в `.bak`, история — в `.history.bak`",
+      "если в проекте есть ресурсы, состояния плагинов или автоматизация, которых нет в сценарии, сборка отказывает: `--allow-loss` — явное согласие",
       "переменные `" & "${имя}" & "` подставляются из `variables` сценария и из `--var имя=значение`",
       "`script record` берёт операции из истории проекта (`<проект>.history`), а не из вывода терминала",
       "`script render` — тот же офлайн-рендер, что `render`; эталон сверяется по метрикам, а `--samples` добавляет сэмплы",
@@ -134,6 +148,9 @@ type
     updateBaseline: bool
     samples: bool
     force: bool
+    basePath: string
+    allowLoss: bool
+    buildPlan: bool
 
 # =============================================================================
 # Разбор аргументов
@@ -204,7 +221,8 @@ proc scanArgs(args: seq[string]): ScriptScan =
       value = token[eq + 1 .. ^1]
       haveInline = true
 
-    if key in ["--update-baseline", "--samples", "--force"]:
+    if key in ["--update-baseline", "--samples", "--force", "--allow-loss",
+               "--build"]:
       if haveInline:
         result.rep = usageError(key & " — флаг и не принимает значение",
           "например: euterpia script render " & key)
@@ -213,6 +231,8 @@ proc scanArgs(args: seq[string]): ScriptScan =
       of "--update-baseline": result.updateBaseline = true
       of "--samples": result.samples = true
       of "--force": result.force = true
+      of "--allow-loss": result.allowLoss = true
+      of "--build": result.buildPlan = true
       else: discard
     elif key in ScriptKeys:
       if not haveInline:
@@ -226,6 +246,8 @@ proc scanArgs(args: seq[string]): ScriptScan =
       of "--file":
         result.projectPath = value
         result.haveProject = true
+      of "--base":
+        result.basePath = value
       of "--var":
         let sep = value.find('=')
         if sep <= 0:
@@ -364,6 +386,7 @@ proc clockFor(stamp: string): Clock =
   ## поэтому документ не зависит от того, когда его создали.
   proc(): string = stamp
 
+
 proc readScript(scan: ScriptScan; text: var string; parsed: var Script): Report =
   ## Прочитать и разобрать сценарий. Текст возвращается вызывающему: из него
   ## считается sha1 для эталона (#335), и второй раз файл не читается.
@@ -404,6 +427,88 @@ proc saveProject(ctx: Ctx; path: string; proj: ProjectFormat;
     return frameReport(recorded)
   okReport()
 
+
+
+# =============================================================================
+# Сборка «с нуля»: метаданные и потери (#416)
+# =============================================================================
+
+type
+  BuildTemplate = object
+    ## Откуда взять метаданные для сборки и какая отметка времени станет
+    ## `metadata.modified`. Содержимое проекта сюда не входит: сборка его
+    ## заменяет.
+    ok: bool
+    rep: Report
+    proj: ProjectFormat
+    basePath: string
+      ## Пусто — метаданные по умолчанию (как у `init`).
+    modified: string
+
+proc metadataOf(info: MetadataInfo; format: string; version: int): ProjectFormat =
+  ## Метаданные из Query API в формате проекта. Читать `proj.metadata` в CLI
+  ## нельзя (§63, `nimble archGuard`), поэтому единственный вход — DTO.
+  ProjectFormat(
+    format: (if format.len > 0: format else: ProjectFormatName),
+    version: (if version > 0: version else: ProjectFormatVersion),
+    metadata: ProjectMetadata(
+      name: info.name, author: info.author,
+      sampleRate: info.sampleRate, tempo: info.tempo,
+      timeSignature: TimeSignatureFormat(
+        numerator: info.tsNumerator, denominator: info.tsDenominator),
+      created: info.created, modified: info.modified))
+
+proc buildTemplate(scan: ScriptScan; projectPath: string;
+                   sc: Script): BuildTemplate =
+  ## Метаданные сборки: `--base` > существующий выходной проект > умолчания
+  ## `init`. Само содержимое не читается в документ — только метаданные.
+  let base =
+    if scan.basePath.len > 0: scan.basePath
+    elif fileExists(projectPath): projectPath
+    else: ""
+  if base.len > 0:
+    var proj: ProjectFormat
+    let loaded = loadProject(base, proj)
+    if not loaded.ok:
+      result.rep = loaded
+      return
+    let info = queryMetadata(openDocument(base, proj))
+    result.proj = metadataOf(info, proj.format, proj.version)
+    result.basePath = base
+    result.modified = info.modified
+  else:
+    let created = if sc.stamp.len > 0: sc.stamp else: nowStamp()
+    result.proj = ProjectFormat(
+      format: ProjectFormatName, version: ProjectFormatVersion,
+      metadata: ProjectMetadata(
+        name: defaultName(projectPath),
+        sampleRate: DefaultSampleRate, tempo: DefaultTempo,
+        timeSignature: TimeSignatureFormat(
+          numerator: DefaultTimeSigNumerator,
+          denominator: DefaultTimeSigDenominator),
+        created: created, modified: created))
+    result.modified = created
+  result.ok = true
+
+proc buildStamp(sc: Script; tpl: BuildTemplate): string =
+  ## Отметка для часов документа при сборке: сценарий сильнее метаданных,
+  ## метаданные сильнее системных часов. Поэтому повторная сборка поверх
+  ## своего же результата даёт тот же документ.
+  if sc.stamp.len > 0:
+    return sc.stamp
+  if tpl.modified.len > 0:
+    return tpl.modified
+  nowStamp()
+
+proc lossesJson(items: seq[LossItem]): JsonNode =
+  result = newJArray()
+  for item in items:
+    result.add %*{"kind": item.kind, "count": item.count,
+                  "reason": item.reason}
+
+proc lossLines(items: seq[LossItem]): seq[string] =
+  for item in items:
+    result.add "  " & item.kind & ": " & $item.count & " — " & item.reason
 
 # =============================================================================
 # Представление
@@ -491,7 +596,13 @@ proc runScriptRun(ctx: var Ctx; scan: ScriptScan): Report =
     if ctx.dryRun: previewScript(doc, sc, description)
     else: applyScript(doc, sc, description)
   if not run.frame.isOk():
-    return frameReport(run.frame)
+    # Отказ «уже есть» — не тупик: у пользователя есть сборка с нуля. Без
+    # этой подсказки единственным выходом остаётся удалить проект руками.
+    var rep = frameReport(run.frame)
+    if run.frame.code in {ecAlreadyExists, ecDuplicateConnection}:
+      rep.hint = "проект уже содержит эти объекты; пересобрать с нуля: " &
+        "euterpia script build " & scan.scenarioPath & " --force"
+    return rep
 
   var body = runBody(scan, projectPath, "run", sc, run, ctx.dryRun)
   var lines = @[CliName & " script run — сценарий", ""]
@@ -516,9 +627,57 @@ proc runScriptRun(ctx: var Ctx; scan: ScriptScan): Report =
   lines.add "история: " & historyPath(projectPath)
   okReport(body = body, lines = lines)
 
+proc runBuildPlan(scan: ScriptScan; sc: Script; projectPath: string): Report =
+  ## План сборки (`plan --build`): вопрос «что будет собрано с нуля».
+  ## Считается на пустом документе с метаданными, поэтому показывает ровно
+  ## то, что сделает `script build`.
+  let tpl = buildTemplate(scan, projectPath, sc)
+  if not tpl.ok:
+    return tpl.rep
+  var losses: seq[LossItem] = @[]
+  if fileExists(projectPath):
+    var current: ProjectFormat
+    let loaded = loadProject(projectPath, current)
+    if not loaded.ok:
+      return loaded
+    losses = lossReport(current, sc)
+  let baseProj = baseDocument(tpl.proj)
+  let doc = openDocumentAt(projectPath, baseProj,
+                           clockFor(buildStamp(sc, tpl)))
+  let run = previewScript(doc, sc, "план сборки: " & scan.scenarioPath)
+  if not run.frame.isOk():
+    return frameReport(run.frame)
+
+  var lines = @[CliName & " script plan --build — что будет собрано", ""]
+  lines.add scenarioHeader(scan, sc)
+  lines.add "проект: " & projectPath & " (будет собран с нуля)"
+  lines.add "база метаданных: " &
+    (if tpl.basePath.len > 0: tpl.basePath else: "(умолчания init)")
+  lines.add "команды:"
+  lines.add commandLines(sc)
+  let changes = changedLines(run.summary)
+  if changes.len == 0:
+    lines.add "изменения: документ не меняется"
+  else:
+    lines.add "изменения:"
+    lines.add changes
+  if losses.len > 0:
+    lines.add "потери при сборке (нужен --allow-loss):"
+    lines.add lossLines(losses)
+  lines.add "ничего не записано: план не меняет ни проект, ни историю"
+
+  var body = runBody(scan, projectPath, "plan", sc, run, true)
+  body["build"] = %true
+  body["base"] = %tpl.basePath
+  body["lost"] = lossesJson(losses)
+  okReport(body = body, lines = lines)
+
+
 proc runScriptPlan(ctx: var Ctx; scan: ScriptScan): Report =
   ## `script plan`: показать, что изменится, НЕ применяя. Диск не трогается
   ## даже без `--dry-run`: у `previewScript` нет `var Document`.
+  ##
+  ## `--build` меняет вопрос: план показывает, что даст `script build`.
   discard ctx
   var text = ""
   var sc: Script
@@ -527,6 +686,9 @@ proc runScriptPlan(ctx: var Ctx; scan: ScriptScan): Report =
     return read
 
   let projectPath = resolveProjectPath(scan, sc)
+  if scan.buildPlan:
+    return runBuildPlan(scan, sc, projectPath)
+
   var proj: ProjectFormat
   let loaded = loadProject(projectPath, proj)
   if not loaded.ok:
@@ -553,6 +715,112 @@ proc runScriptPlan(ctx: var Ctx; scan: ScriptScan): Report =
 
   okReport(body = runBody(scan, projectPath, "plan", sc, run, true),
            lines = lines)
+
+
+# =============================================================================
+# build (#416)
+# =============================================================================
+
+proc runScriptBuild(ctx: var Ctx; scan: ScriptScan): Report =
+  ## `script build`: собрать проект С НУЛЯ и записать его.
+  ##
+  ## Отличия от `run` зафиксированы контрактом, а не привычкой:
+  ##   * содержимое заменяется (метаданные — из `--base`/текущего файла);
+  ##   * существующий файл требует `--force` (защита от опечатки в пути);
+  ##   * история архивируется: документ заменён, прежний стек к нему не
+  ##     относится;
+  ##   * то, что сценарий не умеет выражать, не теряется молча — отказ или
+  ##     `--allow-loss`.
+  var text = ""
+  var sc: Script
+  let read = readScript(scan, text, sc)
+  if not read.ok:
+    return read
+
+  let projectPath = resolveProjectPath(scan, sc)
+  let exists = fileExists(projectPath)
+  if exists and not scan.force:
+    return usageError("проект уже есть: " & projectPath,
+      "перезапись: euterpia script build " & scan.scenarioPath & " --force",
+      code = ecAlreadyExists)
+
+  let tpl = buildTemplate(scan, projectPath, sc)
+  if not tpl.ok:
+    return tpl.rep
+
+  var losses: seq[LossItem] = @[]
+  if exists:
+    var current: ProjectFormat
+    let loaded = loadProject(projectPath, current)
+    if not loaded.ok:
+      return loaded
+    losses = lossReport(current, sc)
+    if losses.len > 0 and not scan.allowLoss:
+      var details = @[
+        "пересборка заменит проект целиком, а сценарий не создаёт:"]
+      details.add lossLines(losses)
+      return usageError(
+        "сборка потеряет данные проекта: " & $losses.len & " вид(ов)",
+        "если потеря ожидаема — добавьте --allow-loss",
+        code = ecCheckFailed, lines = details,
+        body = %*{"lost": lossesJson(losses)})
+
+  let description = "сборка: " & scan.scenarioPath &
+    " (команд: " & $sc.commands.len & ")"
+  let baseProj = baseDocument(tpl.proj)
+  var doc = openDocumentAt(projectPath, baseProj,
+                           clockFor(buildStamp(sc, tpl)))
+  let run =
+    if ctx.dryRun: previewScript(doc, sc, description)
+    else: applyScript(doc, sc, description)
+  if not run.frame.isOk():
+    return frameReport(run.frame)
+
+  var body = runBody(scan, projectPath, "build", sc, run, ctx.dryRun)
+  body["base"] = %tpl.basePath
+  body["force"] = %scan.force
+  body["lost"] = lossesJson(losses)
+
+  var lines = @[CliName & " script build — сборка проекта из сценария", ""]
+  lines.add scenarioHeader(scan, sc)
+  lines.add "проект: " & projectPath &
+    (if exists: " (перезаписан)" else: " (создан)")
+  lines.add "база метаданных: " &
+    (if tpl.basePath.len > 0: tpl.basePath else: "(умолчания init)")
+  let changes = changedLines(run.summary)
+  if changes.len > 0:
+    lines.add "изменения:"
+    lines.add changes
+  if losses.len > 0:
+    lines.add "потеряно осознанно (--allow-loss):"
+    lines.add lossLines(losses)
+
+  if ctx.dryRun:
+    lines.add "не записан: " & projectPath & " (--dry-run)"
+    lines.add "история: не тронута (--dry-run)"
+    return okReport(body = body, lines = lines)
+
+  # Сначала архив истории, потом запись: если архив не удался, проект цел и
+  # причина видна. Обратный порядок оставил бы новый проект с чужим стеком.
+  let hadHistory = fileExists(historyPath(projectPath))
+  let archived = archiveHistory(projectPath)
+  if not archived.isOk():
+    return frameReport(archived)
+
+  let saved = writeAtomic(projectPath, doc.proj)
+  if not saved.success:
+    return saveError(saved, projectPath)
+
+  if exists:
+    body["backup"] = %(projectPath & ".bak")
+    lines.add "прежняя версия: " & projectPath & ".bak"
+  if hadHistory:
+    body["archivedHistory"] = %historyArchivePath(projectPath)
+    lines.add "история: архивирована в " & historyArchivePath(projectPath)
+  else:
+    body["archivedHistory"] = %""
+  lines.add "записан: " & projectPath
+  okReport(body = body, lines = lines)
 
 
 # =============================================================================
@@ -896,6 +1164,7 @@ proc runScript*(ctx: var Ctx; args: seq[string]): Report =
   of "show": runScriptShow(ctx, scan)
   of "record": runScriptRecord(ctx, scan)
   of "render": runScriptRender(ctx, scan)
+  of "build": runScriptBuild(ctx, scan)
   else:
     usageError("script: неизвестная подкоманда «" & scan.subcommand & "»",
       "подкоманды: " & ScriptSubcommands.join(", "))
