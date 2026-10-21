@@ -1,0 +1,13 @@
+{
+  "format": "euterpia.param-preset",
+  "version": 1,
+  "name": "cello-warm",
+  "description": "тёплый виолончельный: мягче тембр, больше вибрато и ансамбля",
+  "nodeType": "euterpia.strings",
+  "params": {
+    "tone": 0.32,
+    "vibrato": 14.0,
+    "ensemble": 12.0,
+    "level": -10.0
+  }
+}

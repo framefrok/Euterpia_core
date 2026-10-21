@@ -46,6 +46,9 @@ import control_bridge
 import history_file
 import diff
 import project_lint
+import presets
+import script
+from catalog import builtinRegistry
 
 # Формат отметки и часы живут в `cli/stamp.nim` (там же объяснение, почему не
 # здесь): команды получают их через этот модуль — он их и создаёт.
@@ -146,22 +149,26 @@ const
       opt("--ts", "размер такта", value = "числитель/знаменатель",
           default = $DefaultTimeSigNumerator & "/" & $DefaultTimeSigDenominator,
           aliases = @["--time-signature"]),
+      opt("--preset", "стартовый проект по шаблону: " &
+          "`euterpia preset list` (#341)", value = "имя|файл.preset.json"),
       switch("--force", "перезаписать существующий файл"),
     ],
     example: "euterpia init demo.eproj --name Demo --tempo 140",
     fields: @[
       field("path", "куда записан проект"),
+      field("preset", "шаблон, по которому собран проект (пусто — пустой граф)"),
       field("documentId", "идентификатор документа: адреса одного файла отличимы от другого (#143)"),
       field("format", "имя формата файла — по нему ядро и узнаёт проект (§58)"),
       field("version", "версия формата"),
       field("metadata", "имя, автор, темп, частота дискретизации, размер"),
-      field("graph", "ноды и связи (после `init` пустые)"),
+      field("graph", "ноды и связи (после `init` без шаблона пустые)"),
       field("sequencer", "треки, клипы и автоматизация"),
       field("pluginStates", "состояния плагинов"),
       field("summary", "счётчики: ноды, связи, треки, клипы"),
     ],
     notes: @[
       "граф создаётся пустым: ноды добавляет `euterpia node add` (#90)",
+      "`--preset <имя>` собирает стартовый проект по шаблону тем же путём, что `script build` (#341): шаблон проверяется реестром ДО записи",
       "существующий файл не затирается: перезапись требует --force",
       "расширение — подпись файла, а не формат: историческое `.eut` принимается наравне с `" &
         ProjectExt & "`, а тип файла ядро определяет по содержимому (§19/§58)",
@@ -518,8 +525,13 @@ type
     nameGiven: bool
       ## Отличает «--name не передавали» от «--name ""»: в первом случае имя
       ## берётся из имени файла, во втором остаётся пустым по воле вызывающего.
+    preset: string
+      ## Шаблон стартового проекта (#341). Пусто — пустой граф, как раньше.
     tempo, sampleRate: float32
     tsNumerator, tsDenominator: int32
+    tempoGiven, sampleRateGiven, tsGiven, authorGiven: bool
+      ## Явные ключи сильнее метаданных шаблона: `init --preset band --tempo
+      ## 174` — это панк, а не «шаблон победил пользователя».
     force: bool
 
   InitParse = object
@@ -544,7 +556,7 @@ proc parseInit(args: seq[string]): InitParse =
   while i < tokens.len:
     let token = tokens[i]
     if token in ["--name", "--author", "--sr", "--sample-rate", "--tempo",
-                 "--ts", "--time-signature"]:
+                 "--ts", "--time-signature", "--preset"]:
       if i + 1 >= tokens.len:
         result.rep = usageError("ключ " & token & " требует значение",
                                 "например: euterpia init demo.eproj --tempo 140")
@@ -556,18 +568,23 @@ proc parseInit(args: seq[string]): InitParse =
         result.options.nameGiven = true
       of "--author":
         result.options.author = value
+        result.options.authorGiven = true
+      of "--preset":
+        result.options.preset = value
       of "--sr", "--sample-rate":
         let parsed = parseNumber(value, "sample-rate", MaxSampleRate)
         if not parsed.ok:
           result.rep = usageError(parsed.message, "например: --sr 48000")
           return
         result.options.sampleRate = float32(parsed.number)
+        result.options.sampleRateGiven = true
       of "--tempo":
         let parsed = parseNumber(value, "tempo", MaxTempo)
         if not parsed.ok:
           result.rep = usageError(parsed.message, "например: --tempo 140")
           return
         result.options.tempo = float32(parsed.number)
+        result.options.tempoGiven = true
       else:
         let parsed = parseTimeSignature(value)
         if not parsed.ok:
@@ -575,6 +592,7 @@ proc parseInit(args: seq[string]): InitParse =
           return
         result.options.tsNumerator = parsed.numerator
         result.options.tsDenominator = parsed.denominator
+        result.options.tsGiven = true
       inc i, 2
       continue
     if token == "--force":
@@ -597,6 +615,128 @@ proc parseInit(args: seq[string]): InitParse =
     result.options.path = positional[0]
   result.ok = true
 
+proc buildProjectFromCommands*(ctx: Ctx; path: string; meta: ProjectFormat;
+                               commands: seq[ControlCommand]; stamp: string;
+                               description: string;
+                               lines: var seq[string]): Report =
+  ## Собрать проект «с нуля» командами control-слоя — то же, что делает
+  ## `script build` (#416). Шаблон и сет-лист идут ЭТИМ путём, а не вторым
+  ## способом записи модели: один путь сборки — один звук.
+  ##
+  ## История прежнего проекта архивируется: документ заменяется целиком, и
+  ## стек отмены к нему больше не относится. Запись — через `writeAtomic`
+  ## (tmp + rename + `.bak`), поэтому оборванная сборка не оставляет
+  ## половины файла.
+  var doc = openDocumentAt(path, baseDocument(meta), proc(): string = stamp)
+  let scenario = Script(
+    version: ScriptFormatVersion,
+    description: description,
+    variables: initTable[string, JsonNode](),
+    commands: commands)
+  let run =
+    if ctx.dryRun: previewScript(doc, scenario, description)
+    else: applyScript(doc, scenario, description)
+  if not run.frame.isOk():
+    return frameReport(run.frame)
+
+  var body = %*{
+    "path": path,
+    "preset": "",
+    "written": false,
+    "dryRun": ctx.dryRun,
+    "commands": commands.len,
+    "counts": run.summary,
+  }
+
+  if ctx.dryRun:
+    lines.add "не записан: " & path & " (--dry-run)"
+    return okReport(body = body, lines = lines)
+
+  let archived = archiveHistory(path)
+  if not archived.isOk():
+    return frameReport(archived)
+  let saved = writeAtomic(path, doc.proj)
+  if not saved.success:
+    return saveError(saved, path)
+  body["written"] = %true
+  lines.add "записан: " & path
+  okReport(body = body, lines = lines)
+
+proc initFromPreset(ctx: Ctx; options: InitOptions): Report =
+  ## `init --preset <имя>`: стартовый проект по шаблону (issue #341).
+  ## Проверка реестром — ДО записи: неизвестный тип назван кодом причины, а
+  ## файл проекта не появляется.
+  let dirs = presetSearchDirs(pkTemplate)
+  let found = findPreset(pkTemplate, options.preset, dirs)
+  if not found.ok:
+    let available =
+      if found.available.len > 0: found.available.join(", ")
+      else: "ни одного: каталог " & DefaultPresetsDir / kindDir(pkTemplate)
+    return usageError("нет шаблона «" & options.preset & "»",
+                      "доступны: " & available, code = ecNotFound)
+  var preset: ProjectPreset
+  let loaded = loadPresetFile(found.path, preset)
+  if not loaded.isOk():
+    return frameReport(loaded)
+  let validated = validatePreset(preset, builtinRegistry())
+  if not validated.isOk():
+    return frameReport(validated)
+
+  let stamp = nowStamp()
+  var meta = ProjectFormat(
+    format: ProjectFormatName, version: ProjectFormatVersion,
+    metadata: ProjectMetadata(
+      name: (if options.nameGiven: options.name else: defaultName(options.path)),
+      author: options.author,
+      sampleRate: (if options.sampleRateGiven: options.sampleRate
+                   elif preset.sampleRate > 0: preset.sampleRate
+                   else: DefaultSampleRate),
+      tempo: (if options.tempoGiven: options.tempo
+              elif preset.tempo > 0: preset.tempo
+              else: DefaultTempo),
+      timeSignature: TimeSignatureFormat(
+        numerator: (if options.tsGiven: options.tsNumerator
+                    elif preset.tsNum > 0: preset.tsNum
+                    else: DefaultTimeSigNumerator),
+        denominator: (if options.tsGiven: options.tsDenominator
+                      elif preset.tsDen > 0: preset.tsDen
+                      else: DefaultTimeSigDenominator)),
+      created: stamp,
+      modified: stamp))
+
+  var lines: seq[string] = @[
+    CliName & " init --preset — стартовый проект",
+    "",
+    "шаблон: " & preset.name,
+    "файл шаблона: " & found.path,
+    "проект: " & options.path,
+    "нод: " & $preset.nodes.len & ", связей: " & $preset.connections.len &
+      ", дорожек: " & $preset.tracks.len,
+  ]
+  if preset.description.len > 0:
+    lines.add "описание: " & preset.description
+  var rep = buildProjectFromCommands(ctx, options.path, meta,
+                                     presetCommands(preset), stamp,
+                                     "шаблон: " & preset.name, lines)
+  if not rep.ok:
+    return rep
+  var body: JsonNode
+  if ctx.dryRun:
+    body = rep.body
+  else:
+    # После записи проект читается штатным путём: схема `init --preset` та же,
+    # что у `init` (`metadata`, `graph`, `summary`), плюс поля сборки.
+    let reloaded = loadAt(options.path)
+    if not reloaded.ok:
+      return reloaded.rep
+    body = projectBody(openDocument(options.path, reloaded.proj), options.path)
+    body["written"] = %true
+    body["commands"] = rep.body["commands"]
+    body["counts"] = rep.body["counts"]
+  body["preset"] = %preset.name
+  body["presetPath"] = %found.path
+  okReport(body = body, lines = rep.lines)
+
 proc runInit*(ctx: var Ctx; args: seq[string]): Report =
   ## `euterpia init [файл] [--tempo BPM] [--sr Гц] [--ts 4/4] [--name И]
   ## [--author А] [--force]`. Создаёт проект с метаданными и ПУСТЫМ графом:
@@ -613,6 +753,9 @@ proc runInit*(ctx: var Ctx; args: seq[string]): Report =
     return usageError("файл уже существует: " & options.path,
                       "перезапись: euterpia init " & options.path & " --force")
 
+  if options.preset.len > 0:
+    return initFromPreset(ctx, options)
+
   let stamp = nowStamp()
   var proj: ProjectFormat
   proj.format = ProjectFormatName
@@ -628,7 +771,10 @@ proc runInit*(ctx: var Ctx; args: seq[string]): Report =
     modified: stamp)
 
   let doc = openDocument(options.path, proj)
-  let body = projectBody(doc, options.path)
+  var body = projectBody(doc, options.path)
+  # Поле `preset` есть всегда: пустая строка — «собран без шаблона». Схема
+  # `--json` не должна зависеть от того, каким путём создан проект (#341).
+  body["preset"] = %""
   var lines: seq[string] = @[
     "проект: " & options.path,
     "формат: " & ProjectFormatName & " v" & $ProjectFormatVersion,

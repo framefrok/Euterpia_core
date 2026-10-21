@@ -1,0 +1,14 @@
+{
+  "format": "euterpia.param-preset",
+  "version": 1,
+  "name": "bass-sub",
+  "description": "саб-бас на органе: только низкая пара регистров, без клика",
+  "nodeType": "euterpia.organ",
+  "role": "bass",
+  "params": {
+    "bars": 0.0,
+    "tone": 0.2,
+    "click": 0.12,
+    "level": -6.0
+  }
+}

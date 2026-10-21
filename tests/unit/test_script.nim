@@ -136,6 +136,28 @@ suite "script: формат сценария (#333)":
     check "commands[0]" in frame.message
     check "nope" in frame.message
 
+  test "массивы внутри команд разбираются: ноты клипа не ломают подстановку":
+    # Регрессия: `substitute` обходил JArray через `pairs`, а `pairs` у
+    # JsonNode определён только для объектов — любой `clip.set` с нотами
+    # падал assertion'ом ещё до разбора команды.
+    let commands = %*[
+      {"kind": "track.add", "trackName": "lead"},
+      {"kind": "clip.add", "trackIndex": 0, "lengthTicks": 1920},
+      {"kind": "clip.set", "trackIndex": 0, "clipIndex": 0,
+       "lengthTicks": 1920,
+       "notes": [
+         {"startTick": 0, "duration": "${len}", "pitch": 60, "velocity": 100},
+         {"startTick": 480, "duration": 240, "pitch": 64, "velocity": 90}]},
+    ]
+    var sc: Script
+    let frame = parseScript(scenarioJson(commands, %*{"len": 480}), sc)
+    check frame.isOk()
+    if not frame.isOk():
+      checkpoint(frame.message)
+    check sc.commands.len == 3
+    check sc.commands[2].setClipNotes.len == 2
+    check sc.commands[2].setClipNotes[0].duration == 480
+
 suite "script: план и транзакция (#333)":
   test "preview не меняет документ, но показывает изменение":
     var doc = newDoc()

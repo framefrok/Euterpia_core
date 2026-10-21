@@ -2052,6 +2052,9 @@ suite "CLI: паритет клиентов — действие интерфе�
 
 suite "CLI: спецификация команд — один источник (#330)":
   let specDir = getTempDir() / "euterpia_cli_spec"
+  let presetsDir = absolutePath("presets")
+    ## Заготовки репозитория: `init --preset` и `preset …` ищут их в
+    ## `EUTERPIA_PRESETS`, потому что запуск идёт из временного каталога.
   if dirExists(specDir):
     removeDir(specDir)
   createDir(specDir)
@@ -2196,7 +2199,8 @@ suite "CLI: спецификация команд — один источник 
     ## ответе хотя бы одного запуска. Так схема не может разойтись с выводом:
     ## поле, переименованное в коде, тест увидит, а документация — нет.
     proc keysOf(args: seq[string]): seq[string] =
-      let r = runCliIn(specDir, @["--json"] & args)
+      let r = runCliIn(specDir, @["--json"] & args,
+                       @[("EUTERPIA_PRESETS", presetsDir)])
       # Код НЕ проверяем: отказ (например, `analyze` несуществующего файла)
       # тоже часть контракта — у отказа свои поля (`error`, `errorCode`).
       # Последняя строка — конверт: у `midi monitor` перед ним идёт NDJSON
@@ -2210,6 +2214,12 @@ suite "CLI: спецификация команд — один источник 
 
     # Фикстуры: проект с двумя нодами и связью, нотная нода, партитура, WAV.
     check runCliIn(specDir, ["init", "spec.eproj", "--force"]).code == 0
+    # Заготовки (#341–#343): проект из шаблона — база для `preset apply` и
+    # `preset param apply` в таблице вызовов ниже.
+    check runCliIn(specDir, ["init", "presetbase.eproj", "--force"],
+                   @[("EUTERPIA_PRESETS", presetsDir)]).code == 0
+    check runCliIn(specDir, ["preset", "apply", "band", "presetbase.eproj"],
+                   @[("EUTERPIA_PRESETS", presetsDir)]).code == 0
     check runCliIn(specDir, ["node", "add", "osc", "spec.eproj"]).code == 0
     check runCliIn(specDir, ["node", "add", "gain", "spec.eproj"]).code == 0
     check runCliIn(specDir, ["connect", "1:out", "2:in", "spec.eproj"]).code == 0
@@ -2274,6 +2284,16 @@ suite "CLI: спецификация команд — один источник 
                   @["param", "get", "1", "freq", "spec.eproj"],
                   @["param", "set", "1", "freq", "330", "spec.eproj"]]),
       ("graph", @[@["graph", "check", "spec.eproj"]]),
+      ("preset", @[@["preset", "list"],
+                   @["preset", "show", "band"],
+                   @["preset", "param", "list"],
+                   @["preset", "param", "show", "cello-warm"],
+                   @["preset", "apply", "band", "presetbase.eproj"],
+                   @["preset", "param", "apply", "piano-bright",
+                     "presetbase.eproj"]]),
+      ("setlist", @[@["setlist", "list"],
+                    @["setlist", "show", "punk-demo"],
+                    @["setlist", "apply", "punk-demo", "presetbase.eproj"]]),
       ("render", @[@["render", "spec.eproj", "spec2.wav", "--seconds", "1"],
                    @["render", "spec.eproj", "--seconds", "1", "--dry-run"],
                    @["render", "spec.eproj", "--stems", "stems", "--seconds", "1"],
@@ -4254,4 +4274,176 @@ suite "CLI: сравнение и проверки (#337–#340)":
     for step in dryBody["steps"]:
       dryStatuses.add step["status"].getStr
     check dryStatuses[^1] == "skip"
+
+
+# =============================================================================
+# Шаблоны, сет-листы и пресеты параметров (#341–#343)
+# =============================================================================
+#
+# Проверка чёрная: файлы заготовок лежат в репозитории, CLI запускается из
+# временного каталога с `EUTERPIA_PRESETS`, поэтому «в списке есть, а
+# применить нельзя» ловится сразу.
+
+suite "CLI: шаблоны, сет-листы и пресеты (#341–#343)":
+  let workDir = getTempDir() / "euterpia_cli_presets"
+  if dirExists(workDir):
+    removeDir(workDir)
+  createDir(workDir)
+  let presetsDir = absolutePath("presets")
+  let presetEnv = @[("EUTERPIA_PRESETS", presetsDir)]
+
+  proc inWork(args: openArray[string];
+              extra: seq[(string, string)] = @[]): RunResult =
+    runCliIn(workDir, args, presetEnv & extra)
+
+  proc projectPath(name: string): string =
+    workDir / name
+
+  proc nodeCount(path: string): int =
+    let r = inWork(["--json", "project", "show", path])
+    check r.code == 0
+    parseJson(r.output)["summary"]["nodes"].getInt
+
+  test "preset list и setlist list видят заготовки репозитория":
+    let templates = inWork(["--json", "preset", "list"])
+    check templates.code == 0
+    let tbody = parseJson(templates.output)
+    check tbody["kind"].getStr == "templates"
+    var names: seq[string] = @[]
+    for item in tbody["items"]:
+      names.add item["name"].getStr
+    check "band" in names
+    check tbody["problems"].len == 0
+
+    let params = parseJson(inWork(["--json", "preset", "param", "list"]).output)
+    check params["kind"].getStr == "params"
+    var paramNames: seq[string] = @[]
+    for item in params["items"]:
+      paramNames.add item["name"].getStr
+    check "cello-warm" in paramNames
+
+    let setlists = parseJson(inWork(["--json", "setlist", "list"]).output)
+    check setlists["kind"].getStr == "setlists"
+    var setlistNames: seq[string] = @[]
+    for item in setlists["items"]:
+      setlistNames.add item["name"].getStr
+    check "punk-demo" in setlistNames
+
+  test "init --preset даёт проект, проходящий graph check без правок":
+    let path = projectPath("band.eproj")
+    let created = inWork(["init", path, "--preset", "band"])
+    check created.code == 0
+    check fileExists(path)
+    check inWork(["graph", "check", path]).code == 0
+
+    let machine = parseJson(inWork(["--json", "init",
+                                    projectPath("band2.eproj"),
+                                    "--preset", "band"]).output)
+    check machine["ok"].getBool
+    check machine["preset"].getStr == "band"
+    # Шаблон собрал граф, а не только записал метаданные.
+    check machine["summary"]["nodes"].getInt == 7
+    check machine["summary"]["tracks"].getInt == 3
+
+  test "неизвестный шаблон — код 1 и список доступных":
+    let path = projectPath("no-such.eproj")
+    let r = inWork(["init", path, "--preset", "nope"])
+    check r.code == 1
+    check "нет шаблона" in r.errput
+    check "доступны" in r.errput
+    check "band" in r.errput
+    check not fileExists(path)
+
+  test "шаблон с неизвестным типом отвергается, файл не создаётся":
+    let bad = workDir / "bad.preset.json"
+    writeFile(bad, """{
+      "format":"euterpia.preset","version":1,"name":"bad",
+      "nodes":[{"type":"euterpia.nonexistent","name":"x"}]
+    }""")
+    let path = projectPath("bad.eproj")
+    let r = inWork(["init", path, "--preset", bad])
+    check r.code == 1
+    check "неизвестный тип" in r.errput
+    check not fileExists(path)
+
+
+  test "preset apply — транзакция: undo отменяет её целиком":
+    let path = projectPath("apply.eproj")
+    check inWork(["init", path]).code == 0
+    check nodeCount(path) == 0
+    check inWork(["preset", "apply", "band", path]).code == 0
+    check nodeCount(path) == 7
+    let undone = inWork(["undo", path])
+    check undone.code == 0
+    check nodeCount(path) == 0
+
+  test "setlist собирает пьесу с нуля и она рендерится без правок":
+    let path = projectPath("punk.eproj")
+    let wav = workDir / "punk.wav"
+    let built = inWork(["--json", "setlist", "apply", "punk-demo", path])
+    check built.code == 0
+    let body = parseJson(built.output)
+    check body["created"].getBool
+    check body["preset"].getStr == "band"
+    check body["parts"].len == 3
+    check body["counts"]["clips"]["after"].getInt == 3
+
+    let rendered = inWork(["--json", "render", path, wav, "--seconds", "1"])
+    check rendered.code == 0
+    let rbody = parseJson(rendered.output)
+    check rbody["peak"].getFloat > 0.01
+    check fileExists(wav)
+
+  test "повторный setlist обновляет клип, а не добавляет второй":
+    let path = projectPath("punk2.eproj")
+    check inWork(["--json", "setlist", "apply", "punk-demo", path]).code == 0
+    check inWork(["setlist", "apply", "punk-demo", path]).code == 0
+    let body = parseJson(inWork(["--json", "project", "show", path]).output)
+    check body["summary"]["clips"].getInt == 3
+    check body["summary"]["tracks"].getInt == 3
+
+  test "setlist без шаблона в проекте отвергается кодом 1":
+    let path = projectPath("empty.eproj")
+    check inWork(["init", path]).code == 0
+    let r = inWork(["setlist", "apply", "punk-demo", path])
+    check r.code == 1
+    check "init --preset" in r.errput
+
+  test "preset param apply: отчёт, роль и несовместимый тип":
+    let path = projectPath("param.eproj")
+    check inWork(["init", path, "--preset", "band"]).code == 0
+    let applied = inWork(["--json", "preset", "param", "apply",
+                          "piano-bright", path])
+    check applied.code == 0
+    let body = parseJson(applied.output)
+    check body["ok"].getBool
+    check body["nodeType"].getStr == "euterpia.piano"
+    check body["nodes"].getInt == 1
+    check body["applied"].len == 4
+
+    # Повтор даёт «не тронуто»: отчёт называет обе стороны, а не только
+    # изменённое (#343).
+    let again = parseJson(inWork(["--json", "preset", "param", "apply",
+                                  "piano-bright", path]).output)
+    check again["changed"].getBool == false
+    check again["applied"].len == 0
+    check again["unchanged"].len == 4
+
+    # Нода #1 — нотная (`euterpia.notes`), пресет — фортепианный: отказ.
+    let wrong = inWork(["preset", "param", "apply", "piano-bright", path,
+                        "--node", "1"])
+    check wrong.code == 1
+    check "имеет тип" in wrong.errput
+
+    let role = inWork(["preset", "param", "apply", "piano-bright", path,
+                       "--role", "nope"])
+    check role.code == 1
+    check "нет нод типа" in role.errput
+
+  test "справка preset показывает подкоманды и ключи":
+    let r = inWork(["help", "preset"])
+    check r.code == 0
+    check "preset <list|show|apply|param>" in r.output
+    check "--role" in r.output
+    check "init --preset" in r.output
 

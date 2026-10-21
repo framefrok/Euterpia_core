@@ -1,0 +1,82 @@
+{
+  "format": "euterpia.preset",
+  "version": 1,
+  "name": "band",
+  "description": "рок-состав: лид, бас, ударные и общий микс; 2 такта заготовки",
+  "tempo": 120,
+  "sampleRate": 48000,
+  "timeSignature": { "numerator": 4, "denominator": 4 },
+  "nodes": [
+    { "type": "euterpia.notes", "name": "lead" },
+    { "type": "euterpia.piano", "name": "Lead",
+      "params": { "tone": 0.55, "level": -8.0 } },
+    { "type": "euterpia.notes", "name": "bass" },
+    { "type": "euterpia.organ", "name": "Bass",
+      "params": { "bars": 0.25, "tone": 0.35, "click": 0.3, "level": -9.0 } },
+    { "type": "euterpia.notes", "name": "drums" },
+    { "type": "euterpia.drums", "name": "Drums",
+      "params": { "drive": 0.2, "snappy": 1.0, "level": -6.0 } },
+    { "type": "euterpia.mix", "name": "mix" }
+  ],
+  "connections": [
+    { "from": { "node": "lead", "port": 0 }, "to": { "node": "Lead", "port": 0 }, "signal": 2 },
+    { "from": { "node": "Lead", "port": 0 }, "to": { "node": "mix", "port": 0 }, "signal": 0 },
+    { "from": { "node": "bass", "port": 0 }, "to": { "node": "Bass", "port": 0 }, "signal": 2 },
+    { "from": { "node": "Bass", "port": 0 }, "to": { "node": "mix", "port": 1 }, "signal": 0 },
+    { "from": { "node": "drums", "port": 0 }, "to": { "node": "Drums", "port": 0 }, "signal": 2 },
+    { "from": { "node": "Drums", "port": 0 }, "to": { "node": "mix", "port": 2 }, "signal": 0 }
+  ],
+  "tracks": [
+    {
+      "name": "lead",
+      "clip": {
+        "name": "riff", "lengthTicks": 3840,
+        "notes": [
+          { "start": 0, "duration": 480, "pitch": 60, "velocity": 100 },
+          { "start": 480, "duration": 480, "pitch": 64, "velocity": 96 },
+          { "start": 960, "duration": 480, "pitch": 67, "velocity": 104 },
+          { "start": 1440, "duration": 480, "pitch": 72, "velocity": 100 },
+          { "start": 1920, "duration": 480, "pitch": 67, "velocity": 96 },
+          { "start": 2400, "duration": 480, "pitch": 64, "velocity": 100 },
+          { "start": 2880, "duration": 960, "pitch": 60, "velocity": 104 }
+        ]
+      }
+    },
+    {
+      "name": "bass",
+      "clip": {
+        "name": "root", "lengthTicks": 3840,
+        "notes": [
+          { "start": 0, "duration": 960, "pitch": 36, "velocity": 104 },
+          { "start": 960, "duration": 960, "pitch": 36, "velocity": 100 },
+          { "start": 1920, "duration": 960, "pitch": 43, "velocity": 104 },
+          { "start": 2880, "duration": 960, "pitch": 41, "velocity": 100 }
+        ]
+      }
+    },
+    {
+      "name": "drums",
+      "clip": {
+        "name": "beat", "lengthTicks": 3840,
+        "notes": [
+          { "start": 0, "duration": 120, "pitch": 36, "velocity": 110 },
+          { "start": 240, "duration": 120, "pitch": 42, "velocity": 80 },
+          { "start": 480, "duration": 120, "pitch": 38, "velocity": 104 },
+          { "start": 720, "duration": 120, "pitch": 42, "velocity": 80 },
+          { "start": 960, "duration": 120, "pitch": 36, "velocity": 110 },
+          { "start": 1200, "duration": 120, "pitch": 42, "velocity": 80 },
+          { "start": 1440, "duration": 120, "pitch": 38, "velocity": 104 },
+          { "start": 1680, "duration": 120, "pitch": 42, "velocity": 80 },
+          { "start": 1920, "duration": 120, "pitch": 36, "velocity": 110 },
+          { "start": 2160, "duration": 120, "pitch": 42, "velocity": 80 },
+          { "start": 2400, "duration": 120, "pitch": 38, "velocity": 104 },
+          { "start": 2640, "duration": 120, "pitch": 42, "velocity": 80 },
+          { "start": 2880, "duration": 120, "pitch": 36, "velocity": 110 },
+          { "start": 3120, "duration": 120, "pitch": 42, "velocity": 80 },
+          { "start": 3360, "duration": 120, "pitch": 38, "velocity": 104 },
+          { "start": 3600, "duration": 120, "pitch": 42, "velocity": 80 }
+        ]
+      }
+    }
+  ]
+}
