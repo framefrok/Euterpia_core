@@ -23,6 +23,26 @@ euterpia-<версия>-<ос>-<арх>/
   Euterpia.app/Contents/…               (macOS: app bundle + Info.plist)
 ```
 
+### Additional payload since v0.3.11 (#348, #349)
+
+Every archive now also contains:
+
+```text
+  bin/euterpia-open              file-association helper (cd + `euterpia open`)
+  share/man/man1/euterpia*.1     overview and one page per command
+  share/bash-completion/completions/euterpia
+  share/zsh/site-functions/_euterpia
+  share/fish/vendor_completions.d/euterpia.fish
+  share/powershell/completions/euterpia.ps1
+  share/euterpia/presets/{templates,setlists,params}   data presets
+```
+
+The manual and completion scripts are generated from the command
+specification at package time, so the shipped binary and its documentation
+cannot describe different command surfaces. The desktop file and the Windows
+registry association invoke `euterpia-open`, which changes to the project
+directory before running `euterpia open <file>`.
+
 ## Ассоциации файлов проекта
 
 Расширения: `*.eproj` (текущий формат) и `*.eut` (историческое имя).
@@ -83,6 +103,18 @@ docker run --rm \
   -v "$PWD/build/dist:/pkg:ro" \
   ubuntu:24.04 bash /tools/clean_machine_check.sh /pkg
 ```
+
+Since v0.3.11 the same container also checks the delivery surface:
+
+1. `euterpia open demo.eproj` reads the project produced by `init`;
+2. `euterpia __man --check share/man/man1` proves the manual matches the
+   shipped binary;
+3. completion scripts for bash/zsh/fish/PowerShell exist in the archive;
+4. `tools/quickstart.sh --doc share/doc/euterpia/quickstart.md` runs the
+   documented quick start (preset → setlist → render → analyze) with the
+   packaged presets;
+5. `play` on a machine without an audio device exits with code **2**, not a
+   crash — the "missing system library/device" contract.
 
 ## Ограничения (честно)
 

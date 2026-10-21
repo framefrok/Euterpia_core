@@ -43,6 +43,14 @@ proc findCommand*(cmds: seq[CommandDef]; name: string): int =
       return i
   -1
 
+proc findCommandByAnyName*(cmds: seq[CommandDef]; name: string): int =
+  ## Canonical name or any legacy alias (#350). Aliases resolve to the same
+  ## `CommandDef`, so an old script keeps executing the same body.
+  for i in 0 ..< cmds.len:
+    if name in commandNames(cmds[i].spec):
+      return i
+  -1
+
 proc visibleCommands*(cmds: seq[CommandDef]): seq[CommandDef] =
   ## Команды, которые видит пользователь: служебные не показываются.
   for c in cmds:

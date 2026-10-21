@@ -38,6 +38,7 @@ import cmd_script
 import cmd_ci
 import cmd_preset
 import cmd_watch
+import cmd_open
 import euterpia_version
 
 var gCommands: seq[CommandDef]
@@ -56,6 +57,10 @@ const
     ## Служебная команда: печатает раздел `docs/cli.md` из спецификации
     ## (issue #330). Так же, как `__complete` для автодополнения, она не
     ## входит в человеческую справку: её зовёт `nimble cliDocs` и тест.
+  ManProtocol* = "__man"
+    ## Service command: generates/checks man(1) pages (#349). Hidden for the
+    ## same reason as the other `__` commands: users read manuals, not build
+    ## tools.
 
   HelpSpec* = CommandSpec(
     name: "help",
@@ -116,6 +121,28 @@ const
       "с --write заменяет всё между маркерами — проза вокруг остаётся рукописной",
     ])
 
+  ManSpec* = CommandSpec(
+    name: ManProtocol,
+    summary: "service: generate man(1) pages from the command specification",
+    synopsis: ManProtocol & " [--write dir|--check dir]",
+    options: @[
+      opt("--write", "write all pages into the directory", value = "dir"),
+      opt("--check", "verify the directory matches the specification", value = "dir"),
+    ],
+    hidden: true,
+    fields: @[
+      field("dir", "directory used by --write/--check"),
+      field("pages", "number of pages"),
+      field("written", "pages written by --write"),
+      field("problems", "differences found by --check"),
+      field("version", "version embedded in every page header"),
+    ],
+    notes: @[
+      "`man euterpia` and `man euterpia-<command>` are generated from the same CommandSpec as help, JSON schema and completion (#349)",
+      "`--check` is used by CI: a registry command without a committed page, or a stale page, fails the build",
+      "output is deterministic: no date, only the package version in .TH",
+    ])
+
 # =============================================================================
 # version
 # =============================================================================
@@ -157,7 +184,7 @@ proc helpReport*(cmds: seq[CommandDef]; requested: string): Report =
   ## Справка по одной команде или общая. Оба вида строятся из спецификаций,
   ## поэтому `--help` и `help --json` не могут разойтись (#96, #330).
   if requested.len > 0:
-    let index = findCommand(cmds, requested)
+    let index = findCommandByAnyName(cmds, requested)
     if index < 0:
       return usageError("неизвестная команда: " & requested)
     let cmd = cmds[index]
@@ -267,6 +294,82 @@ proc runReference*(ctx: var Ctx; args: seq[string]): Report =
            lines = @["раздел справочника обновлён: " & writePath])
 
 # =============================================================================
+# __man — man(1) pages from the same specification (#349)
+# =============================================================================
+
+proc manProblems(dir: string;
+                 pages: seq[tuple[fileName, content: string]]): seq[string] =
+  ## Compare a directory with generated pages. Reports missing, stale and
+  ## unexpected pages: a page for a command that no longer exists is just as
+  ## wrong as a missing one, because `man euterpia` would then describe a
+  ## command the binary does not have.
+  var expected: seq[string] = @[]
+  for page in pages:
+    expected.add page.fileName
+    let path = dir / page.fileName
+    if not fileExists(path):
+      result.add "missing: " & page.fileName
+    elif readFile(path) != page.content:
+      result.add "stale: " & page.fileName
+  if dirExists(dir):
+    for path in walkFiles(dir / "euterpia*.1"):
+      let name = extractFilename(path)
+      if name notin expected:
+        result.add "unexpected: " & name
+
+proc runMan*(ctx: var Ctx; args: seq[string]): Report =
+  ## `__man` prints the overview page; `--write` materialises all pages
+  ## (nimble cliMan); `--check` is the CI gate.
+  discard ctx
+  let pages = manPages(specsOf(allCommands()), CliName, EuterpiaVersion)
+  var writeDir = ""
+  var checkDir = ""
+  var i = 0
+  while i < args.len:
+    case args[i]
+    of "--write":
+      if i + 1 >= args.len:
+        return usageError("--write: directory is required")
+      writeDir = args[i + 1]
+      inc i, 2
+    of "--check":
+      if i + 1 >= args.len:
+        return usageError("--check: directory is required")
+      checkDir = args[i + 1]
+      inc i, 2
+    else:
+      return usageError("__man accepts only --write/--check <dir>, got: " &
+                        args[i])
+  if writeDir.len > 0 and checkDir.len > 0:
+    return usageError("__man: --write and --check are mutually exclusive")
+  if writeDir.len > 0:
+    try:
+      createDir(writeDir)
+      for page in pages:
+        writeFile(writeDir / page.fileName, page.content)
+    except CatchableError as e:
+      return envError("cannot write man pages: " & e.msg,
+                      "check the directory and permissions: " & writeDir)
+    return okReport(
+      body = %*{"dir": writeDir, "pages": pages.len, "written": pages.len,
+                "version": EuterpiaVersion},
+      lines = @["man pages written: " & $pages.len & " → " & writeDir])
+  if checkDir.len > 0:
+    let problems = manProblems(checkDir, pages)
+    var body = %*{"dir": checkDir, "pages": pages.len,
+                  "problems": %problems, "version": EuterpiaVersion}
+    if problems.len > 0:
+      return checkFailedError(
+        "man pages do not match the specification: " & $problems.len,
+        "regenerate with `nimble cliMan` and commit the man/ directory",
+        lines = problems, body = body)
+    return okReport(body = body,
+                    lines = @["man pages match the specification: " &
+                              $pages.len & " pages"])
+  okReport(body = %*{"pages": pages.len, "version": EuterpiaVersion},
+           lines = pages[0].content.splitLines())
+
+# =============================================================================
 # Реестр
 # =============================================================================
 
@@ -281,6 +384,7 @@ proc setupRegistry*() =
   ## справки или документации — не существует (#330).
   gCommands = @[
     CommandDef(spec: InitSpec, run: runInit),
+    CommandDef(spec: OpenSpec, run: runOpen),
     CommandDef(spec: ProjectSpec, run: runProject),
     CommandDef(spec: MidiSpec, run: runMidi),
     CommandDef(spec: PluginSpec, run: runPlugin),
@@ -316,4 +420,5 @@ proc setupRegistry*() =
     CommandDef(spec: VersionSpec, run: runVersion),
     CommandDef(spec: CompleteSpec, run: runComplete),
     CommandDef(spec: ReferenceSpec, run: runReference),
+    CommandDef(spec: ManSpec, run: runMan),
   ]

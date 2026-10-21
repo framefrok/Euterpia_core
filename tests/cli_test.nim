@@ -377,7 +377,7 @@ suite "CLI: doctor — самодиагностика (#105)":
 
 suite "CLI: автодополнение оболочки (#259)":
   test "completion <shell> печатает скрипт и детерминирован":
-    for shell in ["bash", "zsh", "fish"]:
+    for shell in ["bash", "zsh", "fish", "powershell"]:
       let first = runCli(["completion", shell])
       check first.code == 0
       check first.output.len > 0
@@ -385,11 +385,11 @@ suite "CLI: автодополнение оболочки (#259)":
       check first.output == runCli(["completion", shell]).output
 
   test "неизвестная оболочка: код 1 и понятная ошибка":
-    let human = runCli(["completion", "powershell"])
+    let human = runCli(["completion", "tcsh"])
     check human.code == 1
-    check "powershell" in human.errput
+    check "tcsh" in human.errput
     check "bash" in human.errput
-    let machine = runCli(["--json", "completion", "powershell"])
+    let machine = runCli(["--json", "completion", "tcsh"])
     check machine.code == 1
     check parseJson(machine.output)["error"]["kind"].getStr == "usage"
 
@@ -415,10 +415,18 @@ suite "CLI: автодополнение оболочки (#259)":
   test "в шаблонах нет списка команд: новая команда не требует правки скриптов":
     let names = machineCommandNames()
     check names.len >= 4
-    for shell in ["bash", "zsh", "fish"]:
+    # A command name must not appear as a standalone word in a template; a
+    # substring of a PowerShell identifier (ScriptBlock, CompletionResult) or
+    # of `param(` is not a command list (#259, #349).
+    proc wordIn(script, name: string): bool =
+      for word in script.split({' ', '\t', '\n', '\r', '{', '}', '[', ']',
+                               ';', ',', '=', ':', '|', '&', '$', '"', '\''}):
+        if word == name:
+          return true
+    for shell in ["bash", "zsh", "fish", "powershell"]:
       let script = stripComments(runCli(["completion", shell]).output)
       for name in names:
-        check name notin script
+        check not wordIn(script, name)
 
 # =============================================================================
 # #89: команды проекта
@@ -741,9 +749,11 @@ suite "CLI: проект — init/show/set/validate (#89)":
     let names = machineCommandNames()
     check "init" in names
     check "project" in names
-    # Порядок справки: сначала «создать проект», затем всё остальное.
+    # Порядок справки: сначала «создать проект», затем «открыть», затем всё
+    # остальное (#348).
     check names[0] == "init"
-    check names[1] == "project"
+    check names[1] == "open"
+    check names[2] == "project"
 
     check nonEmptyLines(runCli(["__complete", "--", "proj"]).output) ==
           @["project"]
@@ -2284,6 +2294,7 @@ suite "CLI: спецификация команд — один источник 
                   @["param", "get", "1", "freq", "spec.eproj"],
                   @["param", "set", "1", "freq", "330", "spec.eproj"]]),
       ("graph", @[@["graph", "check", "spec.eproj"]]),
+      ("open", @[@["open", "spec.eproj"]]),
       ("preset", @[@["preset", "list"],
                    @["preset", "show", "band"],
                    @["preset", "param", "list"],
@@ -4611,4 +4622,110 @@ suite "CLI: итеративная работа в терминале (#344–#3
     check r.code == 1
     check "нет проекта" in r.errput
     check "init" in r.errput
+
+
+# =============================================================================
+# Delivery polish: manual, file association, command policy (#348–#350)
+# =============================================================================
+#
+# These checks are black-box too: the manual is compared with its generator,
+# `open` is reached through a bare project path (the file association path),
+# and a legacy alias must execute the canonical command while warning on
+# stderr.
+
+suite "CLI: delivery, manual and command policy (#348–#350)":
+  let workDir = getTempDir() / "euterpia_cli_delivery"
+  if dirExists(workDir):
+    removeDir(workDir)
+  createDir(workDir)
+  let specDir = absolutePath(".")
+
+  proc inWork(args: openArray[string];
+              input: string = ""): RunResult =
+    runCliIn(workDir, args, input = input)
+
+  test "open reads a project and suggests the next command":
+    let project = workDir / "open.eproj"
+    check inWork(["init", project]).code == 0
+    let human = inWork(["open", project])
+    check human.code == 0
+    check "project: " & project in human.output
+    check "Next:" in human.output
+    check "euterpia render" in human.output
+
+    let machine = parseJson(inWork(["--json", "open", project]).output)
+    check machine["ok"].getBool
+    check machine["command"].getStr == "open"
+    check machine["summary"]["nodes"].getInt == 0
+    check machine["next"].getStr.startsWith("euterpia render ")
+
+  test "a bare project path is the file-association entry point":
+    let project = workDir / "assoc.eproj"
+    check inWork(["init", project]).code == 0
+    let human = inWork([project])
+    check human.code == 0
+    check "project: " & project in human.output
+    let machine = parseJson(inWork(["--json", project]).output)
+    check machine["command"].getStr == "open"
+
+  test "legacy alias executes the canonical command and warns":
+    let wav = workDir / "tone.wav"
+    copyFile("tests/fixtures/tone.wav", wav)
+    let canonical = inWork(["--json", "analyze", wav, "--no-terminal"])
+    let legacy = inWork(["--json", "inspect", wav, "--no-terminal"])
+    check canonical.code == legacy.code
+    check canonical.output == legacy.output
+    check legacy.errput.len > 0
+    check "deprecated alias of `analyze`" in legacy.errput
+    # The warning never goes to stdout: --json stays one parseable envelope.
+    check "deprecated alias" notin legacy.output
+
+  test "an old batch line with an alias keeps working":
+    let wav = workDir / "tone.wav"
+    let r = inWork(["--script", "-"], input = "inspect " & wav &
+      " --no-terminal\n")
+    check r.code == 0
+    check "analyze:" in r.output
+    check "deprecated alias" in r.errput
+
+  test "help resolves an alias to the canonical page":
+    let aliasHelp = inWork(["help", "inspect"])
+    check aliasHelp.code == 0
+    let canonicalHelp = inWork(["help", "analyze"])
+    check aliasHelp.output == canonicalHelp.output
+    let machine = parseJson(inWork(["--json", "help", "inspect"]).output)
+    check machine["helpFor"].getStr == "analyze"
+    check machine["aliases"][0].getStr == "inspect"
+
+  test "committed man pages match the command specification":
+    let check = inWork(["__man", "--check", specDir / "man"])
+    check check.code == 0
+    if check.code != 0:
+      checkpoint(check.errput)
+    let mainPage = readFile(specDir / "man" / "euterpia.1")
+    for name in machineCommandNames():
+      check fileExists(specDir / "man" / ("euterpia-" & name & ".1"))
+      check ("euterpia-" & name & ".1") in mainPage
+    # No page for a command that does not exist.
+    let generated = inWork(["--json", "__man", "--write", workDir / "man"])
+    check generated.code == 0
+    check parseJson(generated.output)["pages"].getInt ==
+      machineCommandNames().len + 1
+
+  test "a stale man page is reported with a code, not ignored":
+    let dir = workDir / "stale-man"
+    check inWork(["__man", "--write", dir]).code == 0
+    let page = dir / "euterpia.1"
+    writeFile(page, readFile(page) & "\n.\" stale\n")
+    let r = inWork(["--json", "__man", "--check", dir])
+    check r.code == 1
+    let body = parseJson(r.output)
+    check body["problems"].len == 1
+    check "stale: euterpia.1" in body["problems"][0].getStr
+
+  test "completion covers PowerShell and rejects unknown shells":
+    let pwsh = inWork(["completion", "powershell"])
+    check pwsh.code == 0
+    check "Register-ArgumentCompleter" in pwsh.output
+    check inWork(["completion", "tcsh"]).code == 1
 

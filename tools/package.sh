@@ -42,7 +42,15 @@ STAGE="$OUTDIR/$NAME"
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/share/doc/euterpia" \
-         "$STAGE/share/applications" "$STAGE/share/mime/packages"
+         "$STAGE/share/applications" "$STAGE/share/mime/packages" \
+         "$STAGE/share/man/man1" \
+         "$STAGE/share/bash-completion/completions" \
+         "$STAGE/share/zsh/site-functions" \
+         "$STAGE/share/fish/vendor_completions.d" \
+         "$STAGE/share/powershell/completions" \
+         "$STAGE/share/euterpia/presets/templates" \
+         "$STAGE/share/euterpia/presets/setlists" \
+         "$STAGE/share/euterpia/presets/params"
 
 cp "$CLI" "$STAGE/bin/euterpia"
 chmod +x "$STAGE/bin/euterpia"
@@ -51,9 +59,43 @@ echo "$VERSION" > "$STAGE/VERSION"
 for doc in README.md CHANGELOG.md MANIFEST.md; do
   [ -f "$ROOT/$doc" ] && cp "$ROOT/$doc" "$STAGE/share/doc/euterpia/"
 done
-for doc in cli.md clients.md embedding.md delivery.md; do
+for doc in cli.md clients.md embedding.md delivery.md quickstart.md cli-policy.md; do
   [ -f "$ROOT/docs/$doc" ] && cp "$ROOT/docs/$doc" "$STAGE/share/doc/euterpia/"
 done
+
+# Presets are data, not build artefacts (#341-#343): an installed CLI must
+# find them via the installed layout (Nim preset search also checks
+# `<prefix>/share/euterpia/presets`).
+if [ -d "$ROOT/presets" ]; then
+  cp -r "$ROOT/presets/." "$STAGE/share/euterpia/presets/"
+fi
+
+# man pages are generated from the command specification (#349), never copied
+# from a hand-written directory: the shipped binary and the manual cannot
+# describe different command surfaces.
+"$CLI" __man --write "$STAGE/share/man/man1" >/dev/null
+
+"$CLI" completion bash > "$STAGE/share/bash-completion/completions/euterpia"
+"$CLI" completion zsh > "$STAGE/share/zsh/site-functions/_euterpia"
+"$CLI" completion fish > "$STAGE/share/fish/vendor_completions.d/euterpia.fish"
+"$CLI" completion powershell > "$STAGE/share/powershell/completions/euterpia.ps1"
+
+# File-association helper: a click on a project opens a terminal in the
+# project directory, then runs `euterpia open` (#348).
+cat > "$STAGE/bin/euterpia-open" <<'OPEN'
+#!/usr/bin/env bash
+# Open an EUTERPIA project in a terminal at its directory.
+set -euo pipefail
+if [ "$#" -lt 1 ]; then
+  echo "usage: euterpia-open <project.eproj|project.eut>" >&2
+  exit 1
+fi
+target="$1"
+cd "$(dirname "$target")"
+here="$(cd "$(dirname "$0")" && pwd)"
+exec "$here/euterpia" open "$(basename "$target")"
+OPEN
+chmod +x "$STAGE/bin/euterpia-open"
 
 # --- ассоциация файлов проекта (Linux, freedesktop) -------------------------
 cat > "$STAGE/share/mime/packages/euterpia.xml" <<'XML'
@@ -75,7 +117,7 @@ cat > "$STAGE/share/applications/euterpia.desktop" <<'DESKTOP'
 Type=Application
 Name=EUTERPIA
 Comment=Digital audio workstation
-Exec=euterpia %f
+Exec=euterpia-open %f
 Terminal=true
 Categories=AudioVideo;Audio;Midi;Sequencer;
 MimeType=application/x-euterpia-project;
@@ -83,43 +125,70 @@ DESKTOP
 
 cat > "$STAGE/install.sh" <<'SH'
 #!/usr/bin/env bash
-# Установка из архива без пакетного менеджера (issue #229).
-# По умолчанию — ~/.local; системно: PREFIX=/usr/local sudo -E ./install.sh
+# Install from the archive without a package manager (issue #229, #348).
+# Default prefix: ~/.local. System-wide: PREFIX=/usr/local sudo -E ./install.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 mkdir -p "$PREFIX/bin" "$PREFIX/share/applications" \
-         "$PREFIX/share/mime/packages" "$PREFIX/share/doc/euterpia"
+         "$PREFIX/share/mime/packages" "$PREFIX/share/doc/euterpia" \
+         "$PREFIX/share/man/man1" "$PREFIX/share/bash-completion/completions" \
+         "$PREFIX/share/zsh/site-functions" \
+         "$PREFIX/share/fish/vendor_completions.d" \
+         "$PREFIX/share/powershell/completions" \
+         "$PREFIX/share/euterpia"
 install -m 755 "$HERE/bin/euterpia" "$PREFIX/bin/euterpia"
+install -m 755 "$HERE/bin/euterpia-open" "$PREFIX/bin/euterpia-open"
 install -m 644 "$HERE/share/applications/euterpia.desktop" "$PREFIX/share/applications/"
 install -m 644 "$HERE/share/mime/packages/euterpia.xml" "$PREFIX/share/mime/packages/"
 cp -r "$HERE/share/doc/euterpia/." "$PREFIX/share/doc/euterpia/"
+# Manual and completion are part of the contract: `man euterpia` and tab
+# completion must work for an installed binary, not only in the repository.
+cp "$HERE"/share/man/man1/*.1 "$PREFIX/share/man/man1/"
+cp "$HERE"/share/bash-completion/completions/euterpia \
+   "$PREFIX/share/bash-completion/completions/euterpia"
+cp "$HERE"/share/zsh/site-functions/_euterpia "$PREFIX/share/zsh/site-functions/_euterpia"
+cp "$HERE"/share/fish/vendor_completions.d/euterpia.fish \
+   "$PREFIX/share/fish/vendor_completions.d/euterpia.fish"
+cp "$HERE"/share/powershell/completions/euterpia.ps1 \
+   "$PREFIX/share/powershell/completions/euterpia.ps1"
+mkdir -p "$PREFIX/share/euterpia"
+cp -r "$HERE/share/euterpia/presets" "$PREFIX/share/euterpia/"
 if command -v update-mime-database >/dev/null 2>&1; then
   update-mime-database "$PREFIX/share/mime" >/dev/null 2>&1 || true
 fi
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$PREFIX/share/applications" >/dev/null 2>&1 || true
 fi
+if command -v mandb >/dev/null 2>&1; then
+  mandb -q "$PREFIX/share/man" >/dev/null 2>&1 || true
+fi
 if command -v xdg-mime >/dev/null 2>&1; then
   xdg-mime default euterpia.desktop application/x-euterpia-project >/dev/null 2>&1 || true
 fi
-echo "EUTERPIA установлена: $PREFIX/bin/euterpia"
-echo "Проверка: $PREFIX/bin/euterpia --version"
+echo "EUTERPIA installed: $PREFIX/bin/euterpia"
+echo "Check: $PREFIX/bin/euterpia --version"
+echo "Manual: MANPATH=$PREFIX/share/man man euterpia"
 SH
 
 cat > "$STAGE/uninstall.sh" <<'SH'
 #!/usr/bin/env bash
-# Удаление файлов, установленных install.sh (issue #229).
+# Remove files installed by install.sh (issue #229, #348).
 set -euo pipefail
 PREFIX="${PREFIX:-$HOME/.local}"
-rm -f "$PREFIX/bin/euterpia" \
+rm -f "$PREFIX/bin/euterpia" "$PREFIX/bin/euterpia-open" \
       "$PREFIX/share/applications/euterpia.desktop" \
-      "$PREFIX/share/mime/packages/euterpia.xml"
-rm -rf "$PREFIX/share/doc/euterpia"
+      "$PREFIX/share/mime/packages/euterpia.xml" \
+      "$PREFIX/share/bash-completion/completions/euterpia" \
+      "$PREFIX/share/zsh/site-functions/_euterpia" \
+      "$PREFIX/share/fish/vendor_completions.d/euterpia.fish" \
+      "$PREFIX/share/powershell/completions/euterpia.ps1"
+rm -f "$PREFIX"/share/man/man1/euterpia*.1
+rm -rf "$PREFIX/share/doc/euterpia" "$PREFIX/share/euterpia"
 if command -v update-mime-database >/dev/null 2>&1; then
   update-mime-database "$PREFIX/share/mime" >/dev/null 2>&1 || true
 fi
-echo "EUTERPIA удалена из $PREFIX"
+echo "EUTERPIA removed from $PREFIX"
 SH
 chmod +x "$STAGE/install.sh" "$STAGE/uninstall.sh"
 

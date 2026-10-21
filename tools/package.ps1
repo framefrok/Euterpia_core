@@ -39,17 +39,52 @@ $Stage = Join-Path $OutDir $Name
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "bin") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "docs") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $Stage "share/man/man1") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $Stage "completions") | Out-Null
+foreach ($sub in @("templates", "setlists", "params")) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $Stage "share/euterpia/presets/$sub") | Out-Null
+}
 
 Copy-Item $Cli (Join-Path $Stage "bin/euterpia.exe")
+
+# File-association helper: a click on a project opens a terminal in its
+# directory (#348). `%~dp1` is the drive+path of the first argument.
+$openCmd = @'
+@echo off
+setlocal
+if "%~1"=="" (
+  echo usage: euterpia-open ^<project.eproj^|project.eut^> 1>&2
+  exit /b 1
+)
+cd /d "%~dp1"
+"%~dp0euterpia.exe" open "%~nx1"
+'@
+Set-Content -Path (Join-Path $Stage "bin/euterpia-open.cmd") -Value $openCmd -Encoding ASCII
+
 Set-Content -Path (Join-Path $Stage "VERSION") -Value $Version -Encoding ASCII
 foreach ($doc in @("README.md", "CHANGELOG.md", "MANIFEST.md")) {
   $src = Join-Path $Root $doc
   if (Test-Path $src) { Copy-Item $src (Join-Path $Stage "docs/$doc") }
 }
-foreach ($doc in @("cli.md", "clients.md", "embedding.md", "delivery.md")) {
+foreach ($doc in @("cli.md", "clients.md", "embedding.md", "delivery.md", "quickstart.md", "cli-policy.md")) {
   $src = Join-Path $Root "docs/$doc"
   if (Test-Path $src) { Copy-Item $src (Join-Path $Stage "docs/$doc") }
 }
+$presets = Join-Path $Root "presets"
+if (Test-Path $presets) {
+  foreach ($sub in @("templates", "setlists", "params")) {
+    Copy-Item -Recurse -Force (Join-Path $presets "$sub/*") (Join-Path $Stage "share/euterpia/presets/$sub")
+  }
+}
+
+# Manual and completion are generated from the same specification as help
+# and JSON schema (#349). An installed binary must not describe a different
+# command surface than the shipped one.
+& $Cli __man --write (Join-Path $Stage "share/man/man1") | Out-Null
+& $Cli completion bash | Set-Content -Path (Join-Path $Stage "completions/euterpia.bash") -Encoding ASCII
+& $Cli completion zsh | Set-Content -Path (Join-Path $Stage "completions/_euterpia") -Encoding ASCII
+& $Cli completion fish | Set-Content -Path (Join-Path $Stage "completions/euterpia.fish") -Encoding ASCII
+& $Cli completion powershell | Set-Content -Path (Join-Path $Stage "completions/euterpia.ps1") -Encoding UTF8
 
 $install = @'
 # Установка EUTERPIA из архива (issue #229).
@@ -60,15 +95,19 @@ $DEST = Join-Path $env:LOCALAPPDATA "EUTERPIA"
 New-Item -ItemType Directory -Force -Path $DEST | Out-Null
 Copy-Item -Recurse -Force (Join-Path $HERE "bin") $DEST
 Copy-Item -Recurse -Force (Join-Path $HERE "docs") $DEST
+Copy-Item -Recurse -Force (Join-Path $HERE "share") $DEST
+Copy-Item -Recurse -Force (Join-Path $HERE "completions") $DEST
 $exe = Join-Path $DEST "bin\euterpia.exe"
+$open = Join-Path $DEST "bin\euterpia-open.cmd"
 
-# Ассоциация: HKCU\Software\Classes\Euterpia.Project
+# Association: HKCU\Software\Classes\Euterpia.Project
 $progId = "Euterpia.Project"
 $classes = "HKCU:\Software\Classes"
 New-Item -Force -Path "$classes\$progId\shell\open\command" | Out-Null
 Set-ItemProperty -Path "$classes\$progId" -Name "(Default)" -Value "EUTERPIA project"
+# The helper changes to the project directory before opening it (#348).
 Set-ItemProperty -Path "$classes\$progId\shell\open\command" -Name "(Default)" `
-  -Value ('"' + $exe + '" "%1"')
+  -Value ('"' + $open + '" "%1"')
 foreach ($ext in @(".eproj", ".eut")) {
   New-Item -Force -Path "$classes\$ext" | Out-Null
   Set-ItemProperty -Path "$classes\$ext" -Name "(Default)" -Value $progId
@@ -80,6 +119,8 @@ if ($userPath -notlike "*$DEST\bin*") {
 }
 Write-Host "EUTERPIA установлена: $exe"
 Write-Host "Откройте новый терминал (PATH обновлён) и проверьте: euterpia --version"
+Write-Host "Автодополнение PowerShell: . $DEST\completions\euterpia.ps1"
+Write-Host "Руководство и man-страницы: $DEST\share\man\man1"
 '@
 Set-Content -Path (Join-Path $Stage "install.ps1") -Value $install -Encoding UTF8
 

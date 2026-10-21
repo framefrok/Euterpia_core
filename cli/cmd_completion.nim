@@ -17,9 +17,9 @@ import context
 import cli_spec
 
 const
-  Shells* = @["bash", "zsh", "fish"]
-    ## Поддерживаемые оболочки. Используется и реестром (кандидаты
-    ## дополнения), и разбором аргументов — один источник.
+  Shells* = @["bash", "zsh", "fish", "powershell"]
+    ## Supported shells. Used by the registry (completion candidates) and by
+    ## argument parsing — one source of truth (#259, #349).
 
   CompletionProtocol* = "__complete"
     ## Служебная команда-источник кандидатов.
@@ -27,7 +27,7 @@ const
   CompletionSpec* = CommandSpec(
     name: "completion",
     summary: "скрипт автодополнения оболочки",
-    synopsis: "completion <bash|zsh|fish>",
+    synopsis: "completion <bash|zsh|fish|powershell>",
     subcommands: Shells,
     args: @[
       arg("оболочка", "для какой оболочки печатать скрипт"),
@@ -42,6 +42,7 @@ const
         CompletionProtocol & "`, поэтому новая команда появляется в дополнении сразу",
       "шаблоны — константы: повторный запуск даёт байт-в-байт тот же текст",
       "установка (bash): `euterpia completion bash > ~/.local/share/bash-completion/completions/euterpia`",
+      "PowerShell: `euterpia completion powershell | Out-String | Invoke-Expression` (or add it to your profile) (#349)",
     ])
 
   BashScript* = """# euterpia: автодополнение для bash.
@@ -102,12 +103,34 @@ end
 complete -c euterpia -f -a "(__euterpia_candidates)"
 """
 
+  PowerShellScript* = """# euterpia completion for PowerShell.
+# Install (current session):
+#   euterpia completion powershell | Out-String | Invoke-Expression
+# Or add the generated script to your profile.
+#
+# Candidates come from the CLI at completion time, so this script does not
+# need an update when a command is added.
+Register-ArgumentCompleter -Native -CommandName euterpia -ScriptBlock {
+  param($wordToComplete, $commandAst, $cursorPosition)
+  $tokens = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })
+  $candidates = if ($tokens.Count -le 2) {
+    & euterpia __complete -- $wordToComplete 2>$null
+  } else {
+    & euterpia __complete -- $tokens[1] $wordToComplete 2>$null
+  }
+  $candidates | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+  }
+}
+"""
+
 proc scriptFor*(shell: string): string =
-  ## Скрипт для поддерживаемой оболочки; "" — оболочка неизвестна.
+  ## Script for a supported shell; "" — unknown shell.
   case shell
   of "bash": BashScript
   of "zsh": ZshScript
   of "fish": FishScript
+  of "powershell": PowerShellScript
   else: ""
 
 proc runCompletion*(ctx: var Ctx; args: seq[string]): Report =

@@ -141,6 +141,26 @@ task cliDocs, "Пересобрать раздел справочника docs/c
   buildLog "cli docs"
   exec cliBin & " __reference --write docs/cli.md"
 
+task cliMan, "Regenerate man(1) pages from the command specification (#349)":
+  ## `man/` is generated, not written: the overview lists every visible
+  ## command and each command gets its own page. CI (`nimble cliSmoke` and
+  ## `__man --check man`) fails when the committed directory is stale or a
+  ## registry command has no page.
+  mkDir buildDir
+  buildLog "cli build"
+  exec "nim c --hints:off --out:" & cliBin & " cli.nim"
+  buildLog "man pages"
+  exec cliBin & " __man --write man"
+
+task quickstart, "Run the executable quick start from docs/quickstart.md (#351)":
+  ## The documented command block is executed as-is; a stale command in the
+  ## guide fails this target, so the text cannot drift away from the CLI.
+  mkDir buildDir
+  buildLog "cli build"
+  exec "nim c --hints:off --out:" & cliBin & " cli.nim"
+  buildLog "quick start"
+  exec "bash tools/quickstart.sh " & cliBin
+
 task scriptScenario, "Сценарий как тест: golden-рендер по сценарию (#333, #335)":
   ## Проверяет то, чего не видит unit-набор: `plan` не меняет файл,
   ## транзакция не оставляет половины, два рендера дают побайтово тот же WAV,

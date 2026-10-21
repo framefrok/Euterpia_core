@@ -55,6 +55,18 @@ type
   CommandSpec* = object
     name*: string
     summary*: string
+    aliases*: seq[string]
+      ## Legacy command names kept working for at least one release line
+      ## (#350). Aliases are resolved by the dispatcher, never advertised in
+      ## completion, and every use prints a deprecation warning to stderr.
+    aliasesDeprecatedSince*: string
+      ## Version that declared the aliases legacy. Required when `aliases` is
+      ## not empty: policy needs a date, not a vague "old".
+    deprecatedSince*: string
+      ## Version that deprecated the command itself ("" = current). A
+      ## deprecated command still runs; it says so and points at `replacedBy`.
+    replacedBy*: string
+      ## Canonical command that should be used instead.
     synopsis*: string
       ## Как команда выглядит после имени CLI: `init [файл] [ключи]`.
       ## Позиционные аргументы перечисляются ВСЕГДА: по синопсису человек и
@@ -174,6 +186,37 @@ proc optionKeys*(spec: CommandSpec): seq[string] =
   ## предлагается автодополнением. Команды берут свой список отсюда
   ## (`const RenderKeys* = RenderSpec.optionKeys`), а не объявляют копию.
   keysOf(spec.options)
+
+proc commandNames*(spec: CommandSpec): seq[string] =
+  ## Canonical name followed by legacy aliases. The dispatcher resolves all of
+  ## them to the same `CommandDef`; completion and help show only `name`.
+  result.add spec.name
+  for alias in spec.aliases:
+    if alias notin result:
+      result.add alias
+
+proc isDeprecated*(spec: CommandSpec): bool =
+  spec.deprecatedSince.len > 0
+
+proc deprecationText*(spec: CommandSpec; usedName: string): string =
+  ## One warning line, printed to stderr. Empty for a non-deprecated command.
+  ## The text is stable so scripts can assert it (#350).
+  if usedName.len > 0 and usedName != spec.name:
+    result = "note: `" & usedName & "` is a deprecated alias of `" &
+      spec.name & "`"
+    if spec.aliasesDeprecatedSince.len > 0:
+      result.add " (since " & spec.aliasesDeprecatedSince & ")"
+    elif spec.deprecatedSince.len > 0:
+      result.add " (since " & spec.deprecatedSince & ")"
+    result.add "; the alias keeps working for this release line"
+    return
+  if spec.deprecatedSince.len == 0:
+    return
+  result = "note: `" & spec.name & "` is deprecated since " &
+    spec.deprecatedSince
+  if spec.replacedBy.len > 0:
+    result.add "; use `" & spec.replacedBy & "`"
+  result.add " (still works for this release line)"
 
 proc globalFlagKeys*(): seq[string] =
   ## Разбирает `GlobalFlags` на отдельные ключи: `--verbose` и `-v`.
@@ -348,6 +391,13 @@ proc specJson*(spec: CommandSpec): JsonNode =
   result["name"] = %spec.name
   result["summary"] = %spec.summary
   result["usage"] = %spec.synopsis
+  var aliases = newJArray()
+  for alias in spec.aliases:
+    aliases.add %alias
+  result["aliases"] = aliases
+  result["aliasesDeprecatedSince"] = %spec.aliasesDeprecatedSince
+  result["deprecatedSince"] = %spec.deprecatedSince
+  result["replacedBy"] = %spec.replacedBy
   var flags = newJArray()
   for key in spec.optionKeys():
     flags.add %key
@@ -379,6 +429,13 @@ proc commandHelpJson*(spec: CommandSpec; cliName: string): JsonNode =
   result["helpFor"] = %spec.name
   result["usage"] = %(cliName & " " & spec.synopsis)
   result["summary"] = %spec.summary
+  var aliasJson = newJArray()
+  for alias in spec.aliases:
+    aliasJson.add %alias
+  result["aliases"] = aliasJson
+  result["aliasesDeprecatedSince"] = %spec.aliasesDeprecatedSince
+  result["deprecatedSince"] = %spec.deprecatedSince
+  result["replacedBy"] = %spec.replacedBy
   var flags = newJArray()
   for key in spec.optionKeys():
     flags.add %key
@@ -432,6 +489,10 @@ proc validateSpecs*(specs: seq[CommandSpec]): seq[string] =
   ## команда без примера — это справка, которая врёт, и она видна здесь, а не
   ## через месяц у пользователя.
   var seenNames: seq[string] = @[]
+  var seenAliases: seq[string] = @[]
+  var allNames: seq[string] = @[]
+  for known in specs:
+    allNames.add known.name
   let globalKeys = globalFlagKeys()
   for spec in specs:
     let where = if spec.name.len > 0: spec.name else: "<команда без имени>"
@@ -441,6 +502,28 @@ proc validateSpecs*(specs: seq[CommandSpec]): seq[string] =
       if spec.name in seenNames:
         result.add where & ": имя команды повторяется"
       seenNames.add spec.name
+    for alias in spec.aliases:
+      if alias.len == 0:
+        result.add where & ": пустой алиас команды"
+      elif alias.startsWith("-"):
+        result.add where & ": алиас команды начинается с дефиса: " & alias
+      elif alias == spec.name:
+        result.add where & ": алиас повторяет имя команды"
+      elif alias in allNames or alias in seenAliases:
+        result.add where & ": алиас " & alias & " уже занят другой командой"
+      else:
+        seenAliases.add alias
+    if spec.aliases.len > 0 and spec.aliasesDeprecatedSince.len == 0:
+      result.add where & ": aliases без aliasesDeprecatedSince — политика " &
+        "не называет версию"
+    if spec.deprecatedSince.len > 0 and spec.replacedBy.len == 0:
+      result.add where & ": deprecatedSince без replacedBy — клиент не узнает замену"
+    if spec.replacedBy.len > 0:
+      if spec.replacedBy == spec.name:
+        result.add where & ": replacedBy совпадает с именем команды"
+      elif spec.replacedBy notin allNames:
+        result.add where & ": replacedBy ссылается на неизвестную команду: " &
+          spec.replacedBy
     if spec.summary.len == 0:
       result.add where & ": нет summary — строка в общей справке останется пустой"
     if spec.synopsis.len == 0:
@@ -580,6 +663,18 @@ proc markdownReference*(specs: seq[CommandSpec]; cliName: string;
     lines.add cliName & " " & spec.synopsis
     lines.add "```"
     lines.add ""
+    if spec.aliases.len > 0:
+      lines.add "Deprecated aliases (still work): " &
+        spec.aliases.join(", ")
+      if spec.aliasesDeprecatedSince.len > 0:
+        lines.add "Since " & spec.aliasesDeprecatedSince & "."
+      lines.add ""
+    if spec.deprecatedSince.len > 0:
+      var note = "**Deprecated** since " & spec.deprecatedSince
+      if spec.replacedBy.len > 0:
+        note.add "; use `" & spec.replacedBy & "`"
+      lines.add note
+      lines.add ""
     if spec.subcommands.len > 0:
       lines.add "Подкоманды: " & spec.subcommands.join(" | ")
       lines.add ""
@@ -614,6 +709,7 @@ proc markdownReference*(specs: seq[CommandSpec]; cliName: string;
       lines.add "```"
       lines.add ""
     if spec.fields.len > 0:
+
       lines.add "Поля ответа `--json`:"
       lines.add ""
       for f in spec.fields:
@@ -659,3 +755,189 @@ proc spliceReference*(doc, section: string): string =
   let head = doc[0 ..< beginIdx + ReferenceBegin.len]
   let tail = doc[endIdx .. ^1]
   head & "\n" & section & tail
+
+proc roffEscape*(text: string): string
+proc manPageFileName*(spec: CommandSpec): string
+proc manHeader(title, version: string): seq[string]
+proc commandManPage*(spec: CommandSpec; cliName, version: string): string
+
+proc manPage*(specs: seq[CommandSpec]; cliName, version: string): string =
+  ## Overview page (`man euterpia`): every visible command is listed, so the
+  ## acceptance check "man euterpia names all registry commands" is a property
+  ## of generation, not of a manually maintained list (#349).
+  var lines = manHeader(cliName.toUpperAscii(), version)
+  lines.add ".SH NAME"
+  lines.add cliName & " \\- command line interface for EUTERPIA (MANIFEST 19-21)"
+  lines.add ".SH SYNOPSIS"
+  lines.add ".B " & cliName
+  lines.add "[\\fIglobal options\\fR] \\fIcommand\\fR [\\fIarguments\\fR]"
+  lines.add ".br"
+  lines.add ".B " & cliName
+  lines.add "help [\\fIcommand\\fR]"
+  lines.add ".br"
+  lines.add ".B " & cliName
+  lines.add "\\-\\-version"
+  lines.add ".SH DESCRIPTION"
+  lines.add "EUTERPIA CLI creates, edits, renders and verifies project files"
+  lines.add "without a GUI. Every command has a machine-readable form"
+  lines.add "(--json) and is described by a single specification; help, JSON"
+  lines.add "schema, shell completion, this manual and docs/cli.md are"
+  lines.add "generated from it."
+  lines.add ".SH COMMANDS"
+  for spec in visibleSpecs(specs):
+    lines.add ".TP"
+    lines.add ".B " & roffEscape(spec.synopsis)
+    var summary = spec.summary
+    if spec.deprecatedSince.len > 0:
+      summary.add " (deprecated since " & spec.deprecatedSince
+      if spec.replacedBy.len > 0:
+        summary.add "; use " & spec.replacedBy
+      summary.add ")"
+    lines.add roffEscape(summary)
+    lines.add ".br"
+    lines.add "See \\fB" & manPageFileName(spec) & "\\fR(1)."
+  lines.add ".SH GLOBAL OPTIONS"
+  for item in GlobalFlags:
+    lines.add ".TP"
+    lines.add ".B " & roffEscape(item[0])
+    lines.add roffEscape(item[1])
+  lines.add ".SH EXIT STATUS"
+  for item in ExitCodeHelp:
+    lines.add ".TP"
+    lines.add ".B " & $item[0]
+    lines.add roffEscape(item[1])
+  lines.add ".SH FILES"
+  lines.add ".TP"
+  lines.add ".I presets/templates, presets/setlists, presets/params"
+  lines.add "Project templates, set lists and parameter presets (searched"
+  lines.add "next to the executable, in EUTERPIA_PRESETS and in the user"
+  lines.add "configuration directory)."
+  lines.add ".TP"
+  lines.add ".I *.eproj, *.eut"
+  lines.add "Project files; the format is identified by content, not by"
+  lines.add "extension."
+  lines.add ".SH SEE ALSO"
+  var seeAlso: seq[string] = @[".BR " & cliName & "\\-init(1)"]
+  for spec in visibleSpecs(specs):
+    if spec.name != "init":
+      seeAlso.add (".BR " & cliName & "\\-" & spec.name & "(1)")
+  lines.add seeAlso.join(", ")
+  lines.add ".SH AUTHOR"
+  lines.add "EUTERPIA project."
+  result = lines.join("\n") & "\n"
+
+proc manPages*(specs: seq[CommandSpec]; cliName, version: string):
+    seq[tuple[fileName, content: string]] =
+  ## Overview page plus one page per visible command. Order is stable:
+  ## overview first, then registry order.
+  result.add (fileName: cliName & ".1",
+              content: manPage(specs, cliName, version))
+  for spec in visibleSpecs(specs):
+    result.add (fileName: manPageFileName(spec),
+                content: commandManPage(spec, cliName, version))
+
+
+# =============================================================================
+# man(1) pages generated from the same CommandSpec (#349)
+# =============================================================================
+#
+# One source of truth: the man page is produced from the spec, so a new
+# command appears in `man euterpia` without touching prose. `__man --check`
+# (CI + cliSmoke) compares the committed `man/` directory with a fresh
+# generation; a registry command without a page fails the build.
+#
+# Output is deterministic: no current date, no locale-dependent width. The
+# header carries only the package version from `euterpia_version.nim`.
+
+proc roffEscape*(text: string): string =
+  ## Escape roff control characters. A leading `.` or `'` would otherwise be
+  ## read as a macro, and `-` must render as a hyphen (not a minus sign).
+  var atLineStart = true
+  for ch in text:
+    case ch
+    of '\\': result.add "\\e"
+    of '-': result.add "\\-"
+    of '.':
+      if atLineStart: result.add "\\&." else: result.add "."
+    of '\'':
+      if atLineStart: result.add "\\&'" else: result.add "'"
+    of '\n':
+      result.add "\n"
+      atLineStart = true
+      continue
+    else: result.add ch
+    atLineStart = false
+
+proc manPageFileName*(spec: CommandSpec): string =
+  ## `euterpia-init.1` — one page per visible command.
+  "euterpia-" & spec.name & ".1"
+
+proc manHeader(title, version: string): seq[string] =
+  result.add ".\\\" Generated by `euterpia __man`; do not edit manually."
+  result.add ".TH " & title & " 1 \"" & version & "\" \"EUTERPIA CLI\" \"User Commands\""
+
+proc commandManPage*(spec: CommandSpec; cliName, version: string): string =
+  ## Full manual page for one command: synopsis, arguments, options, example,
+  ## exit status, and a pointer back to the overview page.
+  var lines = manHeader("EUTERPIA\\-" & spec.name.toUpperAscii(), version)
+  lines.add ".SH NAME"
+  lines.add roffEscape(cliName & "-" & spec.name & " - " & spec.summary)
+  lines.add ".SH SYNOPSIS"
+  lines.add ".B " & roffEscape(cliName)
+  lines.add "\\fR" & roffEscape(spec.synopsis) & "\\fR"
+  lines.add ".SH DESCRIPTION"
+  lines.add roffEscape(spec.summary) & "."
+  if spec.aliases.len > 0:
+    lines.add ".PP"
+    var aliasNote = "Deprecated aliases (still work in this release line): " &
+      roffEscape(spec.aliases.join(", ")) & "."
+    if spec.aliasesDeprecatedSince.len > 0:
+      aliasNote.add " Since " & spec.aliasesDeprecatedSince & "."
+    lines.add aliasNote
+  if spec.deprecatedSince.len > 0:
+    lines.add ".PP"
+    var note = "Deprecated since " & spec.deprecatedSince & "."
+    if spec.replacedBy.len > 0:
+      note.add " Use " & spec.replacedBy & " instead."
+    lines.add roffEscape(note)
+  if spec.subcommands.len > 0:
+    lines.add ".SH ARGUMENTS"
+    for sub in spec.subcommands:
+      lines.add ".TP"
+      lines.add ".B " & roffEscape(sub)
+  if spec.args.len > 0:
+    lines.add ".SH POSITIONAL ARGUMENTS"
+    for a in spec.args:
+      lines.add ".TP"
+      lines.add ".B " & roffEscape(a.name)
+      lines.add roffEscape(a.summary)
+  if spec.options.len > 0:
+    lines.add ".SH OPTIONS"
+    for o in spec.options:
+      lines.add ".TP"
+      lines.add ".B " & roffEscape(keyText(o))
+      var body = o.summary
+      if o.default.len > 0:
+        body.add " (default: " & o.default & ")"
+      if o.required:
+        body.add " (required)"
+      lines.add roffEscape(body)
+  if spec.example.len > 0:
+    lines.add ".SH EXAMPLE"
+    lines.add ".nf"
+    lines.add roffEscape(spec.example)
+    lines.add ".fi"
+  if spec.notes.len > 0:
+    lines.add ".SH NOTES"
+    for note in spec.notes:
+      lines.add ".IP \\[bu] 2"
+      lines.add roffEscape(note)
+  lines.add ".SH EXIT STATUS"
+  for item in ExitCodeHelp:
+    lines.add ".TP"
+    lines.add ".B " & $item[0]
+    lines.add roffEscape(item[1])
+  lines.add ".SH SEE ALSO"
+  lines.add ".BR " & cliName & "(1)"
+  result = lines.join("\n") & "\n"
+

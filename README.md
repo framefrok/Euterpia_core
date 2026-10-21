@@ -24,7 +24,7 @@
 | DSP-ноды | ✅ 11 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise, metronome) + **17 инструментов** (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`, `strings`, `bell`, `harp`, `harpsichord`, `recorder`, `brass`, `timpani`, `choir`, `ukulele`, `accordion`, `harmonica`) + нотный секвенсор `notes`, плеер секвенсора `sequencer` и плеер аудиоклипов `clip`; всего 31 тип, полный каталог с параметрами — [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md); C-ядра с SIMD-дисплеями (#274, #301, #303, #321) |
 | Кодеки | ✅ WAV 16/24/32-бит (чтение и запись), FLAC (чтение и запись встроенным lossless-энкодером), MP3/OGG Vorbis (чтение; lossy-превью сдачи — CLI через ffmpeg/lame/oggenc), AIFF/AIFC (чтение и запись), Standard MIDI File (#10, #411) |
 | Тесты | ✅ 700+ unit-проверок (180+ suite) + интеграционный набор + 170+ CLI smoke; Core/Commons/инструменты покрыты (#57, #274, #290) |
-| CLI | 🟡 линия v0.3 (#86): шаги v0.3.5–v0.3.10 закрыты; впереди v0.3.11; каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate|recover` (#89, #110), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись входа `record` (#94), MIDI-порты/монитор (#93), импорт SMF (#111), метроном и count-in (#112), автоматизация `automation` (#114), восстановление `project recover` (#110), стемы и батч `render --stems|--batch` (#108), плагины `plugin scan/info/params/save/validate` и `node add plugin:<id>` (#95, #260), живой MIDI-вход `play --midi-in/--midi-target` (#413), ресемплинг `--device-rate/--src` (#8), сдача `master --format wav|flac|ogg|mp3` (#411), сценарии `script run|plan|show|record|render|build` с переменными, пересборкой и эталоном рендера, пакетный `--script`, stdin/REPL и NDJSON (#333, #334, #335, #97), сравнение `project diff`/`render diff` с адресами сущностей и кодом возврата для CI (#337, #338), строгий lint `project validate --strict` (#339) и единый вход `ci check` (#340); шаблоны, сет-листы и пресеты параметров как данные — `init --preset`, `preset list/show/apply/param`, `setlist list/show/apply` (#341–#343); итеративная работа — `watch` (авто-ререндер), поток метрик `--metrics`, интерактивный `analyze` с HTML-отчётом и `doctor --deep` (#344–#347); справочник команд и JSON-схемы — **[docs/cli.md](docs/cli.md)** |
+| CLI | ✅ линия v0.3 (#86) закрыта: шаги v0.3.1–v0.3.11; каркас — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish/powershell` (#259, #349), команды проекта `init`/`open`/`project show|set|validate|recover` (#89, #110, #348), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись входа `record` (#94), MIDI-порты/монитор (#93), импорт SMF (#111), метроном и count-in (#112), автоматизация `automation` (#114), восстановление `project recover` (#110), стемы и батч `render --stems|--batch` (#108), плагины `plugin scan/info/params/save/validate` и `node add plugin:<id>` (#95, #260), живой MIDI-вход `play --midi-in/--midi-target` (#413), ресемплинг `--device-rate/--src` (#8), сдача `master --format wav|flac|ogg|mp3` (#411), сценарии `script run|plan|show|record|render|build` с переменными, пересборкой и эталоном рендера, пакетный `--script`, stdin/REPL и NDJSON (#333, #334, #335, #97), сравнение `project diff`/`render diff` с адресами сущностей и кодом возврата для CI (#337, #338), строгий lint `project validate --strict` (#339) и единый вход `ci check` (#340); шаблоны, сет-листы и пресеты параметров — `init --preset`, `preset`, `setlist` (#341–#343); итеративная работа — `watch`, `--metrics`, интерактивный `analyze` с HTML, `doctor --deep` (#344–#347); поставка — `euterpia-open`, man-страницы, исполняемый quick start, политика совместимости (#348–#351); справочник — **[docs/cli.md](docs/cli.md)**, быстрый старт — **[docs/quickstart.md](docs/quickstart.md)** |
 | Поставка | ✅ архивы Linux/Windows/macOS, `install.sh`/`install.ps1`, ассоциации `*.eproj`/`*.eut`, проверка на чистой `ubuntu:24.04` (#229) |
 | Инспектор аудио | 🟡 пассивный анализ WAV: клиппинг, DC, щелчки, провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость; отчёт с локализацией (#290); позже — помощник в v0.7 (#178) |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
@@ -105,8 +105,11 @@ euterpia midi ensemble.eproj --split build/midi     # по файлу на ин�
 
 Эталоны для проверки прибора — две пьесы, собираемые и рендерящиеся **только
 CLI**: `compositions/neo-romantic` (#275, ~2:48) и `compositions/dark-fantasy`
-(«Cathedral of Ash», #295, ~4:02, medieval dark fantasy). В CI джоб `analyze`
-собирает обе и требует отсутствия дефектов уровня error.
+(«Cathedral of Ash», #295, ~4:02, medieval dark fantasy), плюс
+`compositions/dark-requiem` («A Requiem for the Hollow Crown», 42 с, dark
+fantasy), где **каждая** нода, связь, автоматизация и сдача — команда CLI
+(#348–#351). В CI джоб `analyze` собирает все три и требует отсутствия
+дефектов уровня error.
 
 ## Композиция как код (`libs/`)
 
@@ -259,13 +262,13 @@ callback (причины — MANIFEST §104).
 GUI**, **v0.5 — тесты ядра и надёжность**, **v0.6 — GUI: повседневная работа**,
 **v0.7 — глубина и уникальность**. Закрытые линии — в конце раздела.
 
-Линия CLI не закончилась на `.5`: шаги **v0.3.6** (единый контракт,
-`libs/cli_spec`), **v0.3.7** (сценарии, `libs/script`), **v0.3.8**
-(сравнение и проверки, `libs/diff`, `ci check`), **v0.3.9** (шаблоны и
-сет-листы, `libs/presets`) и **v0.3.10** (итеративная работа, `libs/watch`,
-`--metrics`, интерактивный `analyze`, `doctor --deep`) закрыты; остаётся
-**v0.3.11** — поставка и полировка. Порядок и зависимости —
-`docs/plans/v0.3.6-v0.3.11.md` (#352).
+Линия CLI закрыта: шаги **v0.3.6** (единый контракт, `libs/cli_spec`),
+**v0.3.7** (сценарии, `libs/script`), **v0.3.8** (сравнение и проверки,
+`libs/diff`, `ci check`), **v0.3.9** (шаблоны и сет-листы, `libs/presets`),
+**v0.3.10** (итеративная работа, `libs/watch`, `--metrics`, интерактивный
+`analyze`, `doctor --deep`) и **v0.3.11** (поставка: `euterpia-open`,
+man-страницы, быстрый старт, политика совместимости). Итоги — по ссылкам
+`docs/plans/v0.3.6-v0.3.11.md` и milestone v0.3.11 (#352).
 
 Дальше линия выходит за пределы CLI: шаг **v0.3.12** — идентичность продукта
 (Euterpia DAW / Euterpia Core), MANIFEST v2, English-first документация, команда
@@ -843,6 +846,31 @@ state` в новом процессе показывает `playing` и раст
 финальное состояние в offline-сессию — после остановки `transport state` не
 показывает устаревшее «играет». Схема ответа — та же `euterpia.transport.v1`,
 что у offline-транспорта, поэтому клиенту не нужно различать два режима.
+
+### Quick start, manual and file associations (#348–#351)
+
+The documented path from an empty directory to sound is executable:
+
+```bash
+tools/quickstart.sh build/euterpia       # runs the block from docs/quickstart.md
+man euterpia                            # overview, generated from the command spec
+man euterpia-render                     # one page per command
+euterpia open demo.eproj                # read-only project summary + next steps
+euterpia demo.eproj                     # same, via the file-association path
+euterpia completion powershell          # bash/zsh/fish/powershell
+```
+
+`docs/quickstart.md` is not prose about commands: `tools/quickstart.sh`
+extracts its command block and executes it, and CI fails if the block is stale.
+Packages ship the helper `euterpia-open`, which changes to the project
+directory and then runs `euterpia open`; `.desktop` (Linux) and the registry
+association (Windows) invoke it, so clicking a `.eproj`/`.eut` file opens a
+terminal in the project directory.
+
+The compatibility contract for command names, options, JSON fields, aliases
+and deprecation windows is [docs/cli-policy.md](docs/cli-policy.md). A legacy
+alias still executes the canonical command and prints a warning to stderr;
+`inspect` → `analyze` is the first example.
 
 ### Настройки окружения (#258)
 

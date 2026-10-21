@@ -8,6 +8,52 @@
 Версия пакета — единственная константа `euterpia_version.nim`, поэтому
 `euterpia --version`, поле `version` пакета и имя тега совпадают.
 
+## [0.3.11] — Поставка и полировка (v0.3.11)
+
+### Added
+- **`euterpia open` and file associations** (issue #348): a project can be
+  opened read-only from the terminal; a bare project path as the first
+  argument is treated as `open <path>`. Packages ship `euterpia-open`, which
+  changes to the project directory and then runs `euterpia open`, so a click
+  on `.eproj`/`.eut` behaves like opening the project in a terminal. Linux
+  `.desktop`/MIME and the Windows registry association invoke the helper
+  ([#348](https://github.com/framefrok/Euterpia_core/issues/348)).
+- **man(1) pages generated from the command specification** (issue #349):
+  `euterpia.1` lists every visible command and each command gets
+  `euterpia-<command>.1`; `__man --write/--check` materialises and verifies
+  the pages, `nimble cliMan` regenerates them, and CI fails when the
+  committed `man/` directory is stale or a registry command has no page.
+  Completion now also covers **PowerShell** in addition to bash/zsh/fish.
+  Manual and completion scripts are installed by `install.sh` and the Windows
+  installer ([#349](https://github.com/framefrok/Euterpia_core/issues/349)).
+- **Command compatibility policy** (issue #350): `CommandSpec` can declare
+  legacy `aliases` (`aliasesDeprecatedSince`) and a deprecated command
+  (`deprecatedSince` + `replacedBy`). Aliases execute the canonical command,
+  print a warning to **stderr**, appear in `help --json`, and are marked in
+  man pages. The first real alias is `inspect` → `analyze`; batch lines and
+  `--script` resolve aliases through the same table. The rules — what is
+  additive, what requires a schema/format bump, deprecation windows — are in
+  `docs/cli-policy.md`
+  ([#350](https://github.com/framefrok/Euterpia_core/issues/350)).
+- **Executable quick start** (issue #351): `docs/quickstart.md` contains the
+  only command block; `tools/quickstart.sh` extracts and executes it
+  (template → set list → parameter preset → graph check → render → analyze →
+  strict validate), measures the time and fails above five minutes. CI runs
+  the same script, and the clean-machine container runs it from the shipped
+  documentation with packaged presets
+  ([#351](https://github.com/framefrok/Euterpia_core/issues/351)).
+- **Delivery payload** (issue #348): archives now include man pages,
+  completion scripts, presets under `share/euterpia/presets`, the
+  `euterpia-open` helper and `quickstart.md`/`cli-policy.md`; the clean-machine
+  job checks `open`, `__man --check`, completion files, presets, the quick
+  start and that `play` without an audio device exits with code 2.
+- **`open`** is listed as a CLI-only command in the client parity table: in
+  the editor a project is already open in a window.
+
+### Changed
+- CLI version is `0.3.11`; the release tag `v0.3.11` matches
+  `euterpia_version.nim`.
+
 ## [0.3.10] — Итеративная работа в терминале (v0.3.10)
 
 ### Добавлено
