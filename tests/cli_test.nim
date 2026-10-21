@@ -749,8 +749,7 @@ suite "CLI: проект — init/show/set/validate (#89)":
     let names = machineCommandNames()
     check "init" in names
     check "project" in names
-    # Порядок справки: сначала «создать проект», затем «открыть», затем всё
-    # остальное (#348).
+    # Help order: create a project, open it, then everything else (#348).
     check names[0] == "init"
     check names[1] == "open"
     check names[2] == "project"

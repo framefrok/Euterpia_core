@@ -8,7 +8,7 @@
 Версия пакета — единственная константа `euterpia_version.nim`, поэтому
 `euterpia --version`, поле `version` пакета и имя тега совпадают.
 
-## [0.3.11] — Поставка и полировка (v0.3.11)
+## [0.3.11] — Delivery and polish (v0.3.11)
 
 ### Added
 - **`euterpia open` and file associations** (issue #348): a project can be
