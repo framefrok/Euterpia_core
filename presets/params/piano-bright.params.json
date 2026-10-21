@@ -1,0 +1,13 @@
+{
+  "format": "euterpia.param-preset",
+  "version": 1,
+  "name": "piano-bright",
+  "description": "яркое фортепиано: больше hammer и tone, короче decay",
+  "nodeType": "euterpia.piano",
+  "params": {
+    "tone": 0.78,
+    "decay": 0.9,
+    "hammer": 0.55,
+    "level": -7.0
+  }
+}

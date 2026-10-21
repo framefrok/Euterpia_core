@@ -1,0 +1,81 @@
+{
+  "format": "euterpia.setlist",
+  "version": 1,
+  "name": "punk-demo",
+  "description": "панк: восьмые у лида и баса, бочка-снейр, громкое сведение",
+  "preset": "band",
+  "parts": [
+    {
+      "track": "lead", "clip": "punk-lead", "lengthTicks": 7680,
+      "notes": [
+        { "start": 0, "duration": 240, "pitch": 64, "velocity": 104 },
+        { "start": 240, "duration": 240, "pitch": 64, "velocity": 96 },
+        { "start": 480, "duration": 240, "pitch": 67, "velocity": 104 },
+        { "start": 720, "duration": 240, "pitch": 64, "velocity": 96 },
+        { "start": 960, "duration": 240, "pitch": 62, "velocity": 104 },
+        { "start": 1200, "duration": 240, "pitch": 62, "velocity": 96 },
+        { "start": 1440, "duration": 240, "pitch": 60, "velocity": 104 },
+        { "start": 1680, "duration": 240, "pitch": 59, "velocity": 96 },
+        { "start": 1920, "duration": 240, "pitch": 64, "velocity": 104 },
+        { "start": 2160, "duration": 240, "pitch": 64, "velocity": 96 },
+        { "start": 2400, "duration": 240, "pitch": 67, "velocity": 104 },
+        { "start": 2640, "duration": 240, "pitch": 69, "velocity": 96 },
+        { "start": 2880, "duration": 240, "pitch": 71, "velocity": 104 },
+        { "start": 3120, "duration": 240, "pitch": 69, "velocity": 96 },
+        { "start": 3360, "duration": 480, "pitch": 67, "velocity": 104 }
+      ],
+      "mix": { "level": -7.0, "pan": 0.1 }
+    },
+    {
+      "track": "bass", "clip": "punk-bass", "lengthTicks": 7680,
+      "notes": [
+        { "start": 0, "duration": 240, "pitch": 36, "velocity": 108 },
+        { "start": 240, "duration": 240, "pitch": 36, "velocity": 96 },
+        { "start": 480, "duration": 240, "pitch": 36, "velocity": 108 },
+        { "start": 720, "duration": 240, "pitch": 36, "velocity": 96 },
+        { "start": 960, "duration": 240, "pitch": 43, "velocity": 108 },
+        { "start": 1200, "duration": 240, "pitch": 43, "velocity": 96 },
+        { "start": 1440, "duration": 240, "pitch": 43, "velocity": 108 },
+        { "start": 1680, "duration": 240, "pitch": 44, "velocity": 96 },
+        { "start": 1920, "duration": 240, "pitch": 36, "velocity": 108 },
+        { "start": 2160, "duration": 240, "pitch": 36, "velocity": 96 },
+        { "start": 2400, "duration": 240, "pitch": 36, "velocity": 108 },
+        { "start": 2640, "duration": 240, "pitch": 41, "velocity": 96 },
+        { "start": 2880, "duration": 240, "pitch": 41, "velocity": 108 },
+        { "start": 3120, "duration": 240, "pitch": 43, "velocity": 96 },
+        { "start": 3360, "duration": 480, "pitch": 36, "velocity": 108 }
+      ],
+      "mix": { "level": -6.0 }
+    },
+    {
+      "track": "drums", "clip": "punk-beat", "lengthTicks": 7680,
+      "notes": [
+        { "start": 0, "duration": 120, "pitch": 36, "velocity": 112 },
+        { "start": 0, "duration": 120, "pitch": 42, "velocity": 96 },
+        { "start": 240, "duration": 120, "pitch": 42, "velocity": 80 },
+        { "start": 480, "duration": 120, "pitch": 38, "velocity": 108 },
+        { "start": 480, "duration": 120, "pitch": 42, "velocity": 96 },
+        { "start": 720, "duration": 120, "pitch": 42, "velocity": 80 },
+        { "start": 960, "duration": 120, "pitch": 36, "velocity": 112 },
+        { "start": 960, "duration": 120, "pitch": 42, "velocity": 96 },
+        { "start": 1200, "duration": 120, "pitch": 42, "velocity": 80 },
+        { "start": 1440, "duration": 120, "pitch": 38, "velocity": 108 },
+        { "start": 1440, "duration": 120, "pitch": 42, "velocity": 96 },
+        { "start": 1680, "duration": 120, "pitch": 42, "velocity": 80 },
+        { "start": 1920, "duration": 120, "pitch": 36, "velocity": 112 },
+        { "start": 1920, "duration": 120, "pitch": 42, "velocity": 96 },
+        { "start": 2160, "duration": 120, "pitch": 42, "velocity": 80 },
+        { "start": 2400, "duration": 120, "pitch": 38, "velocity": 108 },
+        { "start": 2400, "duration": 120, "pitch": 42, "velocity": 96 },
+        { "start": 2640, "duration": 120, "pitch": 42, "velocity": 80 },
+        { "start": 2880, "duration": 120, "pitch": 36, "velocity": 112 },
+        { "start": 2880, "duration": 120, "pitch": 42, "velocity": 96 },
+        { "start": 3120, "duration": 120, "pitch": 42, "velocity": 80 },
+        { "start": 3360, "duration": 120, "pitch": 38, "velocity": 108 },
+        { "start": 3360, "duration": 120, "pitch": 42, "velocity": 96 },
+        { "start": 3600, "duration": 120, "pitch": 42, "velocity": 80 }
+      ],
+      "mix": { "level": -5.0 }
+    }
+  ]
+}

@@ -68,6 +68,7 @@ import test_control_history
 import test_query
 import test_cli_spec
 import test_script
+import test_presets
 import test_diff
 import test_logger
 import test_undo_redo

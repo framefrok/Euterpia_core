@@ -205,11 +205,16 @@ proc substitute(value: JsonNode; vars: Table[string, JsonNode];
       result[key] = nested
   of JArray:
     result = newJArray()
-    for index, item in value:
+    # `pairs` у JsonNode определён только для объектов, поэтому индекс
+    # считается здесь: `for index, item in value` падал assertion'ом на любом
+    # массиве внутри команды (`clip.set` с нотами — первый такой случай).
+    var index = 0
+    for item in value:
       let nested = substitute(item, vars, where & "[" & $index & "]", problem)
       if problem.len > 0:
         return
       result.add nested
+      inc index
   else:
     result = value
 
