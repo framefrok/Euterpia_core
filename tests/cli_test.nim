@@ -3972,16 +3972,20 @@ suite "CLI: сравнение и проверки (#337–#340)":
   # `makePair` проверял бы не то, что задумано.
   proc makePair(tag: string): tuple[first, second: string] =
     let firstName = tag & "-a.eproj"
-    let secondName = tag & "-b.eproj"
     let first = dir / firstName
-    let second = dir / secondName
+    let second = dir / (tag & "-b.eproj")
     check runCliIn(dir, ["init", firstName]).code == 0
     check runCliIn(dir, ["node", "add", "osc", firstName]).code == 0
     check runCliIn(dir, ["node", "add", "gain", firstName]).code == 0
     check runCliIn(dir, ["connect", "1:out", "2:in", firstName]).code == 0
     check runCliIn(dir, ["param", "set", "1", "freq", "220", firstName]).code == 0
     copyFile(first, second)
-    check runCliIn(dir, ["param", "set", "1", "freq", "330", secondName]).code == 0
+    # Второй проект правится ДАННЫМИ, а не командой: любая команда обновляет
+    # `metadata.modified`, и «одна изменённая величина» превращалась бы в две
+    # (плюс метка времени — с секундной точностью, то есть ещё и нестабильно).
+    let edited = parseJson(readFile(second))
+    edited["graph"]["nodes"][0]["parameters"]["freq"] = %330.0
+    writeFile(second, $edited)
     (first, second)
 
   test "project diff: одинаковые проекты — код 0 и пустой отчёт":
