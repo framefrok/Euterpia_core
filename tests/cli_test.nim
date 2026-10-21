@@ -2315,8 +2315,11 @@ suite "CLI: спецификация команд — один источник 
       ("analyze", @[@["analyze", "spec.wav"],
                     @["analyze", "нет-такого.wav"]]),
       ("ci", @[@["ci", "check", "spec.eproj", "--seconds", "0.1"]]),
+      ("watch", @[@["watch", "--once", "spec.eproj", "--out", "watch-spec.wav",
+                   "--seconds", "0.1"]]),
       ("completion", @[@["completion", "bash"]]),
-      ("doctor", @[@["doctor"]]),
+      ("doctor", @[@["doctor"],
+                   @["doctor", "--deep", "presetbase.eproj"]]),
       ("config", @[@["config", "list"], @["config", "path"],
                    @["config", "get", "sampleRate"],
                    @["config", "set", "sampleRate", "44100"],
@@ -4446,4 +4449,166 @@ suite "CLI: шаблоны, сет-листы и пресеты (#341–#343)":
     check "preset <list|show|apply|param>" in r.output
     check "--role" in r.output
     check "init --preset" in r.output
+
+
+# =============================================================================
+# Итеративная работа в терминале (#344–#347)
+# =============================================================================
+#
+# Проверяется наблюдаемое поведение: цикл watch, поток метрик, вердикт
+# инспектора в трёх представлениях и `doctor --deep` на фикстуре с удалённым
+# ресурсом. Внутренние правила дебаунса проверяет unit-suite `watch` — здесь
+# только процесс.
+
+suite "CLI: итеративная работа в терминале (#344–#347)":
+  let workDir = getTempDir() / "euterpia_cli_iterative"
+  if dirExists(workDir):
+    removeDir(workDir)
+  createDir(workDir)
+
+  proc inWork(args: openArray[string]): RunResult =
+    runCliIn(workDir, args)
+
+  proc jsonOf(args: openArray[string]): JsonNode =
+    let r = inWork(args)
+    check r.code == 0
+    if r.code != 0:
+      checkpoint(r.errput)
+    parseJson(nonEmptyLines(r.output)[^1])
+
+  test "watch --once рендерит и не оставляет временных файлов":
+    let project = workDir / "watch.eproj"
+    check inWork(["init", project]).code == 0
+    check inWork(["node", "add", "osc", project]).code == 0
+    check inWork(["node", "add", "gain", project]).code == 0
+    check inWork(["connect", "1:out", "2:in", project]).code == 0
+    let outPath = workDir / "watch.wav"
+    let body = jsonOf(["--json", "watch", project, "--out", outPath,
+                       "--seconds", "0.2", "--once"])
+    check body["ok"].getBool
+    check body["stopped"].getStr == "once"
+    check body["renders"].getInt == 1
+    check body["lastMs"].getInt >= 0
+    check fileExists(outPath)
+    var leftovers = 0
+    for path in walkFiles(workDir / "*.tmp-*"):
+      inc leftovers
+    check leftovers == 0
+
+  test "render --metrics: NDJSON в stdout, отчёт последней строкой":
+    let project = workDir / "metrics.eproj"
+    check inWork(["init", project]).code == 0
+    check inWork(["node", "add", "osc", project]).code == 0
+    check inWork(["node", "add", "gain", project]).code == 0
+    check inWork(["connect", "1:out", "2:in", project]).code == 0
+    let outPath = workDir / "metrics.wav"
+    let r = inWork(["--json", "render", project, outPath, "--seconds", "1",
+                    "--metrics", "--metrics-interval", "250"])
+    check r.code == 0
+    let lines = nonEmptyLines(r.output)
+    check lines.len >= 2
+    var lastT = -1.0
+    var metrics = 0
+    for i in 0 ..< lines.len - 1:
+      let node = parseJson(lines[i])
+      check node["type"].getStr == "metric"
+      check node["seq"].getInt == i
+      check node["t"].getFloat >= lastT
+      lastT = node["t"].getFloat
+      check node.hasKey("peakL")
+      check node.hasKey("rmsR")
+      check node.hasKey("latencyMs")
+      check node.hasKey("xruns")
+      check node.hasKey("transport")
+      inc metrics
+    let report = parseJson(lines[^1])
+    check report["ok"].getBool
+    check report["metrics"].getInt == metrics
+
+  test "render --metrics в human пишет поток в stderr, stdout — отчёт":
+    let project = workDir / "metrics.eproj"
+    let outPath = workDir / "metrics2.wav"
+    let r = inWork(["render", project, outPath, "--seconds", "1", "--metrics",
+                    "--metrics-interval", "250"])
+    check r.code == 0
+    check "метрики:" in r.errput
+    check "метрики:" notin r.output
+    check "записано:" in r.output
+
+
+  test "analyze: вердикт одинаков в human, --json и HTML":
+    let wav = workDir / "tone.wav"
+    copyFile("tests/fixtures/tone.wav", wav)
+    let html = workDir / "report.html"
+    let human = inWork(["analyze", wav, "--html", html, "--no-terminal"])
+    check human.code == 0
+    check "вердикт:" in human.output
+    check fileExists(html)
+    let page = readFile(html)
+    check "<canvas" in page
+    check "src=\"http" notin page
+    check page.len < 1_000_000
+
+    let machine = parseJson(nonEmptyLines(
+      inWork(["--json", "analyze", wav, "--no-terminal"]).output)[^1])
+    let verdict = machine["verdict"]["text"].getStr
+    check verdict.len > 0
+    check verdict in human.output
+    check verdict in page
+    check machine["spectrum"].len == 16
+    # Никакого мусора из escape-последовательностей без TTY (#346).
+    check "\e" notin human.output
+
+  test "analyze --fail-on переносит вердикт в код возврата":
+    let wav = workDir / "tone.wav"
+    let machine = parseJson(nonEmptyLines(
+      inWork(["--json", "analyze", wav, "--fail-on", "info",
+              "--no-terminal"]).output)[^1])
+    let failing = machine["verdict"]["failing"].getInt
+    let r = inWork(["analyze", wav, "--fail-on", "info", "--no-terminal"])
+    check (r.code == 1) == (failing > 0)
+
+  test "doctor --deep находит удалённый ресурс, который validate пропускает":
+    let project = workDir / "deep.eproj"
+    let wav = workDir / "sample.wav"
+    copyFile("tests/fixtures/tone.wav", wav)
+    check inWork(["init", project]).code == 0
+    check inWork(["import", wav, "--file", project, "--track", "1"]).code == 0
+    removeFile(wav)
+    # validate структурно корректен: ссылка на ресурс есть, файла нет.
+    check inWork(["project", "validate", project]).code == 0
+
+    let r = inWork(["--json", "doctor", "--deep", project])
+    check r.code == 1
+    let body = parseJson(r.output)
+    check body["deep"].getBool
+    check body["project"].getStr == project
+    var found = false
+    var elapsedSeen = false
+    for section in body["sections"]:
+      for checkItem in section["checks"]:
+        if checkItem["status"].getStr == "fail" and
+           "файлы ресурсов" in checkItem["title"].getStr:
+          found = true
+        if checkItem["elapsedMs"].getInt >= 0:
+          elapsedSeen = true
+    check found
+    check elapsedSeen
+
+  test "быстрый doctor не изменился: те же шесть секций и код":
+    let human = inWork(["doctor"])
+    check human.code in [0, 2]
+    check "Итог:" in human.output
+    let body = parseJson(inWork(["--json", "doctor"]).output)
+    check body["deep"].getBool == false
+    var ids: seq[string] = @[]
+    for section in body["sections"]:
+      ids.add section["id"].getStr
+    check ids == @["build", "audio", "midi", "plugins", "fs", "csrc"]
+
+  test "doctor --deep без проекта — код 1 и подсказка":
+    let r = inWork(["doctor", "--deep", "no-such.eproj"])
+    check r.code == 1
+    check "нет проекта" in r.errput
+    check "init" in r.errput
 

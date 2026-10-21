@@ -27,6 +27,7 @@ import std/[json, math, monotimes, os, strutils, times]
 
 import context
 import cli_spec
+import metrics
 import config
 import cmd_project
 import project
@@ -117,6 +118,11 @@ const
           default = "0"),
       opt("--count-in", "отсчёт N тактов клика до старта записи (нужна нода метронома)",
           value = "такты"),
+      switch("--metrics", "поток метрик во время записи (#345)"),
+      opt("--metrics-interval", "интервал метрик, мс", value = "мс",
+          default = $DefaultMetricsIntervalMs),
+      opt("--metrics-event", "печатать только события: peak | xrun",
+          value = "peak|xrun"),
     ],
     example: "euterpia record take.wav --seconds 30 --channels 2",
     fields: @[
@@ -198,6 +204,11 @@ const
       opt("--master", "id ноды, подключённой к мастеру", value = "id ноды"),
       opt("--midi-in", "MIDI-порт для живой игры (индекс или имя)", value = "N|имя"),
       opt("--midi-target", "id ноды-приёмника MIDI; по умолчанию — единственный инструмент", value = "id ноды"),
+      switch("--metrics", "поток метрик в stderr или NDJSON (#345)"),
+      opt("--metrics-interval", "интервал метрик, мс", value = "мс",
+          default = $DefaultMetricsIntervalMs),
+      opt("--metrics-event", "печатать только события: peak | xrun",
+          value = "peak|xrun"),
     ],
     example: "euterpia play demo.eproj --seconds 10",
     fields: @[
@@ -257,6 +268,9 @@ type
     midiInName: string
     haveMidiIn: bool
     midiTarget: int
+    metrics: bool
+    metricsIntervalMs: int64
+    metricsEvent: bool
 
 # =============================================================================
 # Разбор аргументов
@@ -289,6 +303,7 @@ proc scanArgs(args: seq[string]; isDevice: bool): LiveScan =
   result.master = -1
   result.midiTarget = -1
   result.srcMode = "auto"
+  result.metricsIntervalMs = DefaultMetricsIntervalMs
   var positionals: seq[string] = @[]
   var i = 0
   while i < args.len:
@@ -352,6 +367,27 @@ proc scanArgs(args: seq[string]; isDevice: bool): LiveScan =
       if not parsed.ok:
         return LiveScan(ok: false, rep: usageError(parsed.message))
       result.blockSize = parsed.value
+    of "--metrics":
+      result.metrics = true
+    of "--metrics-interval":
+      inc i
+      if i >= args.len:
+        return LiveScan(ok: false,
+          rep: usageError("--metrics-interval: нужно число мс"))
+      let parsed = intArg(args[i], "--metrics-interval", 10, 600_000)
+      if not parsed.ok:
+        return LiveScan(ok: false, rep: usageError(parsed.message))
+      result.metricsIntervalMs = int64(parsed.value)
+    of "--metrics-event":
+      inc i
+      if i >= args.len:
+        return LiveScan(ok: false,
+          rep: usageError("--metrics-event: нужно peak | xrun"))
+      var problem = ""
+      problem = parseMetricsEvent(args[i], result.metricsEvent)
+      if problem.len > 0:
+        return LiveScan(ok: false,
+          rep: usageError("--metrics-event: " & problem))
     of "--seconds":
       inc i
       if i >= args.len:
@@ -661,6 +697,9 @@ type
     channels: int
     inputChannel: int
     countIn: int
+    metrics: bool
+    metricsIntervalMs: int64
+    metricsEvent: bool
 
 proc scanRecordArgs(args: seq[string]): RecordScan =
   ## Разбор `record`. Выход — позиционный и обязательный: запись без пути
@@ -670,14 +709,20 @@ proc scanRecordArgs(args: seq[string]): RecordScan =
   result.inputChannel = 0
   result.channels = 1
   result.blockSize = DefaultBlock
+  result.metricsIntervalMs = DefaultMetricsIntervalMs
 
   var haveOut = false
   var i = 0
   while i < args.len:
     let key = args[i]
+    if key == "--metrics":
+      result.metrics = true
+      inc i
+      continue
     if key in ["--project", "--backend", "--device", "--input-device",
                "--sample-rate", "--block", "--seconds", "--channels",
-               "--input-channel", "--count-in"]:
+               "--input-channel", "--count-in", "--metrics-interval",
+               "--metrics-event"]:
       if i + 1 >= args.len:
         return RecordScan(ok: false,
           rep: usageError(key & ": нужно значение",
@@ -736,6 +781,17 @@ proc scanRecordArgs(args: seq[string]): RecordScan =
           return RecordScan(ok: false, rep: usageError(parsed.message,
             "первый канал входа: 0 — первый доступный"))
         result.inputChannel = parsed.value
+      of "--metrics-interval":
+        let parsed = intArg(value, "--metrics-interval", 10, 600_000)
+        if not parsed.ok:
+          return RecordScan(ok: false, rep: usageError(parsed.message))
+        result.metricsIntervalMs = int64(parsed.value)
+      of "--metrics-event":
+        var problem = ""
+        problem = parseMetricsEvent(value, result.metricsEvent)
+        if problem.len > 0:
+          return RecordScan(ok: false,
+            rep: usageError("--metrics-event: " & problem))
       else: # --count-in
         let parsed = intArg(value, "--count-in", 1, 64)
         if not parsed.ok:
@@ -1100,6 +1156,8 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
   var haveMetric = false
   var snapshots = 0
   var exitReason = "signal"
+  var metricsStream = newMetricsStream(scan.metrics, scan.metricsIntervalMs,
+                                       scan.metricsEvent)
 
   while not liveRequested():
     let elapsed = (getMonoTime() - started).inMilliseconds
@@ -1113,19 +1171,43 @@ proc runPlay(ctx: var Ctx; scan: LiveScan): Report =
       lastMetric = m
       haveMetric = true
 
-    if haveMetric and elapsed >= nextReport:
-      nextReport += MetricsIntervalMs
-      let frame = session.currentFrame()
-      let total = uint64(session.xrunCount())
-      let delta = if total >= lastXruns: total - lastXruns else: 0'u64
-      lastXruns = total
-      let snap = metricSnapshot(lastMetric, frame, tempo, float32(sr),
-                                num, den, total, delta)
-      if ctx.mode == omJson:
-        cliStdout($snap)
+    if haveMetric and (scan.metrics or elapsed >= nextReport):
+      if scan.metrics:
+        # `--metrics`: интервал и режим «после события» задаёт пользователь.
+        # В `--json` строка идёт в stdout (NDJSON), в human — короткая строка
+        # в stderr: stdout остаётся итоговым отчётом (#345).
+        let sample = MetricSample(
+          tMs: elapsed,
+          peakL: lastMetric.peakL, peakR: lastMetric.peakR,
+          rmsL: lastMetric.rmsL, rmsR: lastMetric.rmsR,
+          cpu: lastMetric.cpuLoad, xruns: lastMetric.xruns,
+          transport: lastMetric.transportState,
+          voices: lastMetric.activeVoices,
+          latencyMs: latencyMs(scan.blockSize, sr),
+          graphVersion: lastMetric.graphVersion,
+          inputPeakL: lastMetric.inputPeakL,
+          inputPeakR: lastMetric.inputPeakR,
+          inputXruns: lastMetric.inputXruns)
+        if metricsStream.pushChunk(sample,
+            int64(float64(sr) * float64(scan.metricsIntervalMs) / 1000.0)):
+          if ctx.mode == omJson:
+            cliStdout(metricsLine(metricsStream.last,
+                                  metricsStream.seqNo - 1))
+          else:
+            cliWarn(metricsHuman(metricsStream.last))
       else:
-        cliStdout(metricLine(snap))
-      inc snapshots
+        nextReport += MetricsIntervalMs
+        let frame = session.currentFrame()
+        let total = uint64(session.xrunCount())
+        let delta = if total >= lastXruns: total - lastXruns else: 0'u64
+        lastXruns = total
+        let snap = metricSnapshot(lastMetric, frame, tempo, float32(sr),
+                                  num, den, total, delta)
+        if ctx.mode == omJson:
+          cliStdout($snap)
+        else:
+          cliStdout(metricLine(snap))
+        inc snapshots
 
     if not midiRig.port.isNil:
       # Порт опрашивается часто (2 мс): задержка входа — свойство живого
@@ -1551,6 +1633,8 @@ proc runRecord(ctx: var Ctx; scan: RecordScan): Report =
   var lastMetric: LiveMetrics
   var haveMetric = false
   var exitReason = "signal"
+  var metricsStream = newMetricsStream(scan.metrics, scan.metricsIntervalMs,
+                                       scan.metricsEvent)
 
   while not liveRequested():
     let elapsed = (getMonoTime() - started).inMilliseconds
@@ -1562,6 +1646,28 @@ proc runRecord(ctx: var Ctx; scan: RecordScan): Report =
     while session.pollMetrics(m):
       lastMetric = m
       haveMetric = true
+    if scan.metrics and haveMetric:
+      # Тот же формат, что у `render` и `play` (#345): один поток метрик на
+      # все команды. В human — строка в stderr, в `--json` — NDJSON.
+      let sample = MetricSample(
+        tMs: elapsed,
+        peakL: lastMetric.peakL, peakR: lastMetric.peakR,
+        rmsL: lastMetric.rmsL, rmsR: lastMetric.rmsR,
+        cpu: lastMetric.cpuLoad, xruns: lastMetric.xruns,
+        transport: lastMetric.transportState,
+        voices: lastMetric.activeVoices,
+        latencyMs: latencyMs(bs, sr),
+        graphVersion: lastMetric.graphVersion,
+        inputPeakL: lastMetric.inputPeakL,
+        inputPeakR: lastMetric.inputPeakR,
+        inputXruns: lastMetric.inputXruns)
+      if metricsStream.pushChunk(sample,
+          int64(float64(sr) * float64(scan.metricsIntervalMs) / 1000.0)):
+        if ctx.mode == omJson:
+          cliStdout(metricsLine(metricsStream.last,
+                                metricsStream.seqNo - 1))
+        else:
+          cliWarn(metricsHuman(metricsStream.last))
     sleep(10)
 
   stopLiveRecording(rec)

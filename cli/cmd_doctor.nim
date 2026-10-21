@@ -27,7 +27,7 @@
 # недоступно. «Критичное» — это звук (устройства) и права на запись;
 # отсутствие MIDI/плагинов/SIMD — предупреждение, а не отказ.
 
-import std/[json, os, strutils]
+import std/[json, monotimes, os, strutils, times]
 
 import audio_backend_api
 import backend_registry
@@ -38,20 +38,42 @@ import context
 import checks
 import probe
 import cli_spec
+import cmd_project
+import cmd_graph
+import project
+import project_lint
+import control/query
+import control/document
+import control_bridge
+from catalog import catalog
 
 const
   DoctorSpec* = CommandSpec(
     name: "doctor",
-    summary: "самодиагностика окружения: устройства, плагины, права",
-    synopsis: "doctor",
-    example: "euterpia doctor",
+    summary: "самодиагностика окружения; --deep — долгая диагностика проекта",
+    synopsis: "doctor [проект.eproj] [--deep] [ключи]",
+    args: @[
+      arg("проект.eproj", "--deep: какой проект проверять; по умолчанию " &
+          DefaultProjectFile),
+    ],
+    options: @[
+      opt("--file", "проект для --deep, если он не задан позиционно",
+          value = projectSuffixesHint()),
+      switch("--deep", "долгая диагностика проекта: граф, ссылки, типы, ресурсы (#347)"),
+    ],
+    example: "euterpia doctor --deep demo.eproj",
     fields: @[
       field("sections", "секции диагностики: build, audio, midi, plugins, fs, csrc"),
+      field("deep", "включена ли долгая диагностика проекта"),
+      field("project", "какой проект проверялся в --deep"),
+      field("checks", "полный список проверок с кодом, статусом, советом и временем"),
       field("summary", "сводка ok/warn/fail — она же определяет код возврата"),
     ],
     notes: @[
-      "секции: build, audio, midi, plugins, fs, csrc; аудиоустройство при этом не открывается",
-      "код 0, если провалов нет; 2 — если есть: среда, а не данные пользователя",
+      "секции быстрой диагностики: build, audio, midi, plugins, fs, csrc; аудиоустройство при этом не открывается",
+      "код 0, если провалов нет; 2 — окружение, а не данные пользователя",
+      "`--deep <проект>` добавляет проверки проекта: загрузка, граф, lint, ресурсы на диске (#347)",
+      "каждая проверка имеет id и `elapsedMs`: время видно в отчёте и в `--json`",
       "сводка `ok/warn/fail` совпадает с кодом возврата — и в тексте, и в --json",
     ])
 
@@ -363,6 +385,183 @@ proc csrcSection*(): Section =
 # Отчёт
 # =============================================================================
 
+# =============================================================================
+# Долгая диагностика проекта (#347)
+# =============================================================================
+#
+# Быстрый `doctor` отвечает «здорово ли окружение» за секунды. Вопрос «здоров
+# ли МОЙ проект» требует прогона графа, ссылок и ресурсов, поэтому живёт в
+# `--deep`: иначе каждая команда `doctor` стоила бы секунд на большом проекте.
+#
+# Проверки НЕ дублируют `validate`/`graph check`/`--strict`: они вызывают те же
+# секции (`graphCheckSections`, `lintSections`), а добавляют то, чего там нет, —
+# файлы ресурсов на диске. Поэтому «deep нашёл проблему, которую validate
+# пропускает» — это конкретный случай (ресурс удалён), а не второе мнение о
+# том же.
+
+type
+  DoctorScan = object
+    ok: bool
+    rep: Report
+    deep: bool
+    project: string
+    haveProject: bool
+
+proc scanDoctorArgs(args: seq[string]): DoctorScan =
+  result.project = DefaultProjectFile
+  var positional: seq[string] = @[]
+  let tokens = splitInline(args)
+  var i = 0
+  while i < tokens.len:
+    let token = tokens[i]
+    if token == "--deep":
+      result.deep = true
+      inc i
+      continue
+    if token == "--file":
+      if i + 1 >= tokens.len:
+        result.rep = usageError("--file: нужен путь к проекту")
+        return
+      result.project = tokens[i + 1]
+      result.haveProject = true
+      inc i, 2
+      continue
+    if token.startsWith("--"):
+      result.rep = usageError("неизвестный ключ doctor: " & token,
+                              "ключи: --deep, --file")
+      return
+    positional.add token
+    inc i
+  if positional.len > 1:
+    result.rep = usageError("doctor принимает один проект, получено: " &
+                            positional.join(" "),
+                            "например: euterpia doctor --deep demo.eproj")
+    return
+  if positional.len == 1:
+    result.project = positional[0]
+    result.haveProject = true
+  if result.haveProject and not result.deep:
+    result.rep = usageError(
+      "doctor принимает проект только с --deep: " & result.project,
+      "например: euterpia doctor --deep " & result.project)
+    return
+  result.ok = true
+
+proc withElapsed(section: Section; elapsedMs: int64): Section =
+  ## Время секции — её проверкам: они готовят одни и те же данные, и дробить
+  ## загрузку проекта по проверкам значило бы измерять копирование, а не
+  ## работу.
+  result = section
+  for check in result.checks.mitems:
+    check.elapsedMs = elapsedMs
+
+
+proc deepSections(path: string): seq[Section] =
+  ## Проект целиком: загрузка, метаданные, граф (+ компиляция), lint, ресурсы.
+  let loadStart = getMonoTime()
+  let loaded = loadAt(path)
+  let loadMs = (getMonoTime() - loadStart).inMilliseconds
+  if not loaded.ok:
+    var section = Section(id: "deep-project", title: "deep: проект")
+    section.checks.add mkCheck("project-load", "проект читается", csFail,
+      lines = @[loaded.rep.error], advice = loaded.rep.hint,
+      body = %*{"path": path}, elapsedMs = loadMs)
+    return @[section]
+  let doc = openDocument(path, loaded.proj)
+  let meta = queryMetadata(doc)
+  let summary = querySummary(doc)
+
+  var projectSection = Section(id: "deep-project", title: "deep: проект")
+  projectSection.checks.add mkCheck("project-load", "проект читается", csOk,
+    lines = @["формат " & ProjectFormatName & " v" & $ProjectFormatVersion,
+              "нод " & $summary.nodes & ", связей " & $summary.connections &
+              ", дорожек " & $summary.tracks & ", клипов " & $summary.clips],
+    body = %*{"path": path, "nodes": summary.nodes,
+              "connections": summary.connections, "tracks": summary.tracks,
+              "clips": summary.clips, "notes": summary.notes},
+    elapsedMs = loadMs)
+
+  var metaProblems: seq[string] = @[]
+  if meta.name.len == 0:
+    metaProblems.add "имя проекта пустое"
+  if meta.tempo <= 0.0f:
+    metaProblems.add "темп не задан"
+  if meta.sampleRate <= 0.0f:
+    metaProblems.add "частота дискретизации не задана"
+  if meta.tsNumerator <= 0 or meta.tsDenominator <= 0:
+    metaProblems.add "размер такта не задан"
+  projectSection.checks.add mkCheck("metadata", "метаданные проекта заполнены",
+    (if metaProblems.len > 0: csWarn else: csOk),
+    lines = (if metaProblems.len > 0: metaProblems
+             else: @[meta.name & ", " & $meta.tempo & " BPM, " &
+                     $meta.sampleRate & " Гц, " & $meta.tsNumerator & "/" &
+                     $meta.tsDenominator]),
+    advice = (if metaProblems.len > 0:
+                "исправьте: euterpia project set <поле> <значение>"
+              else: ""),
+    body = %*{"name": meta.name, "tempo": meta.tempo,
+              "sampleRate": meta.sampleRate,
+              "timeSignature": $meta.tsNumerator & "/" & $meta.tsDenominator},
+    elapsedMs = loadMs)
+  result.add projectSection
+
+  let graphStart = getMonoTime()
+  let graph = graphCheckSections(doc, catalog())
+  let graphMs = (getMonoTime() - graphStart).inMilliseconds
+  for section in graph:
+    result.add withElapsed(section, graphMs)
+
+  let lintStart = getMonoTime()
+  let lint = lintSections(doc)
+  let lintMs = (getMonoTime() - lintStart).inMilliseconds
+  for section in lint:
+    result.add withElapsed(section, lintMs)
+
+  let resourcesStart = getMonoTime()
+  var resourcesSection = Section(id: "deep-resources", title: "deep: ресурсы")
+  let projectDir = parentDir(absolutePath(path))
+  var missing: seq[string] = @[]
+  var totalBytes = 0'i64
+  var count = 0
+  for resource in doc.queryResources():
+    inc count
+    let resolved =
+      if isAbsolute(resource.path): resource.path
+      else: projectDir / resource.path
+    if not fileExists(resolved):
+      missing.add "resource:" & $resource.id & " → " & resource.path
+      continue
+    try:
+      totalBytes += getFileSize(resolved)
+    except CatchableError:
+      missing.add "resource:" & $resource.id & " → " & resource.path &
+        " (размер не читается)"
+  resourcesSection.checks.add mkCheck("resource-files",
+    "файлы ресурсов существуют",
+    (if missing.len > 0: csFail else: csOk),
+    lines = (if count == 0: @["в проекте нет аудиоресурсов"]
+             elif missing.len > 0: missing
+             else: @[$count & " ресурс(ов), " & $totalBytes & " байт"]),
+    advice = (if missing.len > 0:
+                "верните файлы на место или уберите клипы, ссылающиеся на них " &
+                "(`project validate --strict` покажет адреса)"
+              else: ""),
+    body = %*{"resources": count, "missing": missing, "bytes": totalBytes},
+    elapsedMs = (getMonoTime() - resourcesStart).inMilliseconds)
+  result.add resourcesSection
+
+proc deepTimeLine(sections: seq[Section]): string =
+  ## Время проверок отдельной строкой: вопрос «почему doctor --deep идёт
+  ## секунду» должен иметь ответ в отчёте, а не в догадках.
+  var total = 0'i64
+  for section in sections:
+    for check in section.checks:
+      total += check.elapsedMs
+  let counters = counts(sections)
+  "проверок: " & $counters.ok & " ok, " & $counters.note & " note, " &
+    $counters.warn & " warn, " & $counters.fail & " fail; суммарно " &
+    $total & " мс"
+
 proc renderDoctor(sections: seq[Section]; verbose: bool): seq[string] =
   ## Заголовок отчёта принадлежит команде, вид секций — общий (`checks`).
   result.add CliName & " doctor — самодиагностика окружения"
@@ -372,15 +571,15 @@ proc renderDoctor(sections: seq[Section]; verbose: bool): seq[string] =
   result.add renderHuman(sections, verbose)
 
 proc runDoctor*(ctx: var Ctx; args: seq[string]): Report =
-  ## `euterpia doctor [--json]`. Аудиоустройство НЕ открывается: адаптер
-  ## только перечисляет устройства, поэтому doctor не захватывает звук и
-  ## не мешает другим приложениям.
-  if args.len > 0:
-    return usageError("doctor не принимает аргументов, получено: " & args.join(" "),
-                      "например: euterpia doctor --json")
+  ## `euterpia doctor [--deep] [проект] [--json]`. Аудиоустройство НЕ
+  ## открывается: адаптер только перечисляет устройства, поэтому doctor не
+  ## захватывает звук и не мешает другим приложениям.
+  let scan = scanDoctorArgs(args)
+  if not scan.ok:
+    return scan.rep
 
   let log = cliLogger(ctx)
-  let sections = @[
+  let envSections = @[
     buildSection(),
     audioSection(log),
     midiSection(),
@@ -388,6 +587,19 @@ proc runDoctor*(ctx: var Ctx; args: seq[string]): Report =
     filesystemSection(ctx),
     csrcSection(),
   ]
+  let envTotal = counts(envSections)
+
+  var deep: seq[Section] = @[]
+  if scan.deep:
+    if not fileExists(scan.project):
+      return usageError("нет проекта для --deep: " & scan.project,
+        "создайте проект: euterpia init " & scan.project,
+        code = ecNotFound)
+    deep = deepSections(scan.project)
+  let deepTotal = counts(deep)
+  var sections = envSections
+  for section in deep:
+    sections.add section
 
   # Сериализация секций и подсчёт — общие с `project validate` (`cli/checks`):
   # сводка в `--json` и код возврата считаются одним обходом проверок.
@@ -397,20 +609,38 @@ proc runDoctor*(ctx: var Ctx; args: seq[string]): Report =
   let total = counts(sections)
 
   var body = newJObject()
+  body["deep"] = %scan.deep
+  body["project"] = %(if scan.deep: scan.project else: "")
   body["sections"] = sectionsJson
+  body["checks"] = sectionsJson
   body["summary"] = summaryJson(sections)
 
   var lines = renderDoctor(sections, ctx.verbose)
+  if scan.deep:
+    lines.add ""
+    lines.add deepTimeLine(deep)
   lines.add ""
-  lines.add "Итог: " & $total.ok & " ok, " & $total.warn & " warn, " &
-            $total.fail & " fail"
+  if scan.deep:
+    lines.add "Итог: " & $total.ok & " ok, " & $total.note & " note, " &
+              $total.warn & " warn, " & $total.fail & " fail"
+  else:
+    # Быстрый doctor печатается как раньше: добавление `--deep` не должно
+    # менять вывод команды, которую запускают на каждой машине (#347).
+    lines.add "Итог: " & $total.ok & " ok, " & $total.warn & " warn, " &
+              $total.fail & " fail"
 
-  if total.fail > 0:
-    # Провал диагностики — окружение, а не данные: причина `ecEnvironment`
-    # (код 2), класс `env` (#332).
-    envError("критичные проверки не пройдены: " & $total.fail,
+  if envTotal.fail > 0:
+    # Провал диагностики окружения — среда, а не данные: причина
+    # `ecEnvironment` (код 2), класс `env` (#332).
+    envError("критичные проверки не пройдены: " & $envTotal.fail,
       "устраните рекомендации выше (машинный вид: `euterpia doctor --json`)",
       lines = lines, body = body)
+  elif scan.deep and deepTotal.fail > 0:
+    # Проект — данные пользователя: это не «среда недоступна», а находка.
+    checkFailedError("глубокие проверки нашли проблемы: " & $deepTotal.fail,
+      "исправьте проект или запустите `euterpia project validate --strict`; " &
+      "машинный вид: `euterpia doctor --deep --json`", lines = lines,
+      body = body, errorKind = "defects")
   else:
     okReport(body = body, lines = lines)
 

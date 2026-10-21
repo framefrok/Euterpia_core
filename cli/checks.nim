@@ -33,6 +33,9 @@ type
     body*: JsonNode
       ## Машинные факты проверки (числа, флаги) — то, что агент читает
       ## вместо разбора текста.
+    elapsedMs*: int64
+      ## Сколько заняла проверка (#347). Ноль у быстрых команд: поле есть
+      ## всегда, чтобы схема `--json` не зависела от режима.
 
   Section* = object
     id*: string
@@ -60,10 +63,11 @@ proc mkCheck*(
   status: CheckStatus;
   lines: seq[string] = @[];
   advice: string = "";
-  body: JsonNode = nil
+  body: JsonNode = nil;
+  elapsedMs: int64 = 0
 ): Check =
   Check(id: id, title: title, status: status, lines: lines,
-        advice: advice, body: body)
+        advice: advice, body: body, elapsedMs: elapsedMs)
 
 proc sectionJson*(s: Section): JsonNode =
   ## Машинный вид секции. Порядок полей фиксирован, поэтому повторный
@@ -83,6 +87,7 @@ proc sectionJson*(s: Section): JsonNode =
       details.add %line
     checkJson["details"] = details
     checkJson["advice"] = %c.advice
+    checkJson["elapsedMs"] = %c.elapsedMs
     if c.body != nil:
       checkJson["facts"] = c.body
     checksJson.add checkJson
