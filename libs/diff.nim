@@ -202,7 +202,7 @@ proc familyOf(arrayName: string): ArrayFamily =
   ## в момент появления, иначе оно сравнивается по позиции — честно, но
   ## менее точно.
   case arrayName
-  of "nodes": ArrayFamily(name: "node", keys: @["id"])
+  of "nodes", "subgraphNodes": ArrayFamily(name: "node", keys: @["id"])
   of "connections", "subgraphConnections":
     ArrayFamily(name: "connection",
                 keys: @["srcNodeId", "srcPortIdx", "dstNodeId", "dstPortIdx",

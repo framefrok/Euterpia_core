@@ -239,6 +239,17 @@ suite "diff: проекты (#337)":
     check changed.items.len == 1
     check changed.items[0].address == "node:1.name"
 
+  test "ноды субграфа адресуются по id, а не по позиции":
+    var subgraph = node(1, "subgraph", "sub")
+    subgraph["isSubgraph"] = %true
+    subgraph["subgraphNodes"] = %*[node(2, "euterpia.gain", "inner")]
+    let docA = document(@[subgraph])
+    var docB = clone(docA)
+    docB["graph"]["nodes"][0]["subgraphNodes"][0]["parameters"]["freq"] = %999.0
+    let d = diffProjectJson(docA, docB)
+    check d.items.len == 1
+    check d.items[0].address == "node:1/node:2.parameters.freq"
+
   test "различие превращается в человеческую строку и в JSON":
     let a = document(@[node(1, freq = 100.0)])
     let b = document(@[node(1, freq = 200.0)])
