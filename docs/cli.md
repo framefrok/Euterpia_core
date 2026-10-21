@@ -224,7 +224,30 @@ euterpia doctor --deep demo.eproj
   `elapsedMs`. Быстрый `doctor` без `--deep` не изменился; проблема проекта
   даёт код 1, недоступное окружение — 2.
 
-## Справочник команд
+## Delivery, manual and command policy (#348–#351)
+
+- `euterpia open <project>` reads a project and prints metadata, counts and the
+  next command. A bare project path as the first argument is the same command,
+  so file associations work without a wrapper at the CLI level.
+- `euterpia-open` (shipped in `bin/`) changes to the project directory and then
+  runs `euterpia open`; the Linux `.desktop` file and the Windows registry
+  association use it.
+- `man euterpia` lists every visible command; `man euterpia-<command>` is
+  generated from the same `CommandSpec` as `--help`, `help --json` and
+  `docs/cli.md`. `euterpia __man --write|--check <dir>` regenerates and
+  verifies the committed `man/` directory; `nimble cliMan` does the same.
+- Completion covers bash, zsh, fish and PowerShell and asks the CLI for
+  candidates, so a new command appears without editing shell scripts.
+- Legacy command names are declared as `aliases` with
+  `aliasesDeprecatedSince`. They execute the canonical command and warn on
+  stderr; `inspect` is a deprecated alias of `analyze`. Batch lines and
+  `--script` resolve aliases through the same dispatcher.
+- The rules for additive vs breaking changes, schema/format versions and
+  deprecation windows are in [cli-policy.md](cli-policy.md).
+- The executable quick start lives in [quickstart.md](quickstart.md):
+  `tools/quickstart.sh` runs its command block in CI with a five-minute limit.
+
+
 
 Ниже — поверхность команд релиза. Полная машинная версия — всегда
 `euterpia help --json` (и `euterpia help <команда> --json`).
@@ -277,6 +300,44 @@ euterpia init demo.eproj --name Demo --tempo 140
 - `--preset <имя>` собирает стартовый проект по шаблону тем же путём, что `script build` (#341): шаблон проверяется реестром ДО записи
 - существующий файл не затирается: перезапись требует --force
 - расширение — подпись файла, а не формат: историческое `.eut` принимается наравне с `.eproj`, а тип файла ядро определяет по содержимому (§19/§58)
+
+### `open` — open a project and show what it contains
+
+```text
+euterpia open [проект.eproj]
+```
+
+Аргументы:
+
+- `проект.eproj` — project file; default: project.eproj
+
+Ключи:
+
+| Ключ | Значение | Умолчание | Смысл |
+|---|---|---|---|
+| `--file` | *.eproj или *.eut | — | project path when it is not positional |
+
+Пример:
+
+```text
+euterpia open demo.eproj
+```
+
+Поля ответа `--json`:
+
+- `path` — opened project file
+- `documentId` — document identifier used by entity addresses
+- `metadata` — name, author, tempo, sample rate, time signature
+- `graph` — nodes and connections
+- `sequencer` — tracks, clips and automation
+- `summary` — counts: nodes, connections, tracks, clips, notes
+- `next` — suggested next command
+
+Подробности:
+
+- read-only: `open` never changes the project file
+- file associations call `euterpia-open`, which changes to the project directory and then runs `open`
+- a bare project path as the first argument is treated as `open <path>` (#348)
 
 ### `project` — показать, изменить, проверить или сравнить файл проекта
 
@@ -1691,6 +1752,9 @@ euterpia import kick.wav song.eproj --track 1 --at-bar 1
 euterpia analyze <файл.wav> [ключи]
 ```
 
+Deprecated aliases (still work): inspect
+Since 0.3.11.
+
 Аргументы:
 
 - `файл.wav` — что слушать: записанный рендер или запись сессии
@@ -1785,10 +1849,10 @@ euterpia ci check project.eproj
 ### `completion` — скрипт автодополнения оболочки
 
 ```text
-euterpia completion <bash|zsh|fish>
+euterpia completion <bash|zsh|fish|powershell>
 ```
 
-Подкоманды: bash | zsh | fish
+Подкоманды: bash | zsh | fish | powershell
 
 Аргументы:
 
@@ -1810,6 +1874,7 @@ euterpia completion bash
 - скрипт не содержит списка команд: кандидатов он берёт у служебной `__complete`, поэтому новая команда появляется в дополнении сразу
 - шаблоны — константы: повторный запуск даёт байт-в-байт тот же текст
 - установка (bash): `euterpia completion bash > ~/.local/share/bash-completion/completions/euterpia`
+- PowerShell: `euterpia completion powershell | Out-String | Invoke-Expression` (or add it to your profile) (#349)
 
 ### `doctor` — самодиагностика окружения; --deep — долгая диагностика проекта
 
@@ -2270,8 +2335,6 @@ euterpia ci check song.eproj --fast     # только validate и graph check
 
 Со ссылками на открытые Issues (не выдаются за готовое):
 
-- man-страницы, политика версий команд и быстрый старт — `v0.3.11`
-  ([#349](https://github.com/framefrok/Euterpia_core/issues/349)–[#351](https://github.com/framefrok/Euterpia_core/issues/351)).
 - Сценарий — последовательность команд, а не язык: ветвлений и циклов нет
   намеренно. Условия живут в вызывающем коде (`--keep-going`, коды возврата),
   пока не появится настоящая потребность в языке (`libs/script`, #333).

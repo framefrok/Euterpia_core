@@ -189,6 +189,15 @@ jobs:
       - name: Сценарий как тест — golden-рендер (#333, #335)
         run: tools/script_scenario.sh build/euterpia
 
+      # Manual and quick start are part of the contract: both are generated
+      # from the command specification / documentation, and both are executed
+      # here, so a stale page or a stale command in the guide fails the build.
+      - name: man pages match the command specification (#349)
+        run: build/euterpia __man --check man
+
+      - name: Executable quick start from docs (#351)
+        run: tools/quickstart.sh build/euterpia
+
       # Сравнение и проверки (v0.3.8): гейт `ci check` проходит на эталонной
       # пьесе, а `project diff`/`render diff` действительно различают
       # изменения. Проверяется наблюдаемое поведение команд, не внутренности.
@@ -259,11 +268,13 @@ jobs:
         run: |
           ./compositions/neo-romantic/build.sh
           ./compositions/dark-fantasy/build.sh
+          ./compositions/dark-requiem/build.sh
 
       - name: Inspect audio for defects (#290)
         run: |
           ./build/euterpia analyze compositions/neo-romantic/ensemble.wav --fail-on error
           ./build/euterpia analyze compositions/dark-fantasy/ensemble.wav --fail-on error
+          ./build/euterpia analyze compositions/dark-requiem/build/requiem.wav --fail-on error
 
   # ---------------------------------------------------------------------------
   # Архитектурные guard'ы границ слоёв (MANIFEST §40, §41, §42).
@@ -698,12 +709,24 @@ jobs:
         run: |
           pkg=$(ls -d build/dist/euterpia-* | head -1)
           test -x "$pkg/bin/euterpia"
+          test -x "$pkg/bin/euterpia-open"
           test -f "$pkg/share/applications/euterpia.desktop"
           test -f "$pkg/share/mime/packages/euterpia.xml"
           test -f "$pkg/install.sh"
           test -f "$pkg/VERSION"
           grep -q 'application/x-euterpia-project' "$pkg/share/mime/packages/euterpia.xml"
-          echo "ok: пакет содержит бинарь, .desktop, MIME и установщик"
+          # v0.3.11 delivery surface (#348, #349, #351).
+          test -f "$pkg/share/man/man1/euterpia.1"
+          test -f "$pkg/share/man/man1/euterpia-render.1"
+          test -s "$pkg/share/bash-completion/completions/euterpia"
+          test -s "$pkg/share/zsh/site-functions/_euterpia"
+          test -s "$pkg/share/fish/vendor_completions.d/euterpia.fish"
+          test -s "$pkg/share/powershell/completions/euterpia.ps1"
+          test -f "$pkg/share/euterpia/presets/templates/band.preset.json"
+          test -f "$pkg/share/doc/euterpia/quickstart.md"
+          test -f "$pkg/share/doc/euterpia/cli-policy.md"
+          "$pkg/bin/euterpia" __man --check "$pkg/share/man/man1"
+          echo "ok: package contains binary, association, manual, completion and presets"
 
       - name: "Чистая машина: версия, проект и рендер без dev-окружения"
         run: |

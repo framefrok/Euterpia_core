@@ -633,6 +633,11 @@ proc presetSearchDirs*(kind: PresetKind): seq[string] =
   let sub = kindDir(kind)
   addUnique(DefaultPresetsDir / sub)
   addUnique(getAppDir() / DefaultPresetsDir / sub)
+  # Installed layout (#348): `$PREFIX/bin/euterpia` and
+  # `$PREFIX/share/euterpia/presets/<kind>`. Without this lookup, presets
+  # shipped with the archive would be invisible to an installed binary.
+  addUnique(getAppDir() / ".." / "share" / "euterpia" / DefaultPresetsDir / sub)
+  addUnique(getAppDir() / ".." / "presets" / sub)
   let envDir = getEnv(PresetsEnv)
   if envDir.len > 0:
     for part in envDir.split(PathSep):

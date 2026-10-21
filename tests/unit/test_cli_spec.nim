@@ -137,3 +137,80 @@ suite "cli_spec: представления одного описания (#330)
     # значило бы получить два справочника.
     check not hasReferenceMarkers("просто текст\n")
     check spliceReference("просто текст\n", "новое\n") == "просто текст\n"
+
+suite "cli_spec: aliases, deprecation and man pages (#349, #350)":
+  test "legacy alias resolves to the same names, canonical first":
+    var spec = demoSpec()
+    spec.aliases = @["old-demo"]
+    spec.aliasesDeprecatedSince = "0.3.11"
+    check commandNames(spec) == @["demo", "old-demo"]
+    check validateSpecs(@[spec]).len == 0
+
+  test "alias conflict and missing policy version are rejected":
+    var first = demoSpec()
+    first.aliases = @["other"]
+    first.aliasesDeprecatedSince = "0.3.11"
+    var second = demoSpec()
+    second.name = "other"
+    let problems = validateSpecs(@[first, second]).join("\n")
+    check "алиас other уже занят" in problems
+
+    var noVersion = demoSpec()
+    noVersion.aliases = @["old-demo"]
+    check "aliasesDeprecatedSince" in validateSpecs(@[noVersion]).join("\n")
+
+  test "deprecated command must say what replaces it":
+    var spec = demoSpec()
+    spec.deprecatedSince = "0.3.11"
+    let problems = validateSpecs(@[spec]).join("\n")
+    check "deprecatedSince без replacedBy" in problems
+
+    spec.replacedBy = "unknown"
+    check "replacedBy ссылается на неизвестную команду" in
+      validateSpecs(@[spec]).join("\n")
+
+  test "deprecation text is stable and mentions the replacement":
+    var spec = demoSpec()
+    spec.aliases = @["old-demo"]
+    spec.aliasesDeprecatedSince = "0.3.11"
+    let aliasText = deprecationText(spec, "old-demo")
+    check "deprecated alias of `demo`" in aliasText
+    check "since 0.3.11" in aliasText
+    # The canonical name has no warning.
+    check deprecationText(spec, "demo").len == 0
+
+    spec.deprecatedSince = "0.3.11"
+    spec.replacedBy = "other"
+    check "use `other`" in deprecationText(spec, "demo")
+
+  test "man overview lists every visible command and its page":
+    let specs = @[demoSpec()]
+    let page = manPage(specs, "euterpia", "0.3.11")
+    check ".TH EUTERPIA 1 \"0.3.11\"" in page
+    let plain = page.replace("\\-", "-")
+    check "demo [--count число]" in plain
+    check "See \\fBeuterpia-demo.1\\fR(1)." in plain
+
+  test "per-command page carries options, example and exit status":
+    let page = commandManPage(demoSpec(), "euterpia", "0.3.11")
+    check ".SH OPTIONS" in page
+    check "--count <число>" in page.replace("\\-", "-")
+    check "default: 1" in page
+    check ".SH EXAMPLE" in page
+    check ".SH EXIT STATUS" in page
+    check ".BR euterpia(1)" in page
+
+  test "manPages returns the overview plus one page per visible command":
+    var hidden = demoSpec()
+    hidden.name = "secret"
+    hidden.hidden = true
+    let pages = manPages(@[demoSpec(), hidden], "euterpia", "0.3.11")
+    check pages.len == 2
+    check pages[0].fileName == "euterpia.1"
+    check pages[1].fileName == "euterpia-demo.1"
+    check "secret" notin pages[0].content
+
+  test "roff escaping protects a leading dot and hyphen":
+    check roffEscape(".danger-mi") == "\\&.danger\\-mi"
+    check roffEscape("plain") == "plain"
+

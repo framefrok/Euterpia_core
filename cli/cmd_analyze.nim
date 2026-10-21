@@ -39,6 +39,8 @@ const
   AnalyzeSpec* = CommandSpec(
     name: "analyze",
     summary: "инспектор аудио: дефекты WAV с локализацией",
+    aliases: @["inspect"],
+    aliasesDeprecatedSince: "0.3.11",
     synopsis: "analyze <файл.wav> [ключи]",
     args: @[
       arg("файл.wav", "что слушать: записанный рендер или запись сессии"),

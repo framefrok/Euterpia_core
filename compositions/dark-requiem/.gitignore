@@ -1,0 +1,3 @@
+# Build artefacts of the CLI-only piece: reproducible from score + build.sh,
+# contain timestamps, and stay out of git.
+build/

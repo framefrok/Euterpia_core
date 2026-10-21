@@ -180,16 +180,43 @@ proc executeArgv*(ctx: var Ctx; argv: seq[string]): Report =
     ctx.command = ""
     return usageError("не указана команда")
 
-  ctx.command = command
+  let requested = command
   let stripped = stripGlobals(tail, ctx)
 
-  if wantHelp or stripped.wantHelp:
-    return helpReport(cmds, command)
-
-  let index = findCommand(cmds, command)
+  # Resolve the requested name to a registry entry before anything else:
+  # legacy aliases and a bare project path both map to a real command (#348,
+  # #350). The warning is printed only when the command actually executes;
+  # `help <alias>` stays quiet.
+  var index = findCommand(cmds, requested)
+  var canonical = requested
+  var argsPrefix: seq[string] = @[]
+  if index < 0 and isProjectPath(requested):
+    let openIndex = findCommand(cmds, "open")
+    if openIndex >= 0:
+      index = openIndex
+      canonical = "open"
+      argsPrefix = @[requested]
   if index < 0:
-    return usageError("неизвестная команда: " & command,
+    index = findCommandByAnyName(cmds, requested)
+    if index >= 0:
+      canonical = cmds[index].spec.name
+  ctx.command = canonical
+
+  if wantHelp or stripped.wantHelp:
+    return helpReport(cmds, canonical)
+
+  if index < 0:
+    return usageError("неизвестная команда: " & requested,
                       "список команд: euterpia --help")
 
-  let args = withSessionProject(ctx, cmds[index].spec, stripped.rest)
-  cmds[index].run(ctx, args)
+  if canonical != requested:
+    # Alias or file association: say what the canonical command is. stderr,
+    # so `--json` stdout remains one parseable envelope.
+    let warning = cmds[index].spec.deprecationText(requested)
+    if warning.len > 0 and argsPrefix.len == 0:
+      cliWarn(warning)
+
+  let commandArgs =
+    if argsPrefix.len > 0: argsPrefix & stripped.rest
+    else: withSessionProject(ctx, cmds[index].spec, stripped.rest)
+  cmds[index].run(ctx, commandArgs)
