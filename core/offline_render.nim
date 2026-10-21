@@ -75,6 +75,16 @@ type
     ## строки — дело вызывающего (CLI или `libs/compose`): Core не знает, как
     ## выглядит терминал.
 
+  RenderChunkProc* = proc(framesDone, totalFrames: int64;
+                          peakL, peakR, rmsL, rmsR: float32;
+                          frames: int32) {.closure, gcsafe, raises: [].}
+    ## Колбэк по КАЖДОМУ посчитанному чанку (issue #345): поток метрик во
+    ## время рендера. В отличие от прогресса он не прореживается — решение
+    ## «пора печатать» принимает клиент (интервал, событие).
+    ##
+    ## Значения — по каналам: пик и RMS чанка, а не всего файла. Клиент
+    ## агрегирует их в интервал и печатает NDJSON. `nil` — не вызывается.
+
   OfflineAutomationPoint* = object
     ## Точка автоматизации в тиках. Это не `AutomationPointFormat` из
     ## формата проекта: Core-рендер не знает про файл проекта и принимает
@@ -104,6 +114,10 @@ type
       ## Пустой список — рендер без автоматизации (частый случай).
     onProgress*: RenderProgressProc
       ## Колбэк прогресса или `nil` (по умолчанию) — не вызывать вовсе.
+
+    onChunk*: RenderChunkProc
+      ## Колбэк метрик по чанкам (#345) или `nil`. Прогресс и метрики — разные
+      ## вопросы: прогресс прореживается, метрики нет.
 
   OfflineRenderReport* = object
     ok*: bool
@@ -291,20 +305,39 @@ proc renderToWav*(path: string; owned: sink OwnedPipeline;
                     cast[ptr UncheckedArray[float32]](addr chunk[0]),
                     cast[ptr UncheckedArray[float32]](addr scratch[0]))
 
-      var i = 0
-      let samples = int(framesThis) * channels
-      while i < samples:
-        let v = chunk[i]
-        let a = abs(v)
-        if a > peak:
-          peak = a
-        sumSquares += float64(v) * float64(v)
-        inc i
+      var chunkPeakL = 0.0f
+      var chunkPeakR = 0.0f
+      var chunkSumL = 0.0'f64
+      var chunkSumR = 0.0'f64
+      var frame = 0
+      while frame < int(framesThis):
+        let left = chunk[frame * channels]
+        let right = if channels > 1: chunk[frame * channels + 1] else: left
+        let aLeft = abs(left)
+        let aRight = abs(right)
+        if aLeft > chunkPeakL:
+          chunkPeakL = aLeft
+        if aRight > chunkPeakR:
+          chunkPeakR = aRight
+        chunkSumL += float64(left) * float64(left)
+        chunkSumR += float64(right) * float64(right)
+        inc frame
+      peak = max(peak, max(chunkPeakL, chunkPeakR))
+      sumSquares += chunkSumL + chunkSumR
+
 
       writeFrames(encoder,
                   cast[ptr UncheckedArray[float32]](addr chunk[0]),
                   framesThis)
       done += int64(framesThis)
+
+      # Метрики (#345) — по каждому чанку, с ВРЕМЕНЕМ КОНЦА чанка: клиент
+      # агрегирует их в интервал и решает, печатать ли строку.
+      if opts.onChunk != nil:
+        let framesF = float64(max(1, int(framesThis)))
+        opts.onChunk(done, opts.totalFrames, chunkPeakL, chunkPeakR,
+                     float32(sqrt(chunkSumL / framesF)),
+                     float32(sqrt(chunkSumR / framesF)), framesThis)
 
       # Прогресс — после записи чанка, чтобы показывать действительно
       # посчитанное (файл-то уже содержит эти кадры).

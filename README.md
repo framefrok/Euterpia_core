@@ -24,7 +24,7 @@
 | DSP-ноды | ✅ 11 встроенных (io/input, gain, pan, mix, biquad, svf, delay, compressor, oscillator, noise, metronome) + **17 инструментов** (`organ`, `piano`, `guitar`, `drums`, `flute`, `bagpipe`, `strings`, `bell`, `harp`, `harpsichord`, `recorder`, `brass`, `timpani`, `choir`, `ukulele`, `accordion`, `harmonica`) + нотный секвенсор `notes`, плеер секвенсора `sequencer` и плеер аудиоклипов `clip`; всего 31 тип, полный каталог с параметрами — [docs/libs/compose/instruments.md](docs/libs/compose/instruments.md); C-ядра с SIMD-дисплеями (#274, #301, #303, #321) |
 | Кодеки | ✅ WAV 16/24/32-бит (чтение и запись), FLAC (чтение и запись встроенным lossless-энкодером), MP3/OGG Vorbis (чтение; lossy-превью сдачи — CLI через ffmpeg/lame/oggenc), AIFF/AIFC (чтение и запись), Standard MIDI File (#10, #411) |
 | Тесты | ✅ 700+ unit-проверок (180+ suite) + интеграционный набор + 170+ CLI smoke; Core/Commons/инструменты покрыты (#57, #274, #290) |
-| CLI | 🟡 линия v0.3 (#86): шаги v0.3.5–v0.3.8 закрыты; впереди v0.3.9–v0.3.11; каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate|recover` (#89, #110), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись входа `record` (#94), MIDI-порты/монитор (#93), импорт SMF (#111), метроном и count-in (#112), автоматизация `automation` (#114), восстановление `project recover` (#110), стемы и батч `render --stems|--batch` (#108), плагины `plugin scan/info/params/save/validate` и `node add plugin:<id>` (#95, #260), живой MIDI-вход `play --midi-in/--midi-target` (#413), ресемплинг `--device-rate/--src` (#8), сдача `master --format wav|flac|ogg|mp3` (#411), сценарии `script run|plan|show|record|render|build` с переменными, пересборкой и эталоном рендера, пакетный `--script`, stdin/REPL и NDJSON (#333, #334, #335, #97), сравнение `project diff`/`render diff` с адресами сущностей и кодом возврата для CI (#337, #338), строгий lint `project validate --strict` (#339) и единый вход `ci check` (#340); шаблоны, сет-листы и пресеты параметров как данные — `init --preset`, `preset list/show/apply/param`, `setlist list/show/apply` (#341–#343); справочник команд и JSON-схемы — **[docs/cli.md](docs/cli.md)** |
+| CLI | 🟡 линия v0.3 (#86): шаги v0.3.5–v0.3.10 закрыты; впереди v0.3.11; каркас готов — `euterpia --help/--version`, `help --json`, `doctor` (#105), `completion bash/zsh/fish` (#259), команды проекта `init`/`project show|set|validate|recover` (#89, #110), команды графа `node`/`connect`/`disconnect`/`param`/`graph check` (#90), нотация `notation` и офлайн-рендер `render` (#275), инспектор аудио `analyze` (#290), настройки окружения `config` (#258), транспорт `transport tempo/meter/position/seek/play/pause/stop/loop/state` (#257), живое воспроизведение `device list`/`play` через miniaudio с метриками NDJSON и корректным SIGINT (#92) и сдача `master` — LUFS/true peak, dither, метаданные и стемы (#209), human/`--json`, exit-коды 0/1/2/3, джобы `cli` и `analyze` в CI; запись входа `record` (#94), MIDI-порты/монитор (#93), импорт SMF (#111), метроном и count-in (#112), автоматизация `automation` (#114), восстановление `project recover` (#110), стемы и батч `render --stems|--batch` (#108), плагины `plugin scan/info/params/save/validate` и `node add plugin:<id>` (#95, #260), живой MIDI-вход `play --midi-in/--midi-target` (#413), ресемплинг `--device-rate/--src` (#8), сдача `master --format wav|flac|ogg|mp3` (#411), сценарии `script run|plan|show|record|render|build` с переменными, пересборкой и эталоном рендера, пакетный `--script`, stdin/REPL и NDJSON (#333, #334, #335, #97), сравнение `project diff`/`render diff` с адресами сущностей и кодом возврата для CI (#337, #338), строгий lint `project validate --strict` (#339) и единый вход `ci check` (#340); шаблоны, сет-листы и пресеты параметров как данные — `init --preset`, `preset list/show/apply/param`, `setlist list/show/apply` (#341–#343); итеративная работа — `watch` (авто-ререндер), поток метрик `--metrics`, интерактивный `analyze` с HTML-отчётом и `doctor --deep` (#344–#347); справочник команд и JSON-схемы — **[docs/cli.md](docs/cli.md)** |
 | Поставка | ✅ архивы Linux/Windows/macOS, `install.sh`/`install.ps1`, ассоциации `*.eproj`/`*.eut`, проверка на чистой `ubuntu:24.04` (#229) |
 | Инспектор аудио | 🟡 пассивный анализ WAV: клиппинг, DC, щелчки, провалы, зависание, жужжание 50/60 Гц, алиасинг, резкость; отчёт с локализацией (#290); позже — помощник в v0.7 (#178) |
 | Editor | ❌ `editor.nim` пуст; линии v0.4 (фундамент, каркас и скелет) и v0.6 (повседневная работа) |
@@ -261,10 +261,11 @@ GUI**, **v0.5 — тесты ядра и надёжность**, **v0.6 — GUI:
 
 Линия CLI не закончилась на `.5`: шаги **v0.3.6** (единый контракт,
 `libs/cli_spec`), **v0.3.7** (сценарии, `libs/script`), **v0.3.8**
-(сравнение и проверки, `libs/diff`, `ci check`) и **v0.3.9** (шаблоны и
-сет-листы, `libs/presets`) закрыты; дальше идут **v0.3.10–v0.3.11** —
-итеративная работа в терминале (`libs/watch`) и поставка. Порядок и
-зависимости — `docs/plans/v0.3.6-v0.3.11.md` (#352).
+(сравнение и проверки, `libs/diff`, `ci check`), **v0.3.9** (шаблоны и
+сет-листы, `libs/presets`) и **v0.3.10** (итеративная работа, `libs/watch`,
+`--metrics`, интерактивный `analyze`, `doctor --deep`) закрыты; остаётся
+**v0.3.11** — поставка и полировка. Порядок и зависимости —
+`docs/plans/v0.3.6-v0.3.11.md` (#352).
 
 Дальше линия выходит за пределы CLI: шаг **v0.3.12** — идентичность продукта
 (Euterpia DAW / Euterpia Core), MANIFEST v2, English-first документация, команда
@@ -794,6 +795,34 @@ euterpia graph check rock.eproj && euterpia render rock.eproj rock.wav
 существующую дорожку (`clip.set`), а не добавляет второй клип; сведение задаётся
 параметрами голоса (`level`, `pan`). Свои заготовки кладутся в
 `presets/templates|setlists|params` или в каталог `EUTERPIA_PRESETS`.
+
+### Итеративная работа: watch, метрики, analyze, doctor (#344–#347)
+
+```bash
+euterpia watch demo.eproj --out demo.wav --debounce 300   # правка → рендер
+euterpia render demo.eproj --metrics --metrics-interval 500
+euterpia analyze demo.wav --html report.html --fail-on warn
+euterpia doctor --deep demo.eproj
+```
+
+`watch` держит процесс и перерендеривает тот же файл после правки проекта,
+`*.notes`/`*.eus` рядом и явных `--watch` файлов. Дебаунс и `--min-interval`
+не дают шторму рендеров, вывод пишется атомарно (`<out>.tmp-<pid>.wav` +
+переименование), Ctrl-C не оставляет временных файлов, проект не изменяется.
+`--once` — один рендер для CI.
+
+`--metrics` включает поток снимков (пики/RMS по каналам, латентность блока,
+xrun'ы, состояние транспорта): в `--json` — NDJSON в stdout перед итоговым
+конвертом, в human — короткая строка в stderr. Интервал задаёт
+`--metrics-interval`, режим «после события» — `--metrics-event peak|xrun`.
+
+`analyze` печатает вердикт (`clean`/`attention`/`fail`), гистограмму и спектр
+в терминале (ASCII без TTY, цвет при TTY), `--html` пишет самодостаточный
+отчёт со встроенной спектрограммой, а `--fail-on` переносит вердикт в код 1.
+
+`doctor --deep` проверяет сам проект: загрузку, метаданные, граф с
+компиляцией, lint и файлы ресурсов на диске. Каждая проверка имеет id и
+`elapsedMs`, а быстрый `doctor` без `--deep` работает как раньше.
 
 ### Headless runtime-сессия (#407)
 

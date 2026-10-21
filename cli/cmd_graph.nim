@@ -1458,6 +1458,77 @@ proc analyzeGraph(doc: Document; cat: seq[NodeTypeInfo]): GraphAnalysis =
 # graph check: команда
 # =============================================================================
 
+proc compileCheckFor(analysis: GraphAnalysis): Check =
+  ## Проверка компиляции по результату структурного разбора. Общая для
+  ## `graph check` и `doctor --deep` (#347): две копии правил совета разошлись
+  ## бы, и doctor советовал бы не то, что graph.
+  if analysis.structuralFails:
+    # Компилятор не должен получать заведомо битые данные, а пользователь —
+    # вердикт, зависящий от них: сначала структура, потом компиляция.
+    let facts = %*{"verdict": "skipped", "reason": "structuralErrors"}
+    return mkCheck("compile", "граф компилируется", csWarn,
+      lines = @["не проверялась: структурные ошибки выше"],
+      advice = "сначала исправьте ошибки структуры", body = facts)
+  let verdict = verifyGraph(builtinRegistry(), analysis.specs, analysis.conns)
+  let facts = %*{
+    "verdict": verdictName(verdict.kind),
+    "reason": describe(verdict),
+    "steps": int(verdict.stepCount),
+    "nodeType": verdict.nodeType,
+  }
+  mkCheck("compile", "граф компилируется",
+    (if verdict.kind == gvCompiles: csOk else: csFail),
+    lines = @[describe(verdict)],
+    advice = (case verdict.kind
+              of gvCompiles: ""
+              of gvCycle, gvPdcCycle:
+                "разорвите цикл или добавьте в него ноду задержки (euterpia.delay)"
+              of gvUnknownType, gvInstantiateFailed:
+                "euterpia node types — какие типы доступны этой сборке"
+              of gvAllocationFailed:
+                "граф слишком велик для этой сборки: разбейте его на подграфы"
+              of gvUnknownNode:
+                "связь ссылается на ноду, которой нет в графе — добавьте ноду или уберите связь"
+              of gvUnknownSrcPort:
+                "у ноды-источника нет такого аудиовыхода — сверьте число портов с типом ноды"
+              of gvUnknownDstPort:
+                "у ноды-приёмника нет такого аудиовхода — сверьте число портов с типом ноды"
+              of gvSignalMismatch:
+                "тип сигнала связи не поддерживается — используйте sigAudio, sigControl или sigEvent"
+              of gvMultipleWriter:
+                "на один вход пишут два источника — оставьте один или добавьте ноду слияния"
+              of gvDuplicateConnection:
+                "одна и та же связь задана дважды — уберите дубль"
+              of gvNegativePortIdx:
+                "отрицательный индекс порта — задайте неотрицательный номер порта"
+              of gvMasterInvalid:
+                "мастер-нода не может быть мастером — проверьте id, наличие аудиовыхода и отсутствие исходящих связей"
+              of gvUnsupportedChannels:
+                "Core v0.x — стерео: уберите ноду с maxChannels > 2 или " &
+                "дождитесь многоканальной линии (#200)"
+              of gvInvalidSubgraphPort:
+                "проверьте subgraphInputs/subgraphOutputs и локальные id " &
+                "внутри субграфа"
+              of gvSubgraphDepth:
+                "уменьшите вложенность субграфов: превышен предел компилятора"
+              of gvNodeLimit, gvConnectionLimit:
+                "разбейте граф на несколько проектов/стемов: превышен предел " &
+                "компилятора"
+              of gvLatencyOverflow:
+                "проверьте latency нод и плагинов: сумма больше предела PDC"
+              of gvPdcLimit:
+                "уменьшите задержки или число параллельных ветвей: " &
+                "бюджет памяти PDC исчерпан"),
+    body = facts)
+
+proc graphCheckSections*(doc: Document; cat: seq[NodeTypeInfo]): seq[Section] =
+  ## Секции `graph check` без печати и кодов возврата: их переиспользует
+  ## `doctor --deep` (#347), поэтому «что проверить» задаётся одним местом.
+  let analysis = analyzeGraph(doc, cat)
+  result = analysis.sections
+  result.add Section(id: "compile", title: "graph: компиляция",
+                     checks: @[compileCheckFor(analysis)])
+
 proc runGraphCheck(ctx: var Ctx; scan: ArgScan): Report =
   if scan.positionals.len > 0:
     return usageError("graph check не принимает позиционных аргументов, получено: " &
@@ -1467,73 +1538,12 @@ proc runGraphCheck(ctx: var Ctx; scan: ArgScan): Report =
   if not loaded.ok: return loaded.rep
   let doc = openDocument(scan.path, loaded.proj)
   let cat = catalog()
-  let analysis = analyzeGraph(doc, cat)
-
-  var sections = analysis.sections
-  var compileFacts: JsonNode
-  var compileCheck: Check
-  if analysis.structuralFails:
-    # Компилятор не должен получать заведомо битые данные, а пользователь —
-    # вердикт, зависящий от них: сначала структура, потом компиляция.
-    compileFacts = %*{"verdict": "skipped", "reason": "structuralErrors"}
-    compileCheck = mkCheck("compile", "граф компилируется", csWarn,
-      lines = @["не проверялась: структурные ошибки выше"],
-      advice = "сначала исправьте ошибки структуры",
-      body = compileFacts)
-  else:
-    let verdict = verifyGraph(builtinRegistry(), analysis.specs, analysis.conns)
-    compileFacts = %*{
-      "verdict": verdictName(verdict.kind),
-      "reason": describe(verdict),
-      "steps": int(verdict.stepCount),
-      "nodeType": verdict.nodeType,
-    }
-    compileCheck = mkCheck("compile", "граф компилируется",
-      (if verdict.kind == gvCompiles: csOk else: csFail),
-      lines = @[describe(verdict)],
-      advice = (case verdict.kind
-                of gvCompiles: ""
-                of gvCycle, gvPdcCycle:
-                  "разорвите цикл или добавьте в него ноду задержки (euterpia.delay)"
-                of gvUnknownType, gvInstantiateFailed:
-                  "euterpia node types — какие типы доступны этой сборке"
-                of gvAllocationFailed:
-                  "граф слишком велик для этой сборки: разбейте его на подграфы"
-                of gvUnknownNode:
-                  "связь ссылается на ноду, которой нет в графе — добавьте ноду или уберите связь"
-                of gvUnknownSrcPort:
-                  "у ноды-источника нет такого аудиовыхода — сверьте число портов с типом ноды"
-                of gvUnknownDstPort:
-                  "у ноды-приёмника нет такого аудиовхода — сверьте число портов с типом ноды"
-                of gvSignalMismatch:
-                  "тип сигнала связи не поддерживается — используйте sigAudio, sigControl или sigEvent"
-                of gvMultipleWriter:
-                  "на один вход пишут два источника — оставьте один или добавьте ноду слияния"
-                of gvDuplicateConnection:
-                  "одна и та же связь задана дважды — уберите дубль"
-                of gvNegativePortIdx:
-                  "отрицательный индекс порта — задайте неотрицательный номер порта"
-                of gvMasterInvalid:
-                  "мастер-нода не может быть мастером — проверьте id, наличие аудиовыхода и отсутствие исходящих связей"
-                of gvUnsupportedChannels:
-                  "Core v0.x — стерео: уберите ноду с maxChannels > 2 или " &
-                  "дождитесь многоканальной линии (#200)"
-                of gvInvalidSubgraphPort:
-                  "проверьте subgraphInputs/subgraphOutputs и локальные id " &
-                  "внутри субграфа"
-                of gvSubgraphDepth:
-                  "уменьшите вложенность субграфов: превышен предел компилятора"
-                of gvNodeLimit, gvConnectionLimit:
-                  "разбейте граф на несколько проектов/стемов: превышен предел " &
-                  "компилятора"
-                of gvLatencyOverflow:
-                  "проверьте latency нод и плагинов: сумма больше предела PDC"
-                of gvPdcLimit:
-                  "уменьшите задержки или число параллельных ветвей: " &
-                  "бюджет памяти PDC исчерпан"),
-      body = compileFacts)
-  sections.add Section(id: "compile", title: "graph: компиляция",
-                       checks: @[compileCheck])
+  let sections = graphCheckSections(doc, cat)
+  var compileFacts: JsonNode = newJObject()
+  for section in sections:
+    if section.id == "compile" and section.checks.len > 0 and
+       section.checks[0].body != nil:
+      compileFacts = section.checks[0].body
 
   var sectionsJson = newJArray()
   for section in sections:

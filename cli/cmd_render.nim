@@ -27,7 +27,7 @@
 # (значение параметра вне диапазона, дорожка на ноду, которой нет),
 # печатается предупреждением: рендер из-за этого не срывается.
 
-import std/[json, math, os, strutils, terminal]
+import std/[json, math, os, strutils, syncio, terminal]
 import std/cmdline
 
 import signal_types
@@ -42,6 +42,7 @@ import project
 import catalog
 import builtin/scene_loader
 import cli_spec
+import metrics
 import compose/progress
 import diff
 
@@ -57,7 +58,7 @@ const
     ## приводить к рендеру на терабайт данных.
   MaxSampleRate = 1_000_000
     ## Тот же потолок, что у ключа `sampleRate` в настройках (#258).
-  DefaultBits = 16
+  DefaultBits* = 16
   DefaultBlockSize = 512
 
   RenderSpec* = CommandSpec(
@@ -98,6 +99,11 @@ const
       switch("--progress", "показывать прогресс в stderr (по умолчанию — только если stderr это терминал)"),
       switch("--no-progress", "не показывать прогресс"),
       switch("--exit-code", "`render diff`: различия дают код возврата 1 (для CI)"),
+      switch("--metrics", "поток метрик NDJSON во время рендера (#345)"),
+      opt("--metrics-interval", "интервал метрик, мс", value = "мс",
+          default = $DefaultMetricsIntervalMs),
+      opt("--metrics-event", "печатать только события: peak | xrun",
+          value = "peak|xrun"),
     ],
     example: "euterpia render project.eproj song.wav --seconds 30",
     fields: @[
@@ -125,6 +131,8 @@ const
       field("peak", "пиковый уровень записанного WAV"),
       field("rms", "среднеквадратичный уровень"),
       field("silent", "запись тишины — предупреждение, а не ошибка"),
+      field("metrics", "`--metrics`: сколько строк потока выдано"),
+      field("metricsEvent", "`--metrics-event`: режим «только события»"),
       field("stems", "стемы: `track`, `name`, `file`, `frames`, `ok` (#108)"),
       field("stemsFailed", "сколько стемов не отрендерилось"),
       field("batch", "результаты батча: `project`, `out`, `ok`, `exitCode`"),
@@ -208,6 +216,11 @@ type
     exitCodeRequested: bool
       ## `--exit-code` — `render diff` даёт код 1 при различиях (#338).
       ## Обычный рендер его не принимает: там вердикт — успех записи.
+    metrics: bool
+      ## Поток метрик NDJSON во время рендера (#345).
+    metricsIntervalMs: int64
+    metricsEvent: bool
+      ## Печатать только события (новый пик или xrun), а не каждый интервал.
 
 # =============================================================================
 # Разбор значений
@@ -257,6 +270,7 @@ proc scanArgs(args: seq[string]): RenderScan =
   result.soloTrack = -1'i32
   result.bits = DefaultBits
   result.blockSize = DefaultBlockSize
+  result.metricsIntervalMs = DefaultMetricsIntervalMs
   result.nameTemplate = "{track}_{name}.wav"
 
   var haveFile = false
@@ -291,6 +305,13 @@ proc scanArgs(args: seq[string]): RenderScan =
           "например: euterpia render diff a.wav b.wav --exit-code")
         return
       result.exitCodeRequested = true
+    elif key == "--metrics":
+      if haveInline:
+        result.rep = usageError("--metrics — флаг; интервал задаётся " &
+          "--metrics-interval", "например: euterpia render --metrics " &
+          "--metrics-interval 500")
+        return
+      result.metrics = true
     elif key in RenderKeys:
       if not haveInline:
         if i + 1 >= args.len:
@@ -360,6 +381,19 @@ proc scanArgs(args: seq[string]): RenderScan =
             "размер блока в кадрах: 1 … " & $MaxBlockSize)
           return
         result.blockSize = parsed.value
+      of "--metrics-interval":
+        let parsed = intArg(value, key, 10, 600_000)
+        if not parsed.ok:
+          result.rep = usageError(parsed.message,
+            "интервал потока метрик в миллисекундах: 10 … 600000")
+          return
+        result.metricsIntervalMs = int64(parsed.value)
+      of "--metrics-event":
+        var problem = ""
+        problem = parseMetricsEvent(value, result.metricsEvent)
+        if problem.len > 0:
+          result.rep = usageError("--metrics-event: " & problem)
+          return
       else: # --bits
         let parsed = intArg(value, key, DefaultBits, 32)
         if not parsed.ok:
@@ -657,6 +691,35 @@ proc renderProject(ctx: var Ctx; scan: RenderScan; proj: ProjectFormat;
                           int32(sampleRate))
     opts.onProgress = printer.callback
 
+  # --- поток метрик (#345) ---------------------------------------------------
+  # Колбэк вызывается на КАЖДЫЙ чанк; решение «печатать» принимает
+  # `MetricsStream` (интервал или событие). В `--json` каждая метрика —
+  # отдельная строка NDJSON перед итоговым конвертом; в human — короткая
+  # строка в stderr, поэтому stdout остаётся отчётом.
+  var metrics = newMetricsStream(scan.metrics, scan.metricsIntervalMs,
+                                 scan.metricsEvent)
+  let metricLatency = latencyMs(blockSize, sampleRate)
+  if scan.metrics:
+    let sampleRateF = float64(sampleRate)
+    let jsonMode = ctx.mode == omJson
+    opts.onChunk = proc(done, total: int64;
+                        peakL, peakR, rmsL, rmsR: float32;
+                        frames: int32) {.closure, gcsafe, raises: [].} =
+      let sample = MetricSample(
+        tMs: int64(float64(done) / sampleRateF * 1000.0),
+        peakL: peakL, peakR: peakR, rmsL: rmsL, rmsR: rmsR,
+        cpu: 0.0f, xruns: 0, transport: "playing", voices: 0,
+        latencyMs: metricLatency, graphVersion: 0)
+      if metrics.pushChunk(sample, int64(frames)):
+        try:
+          if jsonMode:
+            stdout.writeLine(metricsLine(metrics.last, metrics.seqNo - 1))
+          else:
+            stderr.writeLine(metricsHuman(metrics.last))
+        except CatchableError:
+          # Терминал закрылся/переполнен — рендер из-за печати не срывается.
+          discard
+
   # Пайплайн переходит рендеру: движок внутри `renderToWav` забирает граф и
   # освобождает его вместе с движком. `detachPipeline` отдаёт move-only
   # `OwnedPipeline` (#402), поэтому повторно освободить его невозможно.
@@ -684,6 +747,8 @@ proc renderProject(ctx: var Ctx; scan: RenderScan; proj: ProjectFormat;
   body["peak"] = %rendered.peak
   body["rms"] = %rendered.rms
   body["silent"] = %rendered.silent
+  body["metrics"] = %metrics.emitted
+  body["metricsEvent"] = %scan.metricsEvent
 
   lines.add "записано: " & rendered.path
   lines.add "кадров: " & $rendered.frames & ", длительность: " &
