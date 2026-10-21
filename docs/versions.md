@@ -184,20 +184,21 @@ Ctrl-C без временных файлов; правила проверяют
 Проверки: `nimble unit` (suite `watch`), `nimble cliSmoke` (suite «итеративная
 работа в терминале»). Версия пакета — `0.3.10`.
 
-**Статус v0.3.11 «Поставка и полировка»:** шаг закрыт — `euterpia open` и
-помощник `euterpia-open` открывают проект из ассоциации в его каталоге;
-man-страницы (`euterpia.1` + страница на каждую команду) и автодополнение
-bash/zsh/fish/PowerShell генерируются из `CommandSpec`, проверяются
-`__man --check` и устанавливаются пакетом; политика совместимости
-(`docs/cli-policy.md`) исполнима: алиасы (`inspect` → `analyze`) работают с
-предупреждением в stderr, `validateSpecs` не принимает алиас без версии или
-`replacedBy` на неизвестную команду; `docs/quickstart.md` — исполняемый
-сценарий, который CI и чистая машина прогоняют через `tools/quickstart.sh`.
-Архив содержит бинарь, помощник, man, completion, пресеты, быстрый старт и
-политику; проверка на `ubuntu:24.04` включает `open`, `__man --check`,
-быстрый старт и код 2 при отсутствии аудиоустройства. Версия пакета —
-`0.3.11`, тег релиза совпадает. Проверки: `nimble unit`, `nimble cliSmoke`,
-`nimble integration`, `nimble cliMan`, `tools/quickstart.sh`.
+**v0.3.11 status — delivery and polish:** the step is closed. `euterpia open`
+and the `euterpia-open` helper open a project from a file association in its
+own directory; man pages (`euterpia.1` plus one page per command) and
+bash/zsh/fish/PowerShell completion are generated from `CommandSpec`, checked
+by `__man --check`, and installed by the package. The compatibility policy
+(`docs/cli-policy.md`) is executable: aliases (`inspect` → `analyze`) keep
+working and warn on stderr, and `validateSpecs` rejects an alias without a
+version or a `replacedBy` that points at an unknown command.
+`docs/quickstart.md` is an executable scenario that CI and the clean machine
+run through `tools/quickstart.sh`. The archive contains the binary, helper,
+manual, completion, presets, quick start and policy; the clean-machine check
+covers `open`, `__man --check`, the quick start and exit code 2 when the audio
+device is missing. Package version is `0.3.11` and the release tag matches.
+Checks: `nimble unit`, `nimble cliSmoke`, `nimble integration`,
+`nimble cliMan`, `tools/quickstart.sh`.
 
 ## 8. Примеры привязки (из текущего реестра)
 
