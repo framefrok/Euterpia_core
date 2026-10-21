@@ -43,6 +43,7 @@ import catalog
 import builtin/scene_loader
 import cli_spec
 import compose/progress
+import diff
 
 # =============================================================================
 # Спецификация команды (#330)
@@ -62,7 +63,11 @@ const
   RenderSpec* = CommandSpec(
     name: "render",
     summary: "офлайн-рендер проекта в WAV без аудиоустройства",
-    synopsis: "render [проект.eproj] [выход.wav] [ключи]",
+    synopsis: "render [diff] [проект.eproj] [выход.wav] [ключи]",
+    subcommands: @["diff"],
+    # `render diff a.wav b.wav` сравнивает готовые файлы: проект сессии
+    # (`open`) ему не подставляется (issue #338).
+    filelessSubcommands: @["diff"],
     args: @[
       arg("проект.eproj", "что рендерить; историческое `.eut` принимается"),
       arg("выход.wav", "куда писать; без аргумента — рядом с проектом"),
@@ -92,6 +97,7 @@ const
           default = $DefaultBits),
       switch("--progress", "показывать прогресс в stderr (по умолчанию — только если stderr это терминал)"),
       switch("--no-progress", "не показывать прогресс"),
+      switch("--exit-code", "`render diff`: различия дают код возврата 1 (для CI)"),
     ],
     example: "euterpia render project.eproj song.wav --seconds 30",
     fields: @[
@@ -123,6 +129,16 @@ const
       field("stemsFailed", "сколько стемов не отрендерилось"),
       field("batch", "результаты батча: `project`, `out`, `ok`, `exitCode`"),
       field("batchFailed", "сколько проектов батча не отрендерилось"),
+      field("a", "`render diff`: первый файл — путь и измерения"),
+      field("b", "`render diff`: второй файл — путь и измерения"),
+      field("identical", "`render diff`: звук совпадает"),
+      field("count", "`render diff`: сколько различий"),
+      field("items", "`render diff`: различия с адресами измерений"),
+      field("differingSamples", "`render diff`: сколько сэмплов расходится"),
+      field("totalSamples", "`render diff`: сколько сэмплов сравнено"),
+      field("maxDelta", "`render diff`: максимальное расхождение сэмпла"),
+      field("firstSample", "`render diff`: индекс первого расходящегося сэмпла"),
+      field("firstFrame", "`render diff`: кадр первого расхождения"),
     ],
     notes: @[
       "пример MANIFEST §19: euterpia render project.eproj",
@@ -139,6 +155,9 @@ const
       "по умолчанию он включается, только если stderr — терминал: в CI и пайпах вывод остаётся байт-в-байт тем же",
       "--progress / --no-progress решают явно; -q отключает",
       "тихая или оборванная запись — предупреждение, а не ошибка: код 2 только у сбоя записи",
+      "render diff <a.wav> <b.wav> — сравнение готовых рендеров: метрики числом " &
+        "(пик, RMS, спектральная сводка) и поштучное расхождение сэмплов (#337, #338)",
+      "render diff --exit-code — различия дают код 1: гейт для CI",
     ])
 
   RenderKeys* = RenderSpec.optionKeys
@@ -186,6 +205,9 @@ type
     progressSet: bool
       ## Прогресс задан явно ключом. Без ключа решение принимает среда:
       ## терминал ли stderr, не мешает ли режим вывода.
+    exitCodeRequested: bool
+      ## `--exit-code` — `render diff` даёт код 1 при различиях (#338).
+      ## Обычный рендер его не принимает: там вердикт — успех записи.
 
 # =============================================================================
 # Разбор значений
@@ -260,6 +282,15 @@ proc scanArgs(args: seq[string]): RenderScan =
         return
       result.progress = key == "--progress"
       result.progressSet = true
+    elif key == "--exit-code":
+      # Принимается разбором, но имеет смысл только у `render diff` (#338):
+      # иначе ключ из спецификации давал бы «неизвестный ключ» — справка
+      # врала бы.
+      if haveInline:
+        result.rep = usageError("--exit-code — флаг и не принимает значение",
+          "например: euterpia render diff a.wav b.wav --exit-code")
+        return
+      result.exitCodeRequested = true
     elif key in RenderKeys:
       if not haveInline:
         if i + 1 >= args.len:
@@ -946,18 +977,88 @@ proc runBatch(ctx: var Ctx; scan: RenderScan): Report =
 
 
 # =============================================================================
+# render diff (#338)
+# =============================================================================
+
+proc runRenderDiff*(ctx: var Ctx; args: seq[string]): Report =
+  ## `euterpia render diff <a.wav> <b.wav> [--exit-code]`.
+  ##
+  ## Сравнение готового звука, а не проектов: метрики считаются числом (пик,
+  ## RMS, DC, спектральная сводка), сэмплы — поштучно, поэтому «почти то же»
+  ## объясняется числом, а не словом «разные» (#337).
+  ##
+  ## Код возврата: 0 — различий нет ИЛИ они есть без `--exit-code`; 1 — есть
+  ## различия и запрошен `--exit-code`; 2 — файл не читается. Отказ чтения —
+  ## это НЕ «файлы одинаковые»: см. `error` в `--json`.
+  var paths: seq[string] = @[]
+  var wantExitCode = false
+  for token in args:
+    if token == "--exit-code":
+      wantExitCode = true
+    elif token.startsWith("-"):
+      return usageError("неизвестный ключ: " & token,
+                        "ключ diff: --exit-code")
+    else:
+      paths.add token
+  if paths.len != 2:
+    return usageError("render diff сравнивает два файла, получено: " &
+                      $paths.len,
+                      "например: euterpia render diff before.wav after.wav")
+
+  let difference = diffRenderFiles(paths[0], paths[1])
+  if not difference.ok:
+    return envError(difference.error,
+      "нужны два читаемых аудиофайла; сравнение не меняет ни один из них",
+      errorKind = "io")
+
+  let body = renderDiffJson(difference)
+  var lines: seq[string] = @[
+    CliName & " render diff — что изменилось в звуке",
+    "a: " & paths[0],
+    "b: " & paths[1],
+    "",
+  ]
+  if difference.identical:
+    lines.add "рендеры совпадают: различий в метриках и сэмплах нет"
+  else:
+    lines.add "различий: " & $difference.items.len
+    lines.add diffLines(difference.items)
+    lines.add "сэмплов сравнено: " & $difference.totalSamples &
+      ", расходятся: " & $difference.differingSamples
+    if difference.firstFrame >= 0:
+      lines.add "первое расхождение: кадр " & $difference.firstFrame &
+        " (сэмпл " & $difference.firstSample & "), максимум Δ = " &
+        formatFloat(difference.maxDelta, ffDecimal, 6)
+    if wantExitCode:
+      return checkFailedError(
+        "рендеры различаются: " & $difference.items.len,
+        "различия перечислены выше; машинный отчёт: --json",
+        lines = lines, body = body)
+  okReport(body = body, lines = lines)
+
+
+# =============================================================================
 # Точка входа
 # =============================================================================
 
 proc runRender*(ctx: var Ctx; args: seq[string]): Report =
-  ## `euterpia render <проект.eproj> [выход.wav] [ключи]`.
+  ## `euterpia render <проект.eproj> [выход.wav] [ключи]` и
+  ## `euterpia render diff <a.wav> <b.wav>` (#338).
   ##
   ## Режимы (#108): обычный рендер, `--stems` (все дорожки одного проекта)
   ## и `--batch` (список проектов). Загрузка проекта и метаданные — общие,
   ## чтобы «откуда темп/частота» не разъезжались между режимами.
+  if args.len > 0 and args[0] == "diff":
+    return runRenderDiff(ctx, argsTail(args))
+
   let scan = scanArgs(args)
   if not scan.ok:
     return scan.rep
+  if scan.exitCodeRequested:
+    # Ключ из спецификации, но смысл у него только в `diff`: молча
+    # проигнорировать значило бы соврать о том, что рендер — гейт.
+    return usageError("--exit-code действует только с `render diff`",
+      "например: euterpia render diff before.wav after.wav --exit-code")
 
   if scan.batchPath.len > 0:
     return runBatch(ctx, scan)

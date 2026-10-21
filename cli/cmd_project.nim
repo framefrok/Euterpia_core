@@ -44,6 +44,8 @@ import control/history
 import control/error_frame
 import control_bridge
 import history_file
+import diff
+import project_lint
 
 # Формат отметки и часы живут в `cli/stamp.nim` (там же объяснение, почему не
 # здесь): команды получают их через этот модуль — он их и создаёт.
@@ -76,7 +78,7 @@ const
     ## Поля, которыми управляет `project set`. Один источник для разбора,
     ## текста ошибки и справки — подсказка не может разойтись с кодом.
 
-  ProjectSubcommands* = @["show", "set", "validate", "recover"]
+  ProjectSubcommands* = @["show", "set", "validate", "diff", "recover"]
     ## Подкоманды `project`: кандидаты автодополнения второго уровня (#259).
 
   DefaultTempo* = 120.0f
@@ -171,17 +173,21 @@ const
 
   ProjectSpec* = CommandSpec(
     name: "project",
-    summary: "показать, изменить или проверить файл проекта",
-    synopsis: "project <show|set|validate>",
+    summary: "показать, изменить, проверить или сравнить файл проекта",
+    synopsis: "project <show|set|validate|diff|recover>",
     subcommands: ProjectSubcommands,
     args: @[
       arg("файл", "проект: " & projectSuffixesHint() &
         "; по умолчанию " & DefaultProjectFile),
+      arg("второй.eproj", "только `project diff`: с чем сравнить"),
       arg("поле значение", "только `project set`: " & ProjectFields.join(", ")),
     ],
     options: @[
       switch("--list", "`project recover`: перечислить снимки автосохранения"),
       opt("--from", "`project recover`: конкретный снимок", value = "файл"),
+      switch("--strict", "`project validate`: строгий lint — висячие ссылки, " &
+        "дубли, неиспользуемое, значения вне диапазона (#339)"),
+      switch("--exit-code", "`project diff`: различия дают код возврата 1 (для CI)"),
     ],
     example: "euterpia project show demo.eproj",
     fields: @[
@@ -194,6 +200,11 @@ const
       field("summary", "счётчики: ноды, связи, треки, клипы"),
       field("change", "что изменил `project set`: поле, до и после"),
       field("sections", "результат `project validate`: секции и проверки"),
+      field("a", "`project diff`: первый проект"),
+      field("b", "`project diff`: второй проект"),
+      field("identical", "`project diff`: проекты совпадают"),
+      field("count", "`project diff`: сколько различий"),
+      field("items", "`project diff`: различия с адресом сущности"),
       field("snapshots", "`project recover --list`: снимки автосохранения"),
       field("version", "версия восстановленного снимка"),
       field("backup", "резервная копия пользовательского файла перед восстановлением"),
@@ -204,6 +215,11 @@ const
       "project set [файл] <поле> <значение> — поля: " & ProjectFields.join(", "),
       "project set пишет атомарно (tmp + rename) и обновляет metadata.modified",
       "project validate [файл] — отчёт о формате и целостности: провал проверки даёт код 1",
+      "project validate --strict — плюс lint: висячие ссылки, дубли, неиспользуемое, " &
+        "значения вне диапазона; уровни fail/warn/note, код возврата меняет только fail",
+      "project diff <a> <b> — что изменилось между проектами: одно различие на величину, " &
+        "адрес сущности вместо индекса массива (#337, #338)",
+      "project diff --exit-code — различия дают код 1: так CI решает «принять или откатить»",
       "project recover [файл] — восстановить последний снимок автосохранения (маркер аварии)",
       "project recover --list — перечислить снимки; --from <файл> — конкретный снимок",
       "перед восстановлением файл пользователя копируется в `<проект>.bak`",
@@ -1252,8 +1268,8 @@ proc renderValidate(
   result.add renderHuman(sections, verbose)
   let total = counts(sections)
   result.add ""
-  result.add "Итог: " & $total.ok & " ok, " & $total.warn & " warn, " &
-             $total.fail & " fail"
+  result.add "Итог: " & $total.ok & " ok, " & $total.note & " note, " &
+             $total.warn & " warn, " & $total.fail & " fail"
 
 proc validateBody(path: string; sections: seq[Section]): JsonNode =
   ## Машинный отчёт. Схема та же, что у `doctor` (#96): `sections` +
@@ -1267,16 +1283,36 @@ proc validateBody(path: string; sections: seq[Section]): JsonNode =
   result["summary"] = summaryJson(sections)
 
 proc runProjectValidate*(ctx: var Ctx; args: seq[string]): Report =
-  ## `euterpia project validate [файл]`. Проверяет то, что видно из формата
-  ## (§58): формат/версию, метаданные, ссылки в графе, тики и ноты, состояния
-  ## плагинов. Аудиоустройство не открывается, плагин в процесс CLI не
-  ## загружается (#89): это не `plugin validate` (#260) и не `doctor` (#105).
+  ## `euterpia project validate [файл] [--strict]`. Проверяет то, что видно из
+  ## формата (§58): формат/версию, метаданные, ссылки в графе, тики и ноты,
+  ## состояния плагинов. Аудиоустройство не открывается, плагин в процесс CLI
+  ## не загружается (#89): это не `plugin validate` (#260) и не `doctor` (#105).
   ##
-  ## Код возврата: 0 — только ok/warn, 1 — есть провалы или файл не разобран,
-  ## 2 — файл не читается (среда).
-  let target = singleFileArg(args, "project validate")
-  if not target.ok: return target.rep
-  let loaded = loadAt(target.path)
+  ## `--strict` добавляет lint проекта (#339): висячие ссылки, дубли,
+  ## неиспользуемое и значения вне диапазона. Секции lint идут ПОСЛЕ базовых
+  ## и добавляются только по ключу — схема `validate` без `--strict` не
+  ## меняется, поэтому старые клиенты читают тот же отчёт.
+  ##
+  ## Код возврата: 0 — только ok/note/warn, 1 — есть провалы или файл не
+  ## разобран, 2 — файл не читается (среда).
+  var targetPath = DefaultProjectFile
+  var havePath = false
+  var strict = false
+  for token in args:
+    if token == "--strict":
+      strict = true
+    elif token.startsWith("-"):
+      return usageError("неизвестный ключ: " & token,
+                        "ключ validate: --strict")
+    elif havePath:
+      return usageError("project validate принимает один проект, получено: " &
+                        targetPath & " и " & token,
+                        "например: euterpia project validate " &
+                        DefaultProjectFile)
+    else:
+      targetPath = token
+      havePath = true
+  let loaded = loadAt(targetPath)
 
   if not loaded.ok:
     # Файл не разобран: отчёт из одной проваленной проверки, но вид ответа
@@ -1285,36 +1321,39 @@ proc runProjectValidate*(ctx: var Ctx; args: seq[string]): Report =
       id: "file",
       title: "file: файл проекта",
       checks: @[mkCheck("read", "файл прочитан и разобран", csFail,
-        lines = @["путь: " & target.path, "ошибка: " & loaded.rep.error],
-        advice = validateHint(loaded.kind, target.path))])
+        lines = @["путь: " & targetPath, "ошибка: " & loaded.rep.error],
+        advice = validateHint(loaded.kind, targetPath))])
     let broken = @[section]
     return errReport(loaded.code, kindName(loaded.code), loaded.rep.error,
       hint = loaded.rep.hint,
-      lines = renderValidate(broken, target.path, ctx.verbose),
-      body = validateBody(target.path, broken))
+      lines = renderValidate(broken, targetPath, ctx.verbose),
+      body = validateBody(targetPath, broken))
 
   let proj = loaded.proj
   # Все разделы читают модель через Query API (issue #336, #373): `validate` —
   # проверка целостности ДОКУМЕНТА, но и её предмет отдаётся DTO, а не
   # внутренностями `ProjectFormat`. Исключений в archGuard больше нет.
-  let doc = openDocument(target.path, proj)
+  let doc = openDocument(targetPath, proj)
   let meta = queryMetadata(doc)
-  let sections = @[
-    validateFile(target.path),
+  var sections = @[
+    validateFile(targetPath),
     validateFormat(proj),
     validateMetadata(meta),
     validateGraph(doc),
     validateSequencer(doc),
     validatePlugins(doc),
   ]
+  if strict:
+    for section in lintSections(doc):
+      sections.add section
   let total = counts(sections)
-  let lines = renderValidate(sections, target.path, ctx.verbose)
-  let body = validateBody(target.path, sections)
+  let lines = renderValidate(sections, targetPath, ctx.verbose)
+  let body = validateBody(targetPath, sections)
 
   if total.fail > 0:
     return checkFailedError(
       "проект невалиден: провалено проверок " & $total.fail,
-      "подробности: euterpia project validate " & target.path & " --json",
+      "подробности: euterpia project validate " & targetPath & " --json",
       lines = lines, body = body)
   okReport(body = body, lines = lines)
 
@@ -1477,13 +1516,74 @@ proc runProjectRecover(ctx: var Ctx; args: seq[string]): Report =
     lines = lines)
 
 # =============================================================================
+# project diff (#338)
+# =============================================================================
+
+proc runProjectDiff*(ctx: var Ctx; args: seq[string]): Report =
+  ## `euterpia project diff <a> <b> [--exit-code]`.
+  ##
+  ## Сравнение данных, а не текста файлов: `libs/diff` сопоставляет сущности
+  ## по id, поэтому перестановка ключей и порядка нод не даёт различий, а
+  ## изменение одной величины — ровно одно различие с адресом (#337).
+  ##
+  ## Код возврата по умолчанию 0 в обоих случаях: `diff` — вопрос, а не
+  ## вердикт. `--exit-code` превращает различия в код 1 — так CI решает
+  ## «принять или откатить», и это поведение документировано.
+  var paths: seq[string] = @[]
+  var wantExitCode = false
+  for token in args:
+    if token == "--exit-code":
+      wantExitCode = true
+    elif token.startsWith("-"):
+      return usageError("неизвестный ключ: " & token, "ключ diff: --exit-code")
+    else:
+      paths.add token
+  if paths.len != 2:
+    return usageError("project diff сравнивает два проекта, получено: " &
+                      $paths.len,
+                      "например: euterpia project diff old.eproj new.eproj")
+
+  let first = loadAt(paths[0])
+  if not first.ok:
+    return projectError(first.kind, paths[0] & ": " & first.rep.error,
+                        paths[0], first.rep.hint)
+  let second = loadAt(paths[1])
+  if not second.ok:
+    return projectError(second.kind, paths[1] & ": " & second.rep.error,
+                        paths[1], second.rep.hint)
+
+  let difference = diffProjects(first.proj, second.proj)
+  var body = projectDiffJson(difference)
+  body["a"] = %paths[0]
+  body["b"] = %paths[1]
+
+  var lines: seq[string] = @[
+    CliName & " project diff — что изменилось",
+    "a: " & paths[0],
+    "b: " & paths[1],
+    "",
+  ]
+  if difference.identical:
+    lines.add "проекты совпадают: различий нет"
+  else:
+    lines.add "различий: " & $difference.items.len
+    lines.add diffLines(difference.items)
+    if wantExitCode:
+      return checkFailedError(
+        "проекты различаются: " & $difference.items.len,
+        "различия перечислены выше; машинный отчёт: --json",
+        lines = lines, body = body)
+  okReport(body = body, lines = lines)
+
+# =============================================================================
 # project
 # =============================================================================
 
 proc runProject*(ctx: var Ctx; args: seq[string]): Report =
-  ## Диспетчер `project <show|set|validate> [файл] ...`. Форма без файла —
-  ## не магия, а задокументированное умолчание (`project.eproj`): пример из
-  ## MANIFEST §19 (`euterpia project set tempo 140`) работает как написан.
+  ## Диспетчер `project <show|set|validate|diff|recover> [файл] ...`. Форма без
+  ## файла — не магия, а задокументированное умолчание (`project.eproj`):
+  ## пример из MANIFEST §19 (`euterpia project set tempo 140`) работает как
+  ## написан.
   if args.len == 0:
     return usageError("project требует подкоманду",
                       "подкоманды: " & ProjectSubcommands.join(", "))
@@ -1491,6 +1591,7 @@ proc runProject*(ctx: var Ctx; args: seq[string]): Report =
   of "show": runProjectShow(ctx, argsTail(args))
   of "set": runProjectSet(ctx, argsTail(args))
   of "validate": runProjectValidate(ctx, argsTail(args))
+  of "diff": runProjectDiff(ctx, argsTail(args))
   of "recover": runProjectRecover(ctx, argsTail(args))
   else:
     usageError("неизвестная подкоманда project: " & args[0],

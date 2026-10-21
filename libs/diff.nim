@@ -742,8 +742,6 @@ proc diffLine*(item: DiffItem): string =
     of dkRemoved: "удалено"
     of dkChanged: "изменено"
   var line = item.address
-  if item.field.len > 0:
-    line.add " (" & item.field & ")"
   line.add ": " & what
   if item.label.len > 0:
     line.add " — " & item.label

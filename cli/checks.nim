@@ -17,7 +17,12 @@ import std/json
 
 type
   CheckStatus* = enum
-    csOk, csWarn, csFail
+    csOk, csNote, csWarn, csFail
+      ## Порядок значений — порядок серьёзности: `worst` берёт максимум, а
+      ## код возврата команды смотрит только на `csFail`. «На заметку» —
+      ## находка, которая не является ни дефектом, ни поводом для тревоги:
+      ## без неё строгий отчёт либо молчит о подозрительном, либо пугает
+      ## пользователя предупреждением (issue #339).
 
   Check* = object
     id*: string
@@ -37,6 +42,7 @@ type
 proc statusName*(s: CheckStatus): string =
   case s
   of csOk: "ok"
+  of csNote: "note"
   of csWarn: "warn"
   of csFail: "fail"
 
@@ -82,11 +88,14 @@ proc sectionJson*(s: Section): JsonNode =
     checksJson.add checkJson
   result["checks"] = checksJson
 
-proc counts*(sections: seq[Section]): tuple[ok, warn, fail: int] =
+proc counts*(sections: seq[Section]): tuple[ok, note, warn, fail: int] =
+  ## Счётчики по статусам. `note` отделён от `warn` намеренно: «на заметку»
+  ## не повод менять код возврата, и смешивать их значило бы врать сводкой.
   for s in sections:
     for c in s.checks:
       case c.status
       of csOk: inc result.ok
+      of csNote: inc result.note
       of csWarn: inc result.warn
       of csFail: inc result.fail
 
@@ -107,4 +116,5 @@ proc summaryJson*(sections: seq[Section]): JsonNode =
   ## ровно тем же обходом, что отдаёт `counts`, поэтому код возврата команды
   ## не может разойтись со сводкой в `--json`.
   let total = counts(sections)
-  %*{"ok": total.ok, "warn": total.warn, "fail": total.fail}
+  %*{"ok": total.ok, "note": total.note, "warn": total.warn,
+     "fail": total.fail}
