@@ -122,6 +122,10 @@ type
     startTick*, lengthTicks*: int32
     loopEnabled*: bool
     notes*: int
+    resourceId*: int32
+      ## Аудиоресурс клипа (#107); -1 — клип не ссылается на файл. Поле
+      ## нужно валидаторам: «клип ссылается на ресурс, которого нет» — это
+      ## находка, а не повод открывать `ProjectFormat` руками (#339).
 
   TrackInfo* = object
     id*: int32
@@ -163,6 +167,16 @@ type
     nodeId*: int
     pluginId*: string
     bytes*: int
+
+  AudioResourceInfo* = object
+    ## Аудиоресурс проекта (#107) для клиентов: ссылка на файл и его
+    ## метаданные. Сэмплов здесь нет — их грузит сцена при открытии, а
+    ## валидатору и `project show` нужен только факт и размеры.
+    id*: int32
+    path*: string
+    sampleRate*, channels*, bitsPerSample*: int32
+    numFrames*: int64
+    copy*: bool
 
   ProjectSummary* = object
     ## Счётчики содержимого: клиенту они нужны чаще, чем всё остальное.
@@ -558,7 +572,8 @@ proc queryTrack*(doc: Document; trackId: int32): seq[ClipInfo] =
         id: clip.id, name: clip.name,
         handle: nestedToText(doc.handles.trackClipRef(trackId, uint32(index))),
         startTick: clip.startTick, lengthTicks: clip.lengthTicks,
-        loopEnabled: clip.loopEnabled, notes: clip.notes.len)
+        loopEnabled: clip.loopEnabled, notes: clip.notes.len,
+        resourceId: clip.resourceId)
 
 proc queryTracks*(doc: Document): seq[TrackInfo] =
   ## Дорожки в порядке файла.
@@ -643,3 +658,13 @@ proc queryPluginStates*(doc: Document): seq[PluginStateInfo] =
   for state in doc.proj.pluginStates:
     result.add PluginStateInfo(nodeId: state.nodeId, pluginId: state.pluginId,
                                bytes: state.state.len)
+
+proc queryResources*(doc: Document): seq[AudioResourceInfo] =
+  ## Аудиоресурсы в порядке файла. Клиенту нужны id и путь: по ним видно,
+  ## ссылается ли клип на существующий ресурс (#339), не открывая формат.
+  for resource in doc.proj.resources:
+    result.add AudioResourceInfo(
+      id: resource.id, path: resource.path,
+      sampleRate: resource.sampleRate, channels: resource.channels,
+      bitsPerSample: resource.bitsPerSample, numFrames: resource.numFrames,
+      copy: resource.copy)

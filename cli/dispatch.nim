@@ -87,8 +87,13 @@ proc withSessionProject(ctx: Ctx; spec: CommandSpec;
   ## Подстановка «текущего проекта» сессии (#334): `open demo.eproj` один раз,
   ## дальше `node add osc` правит именно его. Правило одно и живёт здесь, а не
   ## в каждой команде: иначе `--script` и REPL начали бы расходиться.
+  ##
+  ## Исключение — подкоманды, объявленные `filelessSubcommands` (`render diff`):
+  ## они работают с готовыми файлами, и проект сессии им не аргумент.
   result = tokens
   if ctx.sessionProject.len == 0 or not spec.takesProjectOption:
+    return
+  if tokens.len > 0 and tokens[0] in spec.filelessSubcommands:
     return
   if tokens.mentionsProject:
     return

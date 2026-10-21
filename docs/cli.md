@@ -215,17 +215,18 @@ euterpia init demo.eproj --name Demo --tempo 140
 - существующий файл не затирается: перезапись требует --force
 - расширение — подпись файла, а не формат: историческое `.eut` принимается наравне с `.eproj`, а тип файла ядро определяет по содержимому (§19/§58)
 
-### `project` — показать, изменить или проверить файл проекта
+### `project` — показать, изменить, проверить или сравнить файл проекта
 
 ```text
-euterpia project <show|set|validate>
+euterpia project <show|set|validate|diff|recover>
 ```
 
-Подкоманды: show | set | validate | recover
+Подкоманды: show | set | validate | diff | recover
 
 Аргументы:
 
 - `файл` — проект: *.eproj или *.eut; по умолчанию project.eproj
+- `второй.eproj` — только `project diff`: с чем сравнить
 - `поле значение` — только `project set`: name, author, tempo, sample-rate, time-signature
 
 Ключи:
@@ -234,6 +235,8 @@ euterpia project <show|set|validate>
 |---|---|---|---|
 | `--list` | — | — | `project recover`: перечислить снимки автосохранения |
 | `--from` | файл | — | `project recover`: конкретный снимок |
+| `--strict` | — | — | `project validate`: строгий lint — висячие ссылки, дубли, неиспользуемое, значения вне диапазона (#339) |
+| `--exit-code` | — | — | `project diff`: различия дают код возврата 1 (для CI) |
 
 Пример:
 
@@ -252,6 +255,11 @@ euterpia project show demo.eproj
 - `summary` — счётчики: ноды, связи, треки, клипы
 - `change` — что изменил `project set`: поле, до и после
 - `sections` — результат `project validate`: секции и проверки
+- `a` — `project diff`: первый проект
+- `b` — `project diff`: второй проект
+- `identical` — `project diff`: проекты совпадают
+- `count` — `project diff`: сколько различий
+- `items` — `project diff`: различия с адресом сущности
 - `snapshots` — `project recover --list`: снимки автосохранения
 - `version` — версия восстановленного снимка
 - `backup` — резервная копия пользовательского файла перед восстановлением
@@ -263,6 +271,9 @@ euterpia project show demo.eproj
 - project set [файл] <поле> <значение> — поля: name, author, tempo, sample-rate, time-signature
 - project set пишет атомарно (tmp + rename) и обновляет metadata.modified
 - project validate [файл] — отчёт о формате и целостности: провал проверки даёт код 1
+- project validate --strict — плюс lint: висячие ссылки, дубли, неиспользуемое, значения вне диапазона; уровни fail/warn/note, код возврата меняет только fail
+- project diff <a> <b> — что изменилось между проектами: одно различие на величину, адрес сущности вместо индекса массива (#337, #338)
+- project diff --exit-code — различия дают код 1: так CI решает «принять или откатить»
 - project recover [файл] — восстановить последний снимок автосохранения (маркер аварии)
 - project recover --list — перечислить снимки; --from <файл> — конкретный снимок
 - перед восстановлением файл пользователя копируется в `<проект>.bak`
@@ -1160,8 +1171,10 @@ euterpia script run demo.eus --file demo.eproj
 ### `render` — офлайн-рендер проекта в WAV без аудиоустройства
 
 ```text
-euterpia render [проект.eproj] [выход.wav] [ключи]
+euterpia render [diff] [проект.eproj] [выход.wav] [ключи]
 ```
+
+Подкоманды: diff
 
 Аргументы:
 
@@ -1186,6 +1199,7 @@ euterpia render [проект.eproj] [выход.wav] [ключи]
 | `--bits` | 16, 24 или 32 | 16 | глубина дискретизации WAV |
 | `--progress` | — | — | показывать прогресс в stderr (по умолчанию — только если stderr это терминал) |
 | `--no-progress` | — | — | не показывать прогресс |
+| `--exit-code` | — | — | `render diff`: различия дают код возврата 1 (для CI) |
 
 Пример:
 
@@ -1223,6 +1237,16 @@ euterpia render project.eproj song.wav --seconds 30
 - `stemsFailed` — сколько стемов не отрендерилось
 - `batch` — результаты батча: `project`, `out`, `ok`, `exitCode`
 - `batchFailed` — сколько проектов батча не отрендерилось
+- `a` — `render diff`: первый файл — путь и измерения
+- `b` — `render diff`: второй файл — путь и измерения
+- `identical` — `render diff`: звук совпадает
+- `count` — `render diff`: сколько различий
+- `items` — `render diff`: различия с адресами измерений
+- `differingSamples` — `render diff`: сколько сэмплов расходится
+- `totalSamples` — `render diff`: сколько сэмплов сравнено
+- `maxDelta` — `render diff`: максимальное расхождение сэмпла
+- `firstSample` — `render diff`: индекс первого расходящегося сэмпла
+- `firstFrame` — `render diff`: кадр первого расхождения
 
 Подробности:
 
@@ -1240,6 +1264,8 @@ euterpia render project.eproj song.wav --seconds 30
 - по умолчанию он включается, только если stderr — терминал: в CI и пайпах вывод остаётся байт-в-байт тем же
 - --progress / --no-progress решают явно; -q отключает
 - тихая или оборванная запись — предупреждение, а не ошибка: код 2 только у сбоя записи
+- render diff <a.wav> <b.wav> — сравнение готовых рендеров: метрики числом (пик, RMS, спектральная сводка) и поштучное расхождение сэмплов (#337, #338)
+- render diff --exit-code — различия дают код 1: гейт для CI
 
 ### `master` — сдача: LUFS/true peak, нормализация, dither, метаданные, стемы
 
@@ -1461,6 +1487,54 @@ euterpia analyze song.wav --fail-on warn
 - --fail-on info|warn|error — порог для CI: код 1 при дефектах не ниже уровня
 - --snippets <каталог> пишет короткие WAV вокруг дефектов, --heatmap <файл.pgm> — спектрограмму
 - тот же Core-API (`core/audio_inspect`) позже использует Editor (#178)
+
+### `ci` — проверка проекта одной командой: validate → graph → render → analyze
+
+```text
+euterpia ci check [проект.eproj] [ключи]
+```
+
+Подкоманды: check
+
+Аргументы:
+
+- `проект.eproj` — что проверить: *.eproj или *.eut; по умолчанию project.eproj
+
+Ключи:
+
+| Ключ | Значение | Умолчание | Смысл |
+|---|---|---|---|
+| `--strict` | — | — | строгий режим: lint проекта и порог анализа warn |
+| `--fast` | — | — | без рендера и анализа: только validate и graph check |
+| `--seconds` | секунды | 1.0 | длина фрагмента рендера для анализа, секунды |
+| `--out` | файл.wav | — | куда писать WAV фрагмента |
+
+Пример:
+
+```text
+euterpia ci check project.eproj
+```
+
+Поля ответа `--json`:
+
+- `path` — проверенный проект
+- `steps` — шаги: имя, статус, код возврата, вывод
+- `failedStep` — шаг, который не прошёл (пусто — прошли все)
+- `strict` — строгий режим включён
+- `fast` — рендер и анализ пропущены
+- `out` — WAV фрагмента, который смотрел инспектор
+- `passed` — сколько шагов прошло
+- `total` — сколько шагов выполнено (включая пропущенные)
+
+Подробности:
+
+- шаги по порядку: validate → graph check → render → analyze
+- каждый шаг — существующая команда CLI: код и сообщение те же, что при ручном запуске
+- --strict: `project validate --strict` и `analyze --fail-on warn`
+- --fast: только validate и graph check (без рендера и инспектора)
+- --seconds N: длина фрагмента для инспектора (по умолчанию 1.0 с)
+- вывод шагов сохраняется в отчёте и при провале: `steps` в `--json`
+- код возврата — код упавшего шага: 1 — данные, 2 — среда, 3 — баг
 
 ### `completion` — скрипт автодополнения оболочки
 
@@ -1851,6 +1925,60 @@ euterpia doctor --json | jq .   # агенту: сводка, секции, фа
 euterpia config get backend     # откуда взялось значение
 ```
 
+## Сравнение и проверки (v0.3.8, #337–#340)
+
+Две команды сравнения отвечают на вопрос «что изменилось» числом, а не
+«откройте два файла рядом». Обе — из `libs/diff`; CLI только печатает.
+
+```bash
+euterpia project diff old.eproj new.eproj            # что изменилось в документе
+euterpia project diff old.eproj new.eproj --exit-code # код 1 при различиях
+euterpia render diff before.wav after.wav            # что изменилось в звуке
+euterpia render diff before.wav after.wav --exit-code
+```
+
+- Одно изменение величины — **одно** различие: адрес сущности
+  (`node:1.parameters.freq`, `track:1/clip:7/note:0:60:0.velocity`,
+  `connection:1.a0->2.a0`), а не индекс массива.
+- Перестановка ключей JSON и порядка нод различием **не** считается:
+  сравниваются сущности по `id`, а не текст файла.
+- У рендеров сравнение поштучное: число расходящихся сэмплов, максимальная
+  дельта, кадр первого расхождения плюс метрики (пик, RMS, DC, спектральный
+  центроид и доли трёх полос).
+- По умолчанию код возврата 0 в обоих случаях: `diff` — вопрос, а не
+  вердикт. `--exit-code` превращает различия в код 1 — так CI решает
+  «принять или откатить». Нечитаемый файл — код 2 и в `--json` поле
+  `error`: «не прочитали» никогда не выдаётся за «совпало».
+
+Строгая проверка проекта добавляет к `validate` вопросы качества:
+
+```bash
+euterpia project validate song.eproj --strict
+```
+
+Пять секций lint: висячие ссылки (клип → ресурс, линия → нода и параметр),
+дубли идентификаторов, значения вне диапазона (уровень, панорама, нота за
+границей клипа), неиспользуемое (нода без связей, дорожка без клипов, ресурс
+без ссылок) и типы нод. Уровни: `fail` (код 1), `warn`, `note` («на заметку»,
+кода не меняет). Циклы графа не дублируются: их находит компилятор в
+`graph check` (у него на это есть вердикт `gvCycle`).
+
+Один вход для CI — шаги по порядку, вывод не теряется:
+
+```bash
+euterpia ci check song.eproj            # validate → graph → render → analyze
+euterpia ci check song.eproj --strict   # + lint и порог инспектора warn
+euterpia ci check song.eproj --fast     # только validate и graph check
+```
+
+- код возврата — код **упавшего** шага (1 — данные, 2 — среда, 3 — баг),
+  поэтому «ci check упал» и «шаг упал руками» не расходятся;
+- `--json` перечисляет все шаги с их выводом (`steps[].lines`), в том числе
+  при провале; `failedStep` называет виновника;
+- фрагмент для инспектора — `--seconds` (по умолчанию 1 с), файл
+  `--out` (по умолчанию в каталоге временных файлов);
+- `--dry-run` показывает шаги, не пишет WAV и честно пропускает анализ.
+
 ## Согласованность документации и кода
 
 Справочник обязан **не расходиться** с кодом (#96). Это обеспечивается
@@ -1880,11 +2008,6 @@ euterpia config get backend     # откуда взялось значение
 
 Со ссылками на открытые Issues (не выдаются за готовое):
 
-- Сравнение проектов и рендеров, `validate --strict` и `ci check` —
-  линия `v0.3.8` ([#337](https://github.com/framefrok/Euterpia_core/issues/337),
-  [#338](https://github.com/framefrok/Euterpia_core/issues/338),
-  [#339](https://github.com/framefrok/Euterpia_core/issues/339),
-  [#340](https://github.com/framefrok/Euterpia_core/issues/340)).
 - Шаблоны, сет-листы и пресеты параметров — `v0.3.9`
   ([#341](https://github.com/framefrok/Euterpia_core/issues/341)–[#343](https://github.com/framefrok/Euterpia_core/issues/343)).
 - `libs/watch`, поток метрик `--metrics`, интерактивный `analyze` и

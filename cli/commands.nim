@@ -35,6 +35,7 @@ import cmd_session
 import cmd_live
 import cmd_history
 import cmd_script
+import cmd_ci
 import euterpia_version
 
 var gCommands: seq[CommandDef]
@@ -302,6 +303,7 @@ proc setupRegistry*() =
     CommandDef(spec: NotationSpec, run: runNotation),
     CommandDef(spec: ImportSpec, run: runImport),
     CommandDef(spec: AnalyzeSpec, run: runAnalyze),
+    CommandDef(spec: CiSpec, run: runCi),
     CommandDef(spec: CompletionSpec, run: runCompletion),
     CommandDef(spec: DoctorSpec, run: runDoctor),
     CommandDef(spec: ConfigSpec, run: runConfig),

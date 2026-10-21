@@ -64,6 +64,12 @@ type
     subcommands*: seq[string]
       ## Позиционные варианты (`show`, `set`) — они же кандидаты
       ## автодополнения второго уровня.
+    filelessSubcommands*: seq[string]
+      ## Подкоманды, которым НЕ подставляется проект сессии (`open`).
+      ## `render diff a.wav b.wav` работает с готовыми файлами, и дописанный
+      ## `--file session.eproj` был бы чужим аргументом. Правило объявлено
+      ## данными, а не проверкой `args[0] == "diff"` в диспетчере: подкоманда
+      ## появляется вместе с правилом и проверяется `validateSpecs`.
     example*: string
       ## Одна рабочая командная строка целиком: `euterpia init demo.eproj`.
       ## Пример обязателен у каждой видимой команды — иначе справка
@@ -497,6 +503,11 @@ proc validateSpecs*(specs: seq[CommandSpec]): seq[string] =
       elif sub in subs:
         result.add where & ": вариант " & sub & " повторяется"
       subs.add sub
+
+    for sub in spec.filelessSubcommands:
+      if sub notin subs:
+        result.add where & ": подкоманда без проекта сессии " & sub &
+          " не объявлена в subcommands"
 
     for a in spec.args:
       if a.name.len == 0 or a.summary.len == 0:

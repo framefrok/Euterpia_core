@@ -189,6 +189,51 @@ jobs:
       - name: Сценарий как тест — golden-рендер (#333, #335)
         run: tools/script_scenario.sh build/euterpia
 
+      # Сравнение и проверки (v0.3.8): гейт `ci check` проходит на эталонной
+      # пьесе, а `project diff`/`render diff` действительно различают
+      # изменения. Проверяется наблюдаемое поведение команд, не внутренности.
+      - name: CI-режим и сравнение — проект проверяется одной командой (#337–#340)
+        run: |
+          set -eu
+          build/euterpia script build tests/scenarios/golden.eus \
+            --file build/ci-before.eproj --base tests/scenarios/golden.base.eproj
+          cp build/ci-before.eproj build/ci-golden.eproj
+          build/euterpia ci check build/ci-golden.eproj --strict --json > ci-check.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('ci-check.json', encoding='utf-8'))
+          assert d["ok"], d
+          assert [s["name"] for s in d["steps"]] == ["validate", "graph", "render", "analyze"], d["steps"]
+          assert all(s["status"] == "ok" for s in d["steps"]), d["steps"]
+          PY
+          # Одинаковые проекты — код 0 и ноль различий.
+          build/euterpia project diff build/ci-before.eproj \
+            build/ci-before.eproj --exit-code
+          # Одна изменённая величина — одно различие с адресом сущности, а
+          # `--exit-code` делает из этого гейт (код 1).
+          build/euterpia param set 1 freq 330 build/ci-golden.eproj
+          set +e
+          build/euterpia --json project diff build/ci-before.eproj \
+            build/ci-golden.eproj --exit-code > project-diff.json
+          code=$?
+          set -e
+          test "$code" = "1"
+          python3 - <<'PY'
+          import json
+          d = json.load(open('project-diff.json', encoding='utf-8'))
+          # Правка параметра и метка изменения (`param set` её обновляет) —
+          # каждая своим адресом; граф даёт ровно одно различие.
+          graph = [i for i in d["items"] if i["section"] == "graph"]
+          assert len(graph) == 1, d["items"]
+          assert graph[0]["address"] == "node:1.parameters.freq", d["items"]
+          assert all(i["section"] in ("graph", "metadata") for i in d["items"]), d["items"]
+          PY
+          # Детерминированный рендер: два прогона совпадают побайтово, а
+          # `render diff --exit-code` на них даёт 0.
+          build/euterpia render build/ci-golden.eproj build/one.wav --seconds 1
+          build/euterpia render build/ci-golden.eproj build/two.wav --seconds 1
+          build/euterpia render diff build/one.wav build/two.wav --exit-code
+
   # ---------------------------------------------------------------------------
   # Инспектор аудио (issue #290): эталонная пьеса собирается ТОЛЬКО CLI и
   # проверяется на дефекты. Это executable-версия критерия #275 «звучит как

@@ -264,6 +264,10 @@ proc cliOnlyCommands*(): seq[CliOnlyCommand] =
       name: "script",
       reason: "сценарии (#333): в редакторе их пишет и исполняет палитра " &
               "действий (`window.recordScript`), а CLI хранит сценарий файлом"),
+    CliOnlyCommand(
+      name: "ci",
+      reason: "проверки для CI (#340): у редактора нет конвейера сборки; в " &
+              "окне это те же `validate`, `graph check`, `render`, `analyze`"),
   ]
 
 # ==============================================================================

@@ -755,7 +755,7 @@ suite "CLI: проект — init/show/set/validate (#89)":
 
     let human = runCli(["help", "project"])
     check human.code == 0
-    check "show | set | validate | recover" in human.output
+    check "show | set | validate | diff | recover" in human.output
     check "project set" in human.output
 
     let machine = parseJson(runCli(["help", "project", "--json"]).output)
@@ -764,7 +764,7 @@ suite "CLI: проект — init/show/set/validate (#89)":
     var subs: seq[string] = @[]
     for sub in machine["subcommands"]:
       subs.add sub.getStr
-    check subs == @["show", "set", "validate", "recover"]
+    check subs == @["show", "set", "validate", "diff", "recover"]
 
 # =============================================================================
 # #258: настройки окружения
@@ -1636,7 +1636,7 @@ suite "CLI: расширение проекта — .eproj и историчес
     check "project.eproj" in initHelp.output
     check "историческое" in initHelp.output
 
-    check "render [проект.eproj]" in runCli(["help", "render"]).output
+    check "render [diff] [проект.eproj]" in runCli(["help", "render"]).output
 
     let nodeHelp = runCli(["help", "node"])
     check "--file проект.eproj" in nodeHelp.output
@@ -2249,6 +2249,8 @@ suite "CLI: спецификация команд — один источник 
       ("project", @[@["project", "show", "spec.eproj"],
                     @["project", "set", "spec.eproj", "tempo", "100"],
                     @["project", "validate", "spec.eproj"],
+                    @["project", "validate", "spec.eproj", "--strict"],
+                    @["project", "diff", "spec.eproj", "spec.eproj"],
                     @["project", "recover", "spec.eproj", "--list"]]),
       ("midi", @[@["midi", "spec.eproj", "--out", "spec.mid"],
                  @["midi", "import", "spec.eproj", "spec.mid", "--dry-run"],
@@ -2275,7 +2277,8 @@ suite "CLI: спецификация команд — один источник 
       ("render", @[@["render", "spec.eproj", "spec2.wav", "--seconds", "1"],
                    @["render", "spec.eproj", "--seconds", "1", "--dry-run"],
                    @["render", "spec.eproj", "--stems", "stems", "--seconds", "1"],
-                   @["render", "--batch", "spec.batch", "--out", "bout"]]),
+                   @["render", "--batch", "spec.batch", "--out", "bout"],
+                   @["render", "diff", "spec.wav", "spec2.wav"]]),
       ("script", @[@["script", "show", "spec.eus"],
                   @["script", "plan", "spec.eus", "--file", "scriptbase.eproj"],
                   @["script", "run", "spec.eus", "--file", "scriptrun.eproj"],
@@ -2291,6 +2294,7 @@ suite "CLI: спецификация команд — один источник 
                        "spec.eproj", "--name", "Second"]]),
       ("analyze", @[@["analyze", "spec.wav"],
                     @["analyze", "нет-такого.wav"]]),
+      ("ci", @[@["ci", "check", "spec.eproj", "--seconds", "0.1"]]),
       ("completion", @[@["completion", "bash"]]),
       ("doctor", @[@["doctor"]]),
       ("config", @[@["config", "list"], @["config", "path"],
@@ -3943,4 +3947,311 @@ suite "CLI: сценарии — script, --script и эталон (#333, #334, #
     check "история: архивирована" in r.output
     check fileExists(project & ".history.bak")
     check runCli(["undo", project]).code == 1
+
+
+# =============================================================================
+# Сравнение и проверки: project diff, render diff, validate --strict, ci check
+# (issues #337, #338, #339, #340)
+# =============================================================================
+#
+# Тест чёрный, как и остальные: критерии приёмки сформулированы в терминах
+# запуска («одинаковые проекты дают код 0», «одна изменённая величина — одно
+# различие», «сломанный проект роняет `ci check` с указанием шага»), поэтому
+# проверка внутренностей здесь ничего бы не доказала.
+
+suite "CLI: сравнение и проверки (#337–#340)":
+  let dir = getTempDir() / "euterpia_cli_diff"
+  if dirExists(dir):
+    removeDir(dir)
+  createDir(dir)
+  defer: removeDir(dir)
+
+  # Два проекта, различающиеся ОДНИМ параметром: скелет для проверок
+  # «одна величина — одно различие». Имена уникальны на тест: `init` без
+  # `--force` честно откажет на существующем файле, и второй вызов
+  # `makePair` проверял бы не то, что задумано.
+  proc makePair(tag: string): tuple[first, second: string] =
+    let firstName = tag & "-a.eproj"
+    let first = dir / firstName
+    let second = dir / (tag & "-b.eproj")
+    check runCliIn(dir, ["init", firstName]).code == 0
+    check runCliIn(dir, ["node", "add", "osc", firstName]).code == 0
+    check runCliIn(dir, ["node", "add", "gain", firstName]).code == 0
+    check runCliIn(dir, ["connect", "1:out", "2:in", firstName]).code == 0
+    check runCliIn(dir, ["param", "set", "1", "freq", "220", firstName]).code == 0
+    copyFile(first, second)
+    # Второй проект правится ДАННЫМИ, а не командой: любая команда обновляет
+    # `metadata.modified`, и «одна изменённая величина» превращалась бы в две
+    # (плюс метка времени — с секундной точностью, то есть ещё и нестабильно).
+    let edited = parseJson(readFile(second))
+    edited["graph"]["nodes"][0]["parameters"]["freq"] = %330.0
+    writeFile(second, $edited)
+    (first, second)
+
+  test "project diff: одинаковые проекты — код 0 и пустой отчёт":
+    let (first, _) = makePair("same")
+    let r = runCliIn(dir, ["project", "diff", first, first])
+    check r.code == 0
+    check "совпадают" in r.output
+    let machine = parseJson(
+      runCliIn(dir, ["--json", "project", "diff", first, first]).output)
+    check machine["identical"].getBool
+    check machine["count"].getInt == 0
+    check machine["items"].len == 0
+    check machine["a"].getStr == first
+    check machine["b"].getStr == first
+    # Без `--exit-code` различий нет тем более — код 0 и в строгом режиме.
+    check runCliIn(dir, ["project", "diff", first, first,
+                         "--exit-code"]).code == 0
+
+  test "project diff: одна величина — одно различие с адресом сущности":
+    let (first, second) = makePair("changed")
+    let r = runCliIn(dir, ["project", "diff", first, second])
+    check r.code == 0
+    check "node:1.parameters.freq" in r.output
+    let machine = parseJson(
+      runCliIn(dir, ["--json", "project", "diff", first, second]).output)
+    check not machine["identical"].getBool
+    check machine["count"].getInt == 1
+    check machine["items"][0]["address"].getStr == "node:1.parameters.freq"
+    check machine["items"][0]["kind"].getStr == "changed"
+    check machine["items"][0]["section"].getStr == "graph"
+    check machine["items"][0]["before"].getStr == "220.0"
+    check machine["items"][0]["after"].getStr == "330.0"
+
+    # `--exit-code` — гейт для CI: различия дают код 1.
+    let gated = runCliIn(dir, ["project", "diff", first, second, "--exit-code"])
+    check gated.code == 1
+    check "node:1.parameters.freq" in gated.output
+    let gatedJson = parseJson(runCliIn(
+      dir, ["--json", "project", "diff", first, second, "--exit-code"]).output)
+    check not gatedJson["ok"].getBool
+    check gatedJson["exitCode"].getInt == 1
+    check gatedJson["count"].getInt == 1
+
+  test "project diff: порядок ключей и нод не считается различием":
+    let (first, _) = makePair("reorder")
+    let original = parseJson(readFile(first))
+    # Тот же документ, но ключи и ноды в обратном порядке: сравнение идёт по
+    # сущностям, а не по тексту файла.
+    var reordered = newJObject()
+    var keys: seq[string] = @[]
+    for key, _ in original:
+      keys.add key
+    for index in countdown(keys.len - 1, 0):
+      reordered[keys[index]] = original[keys[index]]
+    if reordered["graph"]["nodes"].kind == JArray:
+      var reversed = newJArray()
+      for index in countdown(reordered["graph"]["nodes"].len - 1, 0):
+        reversed.add reordered["graph"]["nodes"][index]
+      reordered["graph"]["nodes"] = reversed
+    writeFile(dir / "reordered.eproj", $reordered)
+    let r = runCliIn(dir, ["--json", "project", "diff", first, "reordered.eproj"])
+    check r.code == 0
+    let machine = parseJson(r.output)
+    check machine["identical"].getBool
+    check machine["count"].getInt == 0
+
+  test "project diff: отказ чтения — код 1 и путь в сообщении":
+    let (first, _) = makePair("missing")
+    let missing = runCliIn(dir, ["project", "diff", first, "нет-такого.eproj"])
+    check missing.code == 1
+    check "нет-такого.eproj" in missing.errput
+    let broken = dir / "broken.eproj"
+    writeFile(broken, "{ это не проект")
+    let bad = runCliIn(dir, ["--json", "project", "diff", first, broken])
+    check bad.code == 1
+    let body = parseJson(bad.output)
+    check not body["ok"].getBool
+    check body["exitCode"].getInt == 1
+    check body["error"]["kind"].getStr == "usage"
+    # Один файл вместо двух — ошибка данных, а не «сравнил сам с собой».
+    check runCliIn(dir, ["project", "diff", first]).code == 1
+
+
+  test "render diff: одинаковый звук, расхождение и отказ чтения":
+    let (first, second) = makePair("rendiff")
+    let wavA = dir / "diff-a.wav"
+    let wavB = dir / "diff-b.wav"
+    let wavC = dir / "diff-c.wav"
+    check runCliIn(dir, ["render", first, wavA, "--seconds", "1"]).code == 0
+    check runCliIn(dir, ["render", second, wavB, "--seconds", "1"]).code == 0
+    check runCliIn(dir, ["render", first, wavC, "--seconds", "1"]).code == 0
+
+    let same = runCliIn(dir, ["--json", "render", "diff", wavA, wavC])
+    check same.code == 0
+    let sameJson = parseJson(same.output)
+    check sameJson["identical"].getBool
+    check sameJson["count"].getInt == 0
+    check sameJson["differingSamples"].getInt == 0
+    check sameJson["a"]["frames"].getInt == 48000
+    check sameJson["a"]["path"].getStr == wavA
+
+    let changed = runCliIn(dir, ["--json", "render", "diff", wavA, wavB])
+    check changed.code == 0
+    let changedJson = parseJson(changed.output)
+    check not changedJson["identical"].getBool
+    check changedJson["count"].getInt > 0
+    check changedJson["differingSamples"].getInt > 0
+    check changedJson["totalSamples"].getInt == 96000
+    check changedJson["firstFrame"].getInt >= 0
+    var addresses: seq[string] = @[]
+    for item in changedJson["items"]:
+      addresses.add item["address"].getStr
+    check "render.samples" in addresses
+    check "render.centroidHz" in addresses
+
+    # Гейт для CI: код 1 только по `--exit-code`.
+    check runCliIn(dir, ["render", "diff", wavA, wavB, "--exit-code"]).code == 1
+    check runCliIn(dir, ["render", "diff", wavA, wavC, "--exit-code"]).code == 0
+
+    # Отказ чтения — среда (2), а не «различий нет».
+    check runCliIn(dir, ["render", "diff", wavA, "нет-такого.wav"]).code == 2
+    check runCliIn(dir, ["render", "diff", wavA]).code == 1
+
+  test "render diff в сессии не получает проект сессии":
+    # `open` подставляет проект командам с `--file`, а diff работает с
+    # готовыми файлами: подстановка сделала бы его аргументом-мусором.
+    let (first, _) = makePair("session")
+    let wavA = dir / "sess-a.wav"
+    let wavB = dir / "sess-b.wav"
+    check runCliIn(dir, ["render", first, wavA, "--seconds", "1"]).code == 0
+    check runCliIn(dir, ["render", first, wavB, "--seconds", "1"]).code == 0
+    writeFile(dir / "diff-session.txt",
+              "open " & first & "\n" &
+              "render diff " & wavA & " " & wavB & "\n")
+    let r = runCliIn(dir, ["--json", "--script", "diff-session.txt"])
+    check r.code == 0
+    let lines = nonEmptyLines(r.output)
+    check lines.len >= 2
+    let last = parseJson(lines[^1])
+    check last["failed"].getInt == 0
+
+  test "validate --strict: lint-секции, уровни и код возврата":
+    let (first, _) = makePair("lint")
+    let plain = parseJson(
+      runCliIn(dir, ["--json", "project", "validate", first]).output)
+    var plainIds: seq[string] = @[]
+    for section in plain["sections"]:
+      plainIds.add section["id"].getStr
+    check "lint-references" notin plainIds
+
+    # Нода без связей — «на заметку»: это не предупреждение и не провал.
+    check runCliIn(dir, ["node", "add", "noise", first]).code == 0
+
+    let strict = runCliIn(dir, ["--json", "project", "validate", first, "--strict"])
+    check strict.code == 0
+    let body = parseJson(strict.output)
+    var ids: seq[string] = @[]
+    for section in body["sections"]:
+      ids.add section["id"].getStr
+    check ids == @["file", "format", "metadata", "graph", "sequencer", "plugins",
+                  "lint-references", "lint-duplicates", "lint-ranges",
+                  "lint-unused", "lint-types"]
+    # Сводка знает три уровня: «на заметку» не равно «предупреждению».
+    check body["summary"].hasKey("note")
+    check body["summary"]["fail"].getInt == 0
+    check body["summary"]["note"].getInt > 0
+    check "note" in runCliIn(dir, ["project", "validate", first, "--strict"]).output
+
+    # Висячая ссылка — провал: клип ссылается на несуществующий ресурс.
+    let dangling = dir / "dangling-resource.eproj"
+    writeFile(dangling, """{"format":"euterpia-project","version":2,
+      "metadata":{"name":"Dangling","sampleRate":48000,"tempo":120},
+      "sequencer":{"tracks":[{"id":1,"name":"T","volume":1.0,"pan":0.0,
+        "clips":[{"id":7,"name":"C","startTick":0,"lengthTicks":960,
+                  "resourceId":99}]}],"automationLanes":[]}}""")
+    let refused = runCliIn(dir, ["project", "validate", dangling, "--strict"])
+    check refused.code == 1
+    check "track:1/clip:7" in refused.output
+    let refusedJson = parseJson(
+      runCliIn(dir, ["--json", "project", "validate", dangling, "--strict"]).output)
+    var facts: JsonNode = nil
+    for section in refusedJson["sections"]:
+      if section["id"].getStr != "lint-references":
+        continue
+      for checkItem in section["checks"]:
+        facts = checkItem["facts"]
+    check facts != nil
+    check facts["danglingResources"].len == 1
+
+
+  test "ci check: исправный проект проходит целиком и даёт код 0":
+    let (first, _) = makePair("ciok")
+    let human = runCliIn(dir, ["ci", "check", first, "--seconds", "0.2"])
+    check human.code == 0
+    check "[ok] validate" in human.output
+    check "[ok] graph" in human.output
+    check "[ok] render" in human.output
+    check "[ok] analyze" in human.output
+    check "итог: 4 из 4" in human.output
+
+    let machine = runCliIn(dir, ["--json", "ci", "check", first,
+                                 "--seconds", "0.2"])
+    check machine.code == 0
+    let body = parseJson(machine.output)
+    check body["ok"].getBool
+    check body["failedStep"].getStr == ""
+    check body["passed"].getInt == 4
+    check body["total"].getInt == 4
+    check body["path"].getStr == first
+    check body["out"].getStr.len > 0
+    var names: seq[string] = @[]
+    for step in body["steps"]:
+      names.add step["name"].getStr
+      check step["status"].getStr == "ok"
+      # Вывод шага сохраняется и при успехе: CI видит, что проверялось.
+      check step["lines"].len > 0
+    check names == @["validate", "graph", "render", "analyze"]
+
+  test "ci check: сломанный проект падает с указанием шага и его кодом":
+    let broken = dir / "ci-broken.eproj"
+    writeFile(broken, """{"format":"euterpia-project","version":2,
+      "metadata":{"name":"Broken","sampleRate":48000,"tempo":120},
+      "graph":{"nodes":[{"id":1,"nodeType":"euterpia.osc","name":"osc",
+                         "audioOutCount":1},
+                        {"id":2,"nodeType":"euterpia.gain","name":"out",
+                         "audioInCount":1}],
+               "connections":[{"srcNodeId":1,"srcPortIdx":0,
+                               "dstNodeId":99,"dstPortIdx":0,"sigType":0}]}}""")
+    let human = runCliIn(dir, ["ci", "check", broken, "--seconds", "0.2"])
+    check human.code == 1
+    check "[fail] validate" in human.output
+    check "шаг validate не прошёл" in human.errput
+    check "99" in human.output
+    check "[ok] graph" notin human.output
+
+    let machine = runCliIn(dir, ["--json", "ci", "check", broken,
+                                 "--seconds", "0.2"])
+    check machine.code == 1
+    let body = parseJson(machine.output)
+    check not body["ok"].getBool
+    check body["exitCode"].getInt == 1
+    check body["failedStep"].getStr == "validate"
+    check body["steps"].len == 1
+    check body["steps"][0]["status"].getStr == "fail"
+    check body["steps"][0]["lines"].len > 0
+
+  test "ci check --fast и --dry-run: пропуски названы, файл не пишется":
+    let (first, _) = makePair("cifast")
+    let fast = runCliIn(dir, ["--json", "ci", "check", first, "--fast"])
+    check fast.code == 0
+    let fastBody = parseJson(fast.output)
+    check fastBody["fast"].getBool
+    check fastBody["passed"].getInt == 2
+    var skippedNames: seq[string] = @[]
+    for step in fastBody["steps"]:
+      if step["status"].getStr == "skip":
+        skippedNames.add step["name"].getStr
+    check skippedNames == @["render", "analyze"]
+
+    let dry = runCliIn(dir, ["--json", "--dry-run", "ci", "check", first,
+                             "--seconds", "0.2"])
+    check dry.code == 0
+    let dryBody = parseJson(dry.output)
+    check not fileExists(dryBody["out"].getStr)
+    var dryStatuses: seq[string] = @[]
+    for step in dryBody["steps"]:
+      dryStatuses.add step["status"].getStr
+    check dryStatuses[^1] == "skip"
 
